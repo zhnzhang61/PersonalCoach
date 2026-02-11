@@ -180,48 +180,69 @@ class DataProcessor:
         return [x for x in current if start_str <= x['date'] <= end_str]
 
     def build_ai_context(self, activity_id, block_id):
-            meta_path = os.path.join(self.paths['manual'], f"run_{activity_id}_meta.json")
-            hr_path = os.path.join(self.paths['hr_zones'], f"{activity_id}.json")
+        meta_path = os.path.join(self.paths['manual'], f"run_{activity_id}_meta.json")
+        garmin_hr_path = os.path.join(self.paths['hr_zones'], f"{activity_id}.json")
+        custom_hr_path = os.path.join(self.paths['manual'], "user_zones.json") # <--- NEW PATH
 
-            if not os.path.exists(meta_path): return None
-            with open(meta_path) as f: run_meta = json.load(f)
-            
-            # Pull HR Zones
-            hr_zones = []
-            if os.path.exists(hr_path):
-                try:
-                    with open(hr_path) as f: hr_zones = json.load(f)
-                except: pass
+        if not os.path.exists(meta_path): return None
+        with open(meta_path) as f: run_meta = json.load(f)
+        
+        # --- HR ZONE LOGIC ---
+        hr_zones_display = []
+        
+        # 1. Priority: Check for Manual User Zones
+        if os.path.exists(custom_hr_path):
+            try:
+                with open(custom_hr_path) as f:
+                    custom_zones = json.load(f)
+                    # Convert dict to list for AI context
+                    for name, range_str in custom_zones.items():
+                        hr_zones_display.append({"name": name, "range": range_str})
+            except Exception as e:
+                print(f"Error reading user_zones.json: {e}")
 
-            # Find the date from the activity summary
-            run_date = datetime.date.today().isoformat()
-            for f in os.listdir(self.paths['activities']):
-                if not f.endswith('.json'): continue
-                try:
-                    with open(os.path.join(self.paths['activities'], f)) as jf:
-                        data = json.load(jf)
-                        items = data if isinstance(data, list) else [data]
-                        for item in items:
-                            if str(item.get('activityId')) == str(activity_id):
-                                run_date = item.get('startTimeLocal')[:10]
-                                break
-                except: pass
+        # 2. Fallback: Use Garmin Data if no manual file exists
+        if not hr_zones_display and os.path.exists(garmin_hr_path):
+            try:
+                with open(garmin_hr_path) as f: 
+                    garmin_zones = json.load(f)
+                    # Map Garmin format to our display format
+                    for z in garmin_zones:
+                        if 'zoneLowBoundary' in z:
+                            hr_zones_display.append({
+                                "name": f"Zone {z['zoneNumber']}",
+                                "range": f">{z['zoneLowBoundary']} bpm"
+                            })
+            except: pass
+        # ---------------------
 
-            # Get Block Info
-            block = next((b for b in self.get_blocks() if b['id'] == block_id), {})
-            
-            # Get Fatigue Log
-            date_obj = datetime.date.fromisoformat(run_date)
-            start_7 = (date_obj - timedelta(days=7)).isoformat()
-            aux_events = self.get_aux_in_range(start_7, run_date)
+        # Find Date (Existing Logic)
+        run_date = datetime.date.today().isoformat()
+        for f in os.listdir(self.paths['activities']):
+            if not f.endswith('.json'): continue
+            try:
+                with open(os.path.join(self.paths['activities'], f)) as jf:
+                    data = json.load(jf)
+                    items = data if isinstance(data, list) else [data]
+                    for item in items:
+                        if str(item.get('activityId')) == str(activity_id):
+                            run_date = item.get('startTimeLocal')[:10]
+                            break
+            except: pass
 
-            return {
-                "block_goal": block.get('name'),
-                "run_context": {
-                    "date": run_date,
-                    "user_name": run_meta.get('name'),
-                    "category_stats": run_meta.get('category_stats'), # The new summary
-                    "hr_zones": hr_zones
-                },
-                "auxiliary_activities_last_7d": aux_events
-            }
+        # Get Block & Fatigue
+        block = next((b for b in self.get_blocks() if b['id'] == block_id), {})
+        date_obj = datetime.date.fromisoformat(run_date)
+        start_7 = (date_obj - timedelta(days=7)).isoformat()
+        aux_events = self.get_aux_in_range(start_7, run_date)
+
+        return {
+            "block_goal": block.get('name'),
+            "run_context": {
+                "date": run_date,
+                "user_name": run_meta.get('name'),
+                "category_stats": run_meta.get('category_stats'),
+                "hr_zones": hr_zones_display # <--- Passing the cleaner list
+            },
+            "auxiliary_activities_last_7d": aux_events
+        }
