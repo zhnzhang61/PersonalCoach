@@ -53,7 +53,8 @@ class AIAnalyst:
         zones_text = "None Available"
         if run_ctx.get('hr_zones'):
             zones = run_ctx['hr_zones']
-            zones_text = ", ".join([f"Z{z['zoneNumber']}: >{z['zoneLowBoundary']}bpm" for z in zones])
+            # Handles both Custom (name/range) and Fallback formats
+            zones_text = "\n".join([f"- {z['name']}: {z['range']}" for z in zones])
 
         perf_data = json.dumps(run_ctx.get('category_stats', []), indent=2)
 
