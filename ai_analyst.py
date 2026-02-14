@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 
 class AIAnalyst:
-    def __init__(self, model="models/gemini-flash-latest"):
+    def __init__(self, model="gemini-flash-latest"):
         self.model_id = model if model.startswith("models/") else f"models/{model}"
         self.api_key = self._find_api_key()
         
@@ -22,64 +22,77 @@ class AIAnalyst:
 
     def _find_api_key(self):
         """Hunts for the GEMINI_KEY in Environment, Local .env, or Streamlit Secrets."""
-        
-        # 1. Check Standard Environment
         key = os.getenv("GEMINI_KEY")
         if key: return key
         
-        # 2. Force Load .env (Fix for VS Code terminal issues)
-        # Look for .env in the same directory as this script
         current_dir = Path(__file__).resolve().parent
         env_path = current_dir / ".env"
-        
         if env_path.exists():
             load_dotenv(dotenv_path=env_path, override=True)
             key = os.getenv("GEMINI_KEY")
             if key: return key
             
-        # 3. Check Streamlit Secrets (Cloud Fallback)
-        try:
-            return st.secrets["GEMINI_KEY"]
-        except:
-            return None
+        try: return st.secrets["GEMINI_KEY"]
+        except: return None
 
     def analyze_run(self, context_dict):
         if not self.client:
-            return "❌ Configuration Error: GEMINI_KEY not found. Please check your .env file."
+            return "❌ Configuration Error: GEMINI_KEY not found."
 
         run_ctx = context_dict['run_context']
         
-        # Format Data
+        # 1. Format Baseline Zones
         zones_text = "None Available"
         if run_ctx.get('hr_zones'):
             zones = run_ctx['hr_zones']
-            # Handles both Custom (name/range) and Fallback formats
             zones_text = "\n".join([f"- {z['name']}: {z['range']}" for z in zones])
 
+        # 2. Format Execution Data (Grouped by Subjective Category)
         perf_data = json.dumps(run_ctx.get('category_stats', []), indent=2)
 
+        # 3. Format Fatigue
         fatigue = "None reported."
         if context_dict.get('auxiliary_activities_last_7d'):
             fatigue = "\n".join([f"- {a['date']}: {a['type']} ({a['desc']})" for a in context_dict['auxiliary_activities_last_7d']])
 
+        # --- THE RECALIBRATION PROMPT ---
         prompt = f"""
-        ACT AS AN ELITE RUNNING COACH. 
-        Analyze this workout based on the user's categorized lap data.
+        ACT AS AN ELITE SPORTS DATA SCIENTIST.
 
-        **ATHLETE CONTEXT:**
-        - Goal: {context_dict.get('block_goal', 'General Fitness')}
-        - HR Zones: {zones_text}
-        - Recent Fatigue: {fatigue}
+        **THE PHILOSOPHY:**
+        1. **Subjective Feel is GROUND TRUTH:** The athlete's category label (e.g., "Steady Effort") is the absolute truth.
+        2. **Metrics are Malleable:** Heart rate varies by day (heat, fatigue, caffeine). 
+        3. **Goal:** Do not judge. Instead, PROPOSE a new Heart Rate Map based on today's reality.
 
-        **WORKOUT EXECUTION:**
-        - Date: {run_ctx.get('date')}
+        **DATA INPUTS:**
+        - **Baseline Map (The Theory):** {zones_text}
+        
+        - **Run Data (The Reality):**
         {perf_data}
 
+        - **Context:** {fatigue}
+
         **INSTRUCTIONS:**
-        1. Compare the 'Avg HR' of each category against the athlete's HR Zones.
-        2. Evaluate the pace consistency for 'Steady Effort' vs 'LT Effort' blocks.
-        3. Provide a 'Verdict' (PASS/FAIL).
-        4. Keep it concise, professional, and slightly witty.
+        1. For each category run today, identify the **Actual Average HR**.
+        2. Compare it to the Baseline Zone.
+        3. If the difference is > 5 bpm, flag it as a **Significant Drift**.
+
+        **OUTPUT FORMAT (Markdown):**
+
+        ### 🧠 Run Analysis
+        *Brief, insightful observation of the run context (warmup issues, cardiac drift, or perfect execution).*
+
+        ### 🗺️ Proposed Map (Today's Reality)
+        *Based on your 'Ground Truth' feel, here is what your heart rate actually was:*
+
+        | Effort Category | Baseline Zone | **Proposed Mapping** | Drift |
+        | :--- | :--- | :--- | :--- |
+        | [Category Name] | [e.g. 145-160] | **[Actual Avg HR]** | [e.g. +7 bpm 🚨] |
+
+        *(Only include categories present in this run. Mark drifts > 5bpm with 🚨)*
+
+        ### 💡 Recommendation
+        *If a 🚨 alert was triggered: Is this a permanent fitness change (update your zones!) or temporary context (heat/fatigue/stress)?*
         """
         
         try:
