@@ -4,6 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from pathlib import Path
 import json
+import pandas as pd
 
 class AIAnalyst:
     def __init__(self, model="gemini-flash-latest"):
@@ -103,3 +104,61 @@ class AIAnalyst:
             return response.text
         except Exception as e:
             return f"❌ AI Analysis Failed: {str(e)}"
+
+    def analyze_holistic_health(self, history_df, yesterday_raw):
+        """
+        Analyzes 14-day trends + yesterday's deep sleep data.
+        """
+        if not self.client: return "❌ No API Key."
+
+        # 1. Summarize History
+        trends = history_df.to_markdown()
+
+        # 2. Extract Key Sleep Details from Raw JSON
+        sleep_dto = yesterday_raw.get('dailySleepDTO', {})
+        sleep_details = {
+            "deep_sleep_min": sleep_dto.get('deepSleepSeconds', 0) / 60,
+            "rem_sleep_min": sleep_dto.get('remSleepSeconds', 0) / 60,
+            "awake_min": sleep_dto.get('awakeSleepSeconds', 0) / 60,
+            "feedback": sleep_dto.get('sleepScoreFeedback'),
+            "stress_during_sleep": yesterday_raw.get('avgSleepStress')
+        }
+
+        prompt = f"""
+        ACT AS A HOLISTIC HEALTH & PERFORMANCE COACH.
+        
+        **OBJECTIVE:** Analyze the athlete's recovery status based on LONG-TERM TRENDS and YESTERDAY'S SLEEP.
+
+        **DATA SOURCE 1: 14-Day History (CSV)**
+        {trends}
+        *(Columns: sleep_score, rhr, hrv, run_miles, stress)*
+
+        **DATA SOURCE 2: Last Night's Deep Dive (JSON Extract)**
+        - Deep Sleep: {sleep_details['deep_sleep_min']:.0f} mins
+        - REM Sleep: {sleep_details['rem_sleep_min']:.0f} mins
+        - Awake/Restless: {sleep_details['awake_min']:.0f} mins
+        - Garmin Feedback: "{sleep_details['feedback']}"
+        - Overnight Stress: {sleep_details['stress_during_sleep']} (Low is good)
+
+        **ANALYSIS REQUIRED (Markdown):**
+        
+        ### 📉 Trend Detection
+        *Look at the 14-day history. Is RHR trending up? Is HRV crashing? How does Sleep Score correlate with Run Miles?*
+        *Be specific: "Your RHR has crept up 3bpm since your long run on [Date]."*
+
+        ### 🛌 Last Night's Quality
+        *Don't just look at the score. Look at Deep vs. REM. Is the athlete physically recovered (Deep) but mentally tired (REM)?*
+
+        ### 🚦 Readiness Verdict
+        *Synthesize everything into a training recommendation.*
+        *Options: [GREEN LIGHT: Push Hard], [YELLOW LIGHT: Aerobic Only], [RED LIGHT: Rest].*
+        """
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            return f"❌ Analysis Failed: {str(e)}"
