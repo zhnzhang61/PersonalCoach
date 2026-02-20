@@ -99,7 +99,8 @@ class DataProcessor:
             sleep_sec = sleep_dto.get('sleepTimeSeconds', 0)
             
             # RHR
-            rhr_val = rhr.get('restingHeartRate')
+            rhr_metrics = rhr.get('allMetrics', {}).get('metricsMap', {}).get('WELLNESS_RESTING_HEART_RATE', [])
+            rhr_val = rhr_metrics[0].get('value') if rhr_metrics else None
             
             # HRV (Nightly Avg)
             hrv_val = hrv.get('hrvSummary', {}).get('weeklyAvg') # Fallback
