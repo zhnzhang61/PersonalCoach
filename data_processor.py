@@ -55,7 +55,7 @@ class DataProcessor:
 
     # --- NEW: HEALTH AGGREGATION LOGIC ---
 
-    def compile_health_ledger(self, days_back=60):
+    def compile_health_ledger(self, days_back=120):
         """
         Aggregates disparate JSON files into a single CSV timeline.
         """
