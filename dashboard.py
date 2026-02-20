@@ -14,7 +14,8 @@ def check_dependencies():
         'google.genai': 'google-genai', 
         'garminconnect': 'garminconnect',
         'dotenv': 'python-dotenv',
-        'tabulate': 'tabulate'
+        'tabulate': 'tabulate',
+        'altair': 'altair' # <--- Added for advanced HRV charting
     }
     for import_name, pip_name in packages.items():
         if importlib.util.find_spec(import_name) is None:
@@ -30,6 +31,7 @@ if __name__ == "__main__":
 import streamlit as st
 import pandas as pd
 import datetime
+import altair as alt # <--- Imported Altair
 from data_processor import DataProcessor
 from ai_analyst import AIAnalyst
 
@@ -230,12 +232,80 @@ with tab_health:
         with col3: safe_metric("HRV (ms)", "hrv", "hrv")
         with col4: safe_metric("Stress", "stress", "stress", inverse=True)
 
-        # 3. Charts
-        st.subheader("Trends: Sleep Quality vs. Training Volume")
-        st.line_chart(df[['sleep_score', 'run_miles']])
+        st.divider()
+
+        # ==========================================
+        # 3. NEW FEATURE: HRV STATUS CHART (Garmin Style)
+        # ==========================================
+        st.subheader("HRV Status (7-Day Average vs Baseline)")
         
-        st.subheader("Physiological Load: RHR vs. Stress")
-        st.line_chart(df[['rhr', 'stress']])
+        # Calculate 7-day average and dynamic baseline (21-day window)
+        df['hrv_7d'] = df['hrv'].rolling(window=7, min_periods=1).mean()
+        df['baseline_mean'] = df['hrv'].rolling(window=21, min_periods=1).mean()
+        # Use standard deviation to create the baseline range, clipping to at least +/- 3.5ms
+        df['baseline_std'] = df['hrv'].rolling(window=21, min_periods=1).std().clip(lower=3.5)
+        df['baseline_high'] = df['baseline_mean'] + df['baseline_std']
+        df['baseline_low'] = df['baseline_mean'] - df['baseline_std']
+
+        # Determine if Balanced or Unbalanced
+        def determine_hrv_status(row):
+            if pd.isna(row['hrv_7d']) or pd.isna(row['baseline_low']): 
+                return "Unknown"
+            if row['hrv_7d'] < row['baseline_low'] or row['hrv_7d'] > row['baseline_high']:
+                return "Unbalanced"
+            return "Balanced"
+
+        df['hrv_status'] = df.apply(determine_hrv_status, axis=1)
+
+        # Prepare dataframe for Altair (reset index to make 'date' a column again)
+        chart_df = df.reset_index().dropna(subset=['hrv_7d'])
+
+        # Layer 1: The Baseline Range (Shaded Grey/Green area)
+        baseline_band = alt.Chart(chart_df).mark_area(opacity=0.15, color='#888888').encode(
+            x=alt.X('date:T', title='Date'),
+            y=alt.Y('baseline_low:Q', title='HRV (ms)', scale=alt.Scale(zero=False)),
+            y2='baseline_high:Q'
+        )
+
+        # Layer 2: The Line connecting the dots
+        hrv_line = alt.Chart(chart_df).mark_line(color='#A0A0A0', size=1.5).encode(
+            x='date:T',
+            y='hrv_7d:Q'
+        )
+
+        # Layer 3: The Colored Status Points
+        hrv_points = alt.Chart(chart_df).mark_circle(size=80).encode(
+            x='date:T',
+            y='hrv_7d:Q',
+            color=alt.Color('hrv_status:N', 
+                            scale=alt.Scale(domain=['Balanced', 'Unbalanced', 'Unknown'], 
+                                            range=['#2ca02c', '#d62728', '#7f7f7f']),
+                            legend=alt.Legend(title="Status")),
+            tooltip=[
+                alt.Tooltip('date:T', title='Date'),
+                alt.Tooltip('hrv_7d:Q', title='7-Day Avg HRV', format='.1f'),
+                alt.Tooltip('hrv:Q', title='Last Night HRV', format='.1f'),
+                alt.Tooltip('baseline_low:Q', title='Baseline Low', format='.1f'),
+                alt.Tooltip('baseline_high:Q', title='Baseline High', format='.1f'),
+                alt.Tooltip('hrv_status:N', title='Status')
+            ]
+        )
+
+        # Combine layers and render
+        final_hrv_chart = alt.layer(baseline_band, hrv_line, hrv_points).properties(
+            height=300
+        ).interactive()
+
+        st.altair_chart(final_hrv_chart, use_container_width=True)
+
+        # Existing Charts
+        col_charts_1, col_charts_2 = st.columns(2)
+        with col_charts_1:
+            st.subheader("Sleep Quality vs. Volume")
+            st.line_chart(df[['sleep_score', 'run_miles']])
+        with col_charts_2:
+            st.subheader("RHR vs. Stress")
+            st.line_chart(df[['rhr', 'stress']])
 
         # 4. AI Holistic Analysis
         st.divider()
