@@ -15,15 +15,23 @@ def check_dependencies():
         'garminconnect': 'garminconnect',
         'dotenv': 'python-dotenv',
         'tabulate': 'tabulate',
-        'altair': 'altair' # <--- Added for advanced HRV charting
+        'altair': 'altair',
+        'langgraph': 'langgraph',
+        'langchain_google_genai': 'langchain-google-genai',
+        'langchain_core': 'langchain-core',
+        'langgraph.checkpoint.sqlite': 'langgraph-checkpoint-sqlite'
     }
     for import_name, pip_name in packages.items():
-        if importlib.util.find_spec(import_name) is None:
+        try:
+            if importlib.util.find_spec(import_name) is None:
+                install_package(pip_name)
+        except ModuleNotFoundError:
             install_package(pip_name)
+
+check_dependencies()
 
 if __name__ == "__main__":
     if "streamlit" not in sys.modules:
-        check_dependencies()
         cmd = [sys.executable, "-m", "streamlit", "run", __file__]
         subprocess.run(cmd)
         sys.exit()
@@ -31,15 +39,22 @@ if __name__ == "__main__":
 import streamlit as st
 import pandas as pd
 import datetime
-import altair as alt # <--- Imported Altair
+import altair as alt
 from data_processor import DataProcessor
-from ai_analyst import AIAnalyst
+from agentic_coach import AgenticCoach 
 
 st.set_page_config(layout="wide", page_title="Training Block Manager")
 
 # Initialize Processors
 processor = DataProcessor()
-analyst = AIAnalyst(model="gemini-flash-latest")
+
+# Initialize the LangGraph Agent globally
+if "agent" not in st.session_state:
+    st.session_state.agent = AgenticCoach()
+    st.session_state.thread_id = "unified_copilot_thread" 
+
+agent = st.session_state.agent
+thread_id = st.session_state.thread_id
 
 st.title("🏃‍♂️ Training & Health Dashboard")
 
@@ -56,7 +71,6 @@ tab_train, tab_health = st.tabs(["🏋️ Training Log", "❤️ Recovery & Heal
 # TAB 1: EXISTING TRAINING LOGIC
 # ==========================================
 with tab_train:
-    # Block & Week Selection
     blocks = processor.get_blocks()
     if not blocks: st.stop()
     current_block = blocks[0] 
@@ -65,7 +79,6 @@ with tab_train:
     selected_week_label = st.selectbox("Select Week", list(week_opts.keys()), index=0)
     current_week = week_opts[selected_week_label]
 
-    # Layout
     col_main, col_sidebar = st.columns([3, 1])
 
     with col_sidebar:
@@ -100,7 +113,6 @@ with tab_train:
             has_splits = os.path.exists(splits_path)
 
             with st.container(border=True):
-                # Top Row: Stats & Buttons
                 c1, c2 = st.columns([4, 1])
                 with c1:
                     display_name = meta.get('name', run.get('activityName', 'Run'))
@@ -127,11 +139,11 @@ with tab_train:
                             with st.spinner("Coach is thinking..."):
                                 ctx = processor.build_ai_context(run_id, current_block['id'])
                                 if ctx:
-                                    report = analyst.analyze_run(ctx)
+                                    # Write the analysis to the Unified Thread
+                                    report = agent.analyze_run(ctx, thread_id=thread_id)
                                     st.session_state[f"report_{run_id}"] = report
                                     st.rerun()
 
-                # --- COACH'S REVIEW ---
                 if f"report_{run_id}" in st.session_state:
                     st.markdown("---")
                     st.markdown(f"### 📋 Coach's Review")
@@ -140,7 +152,6 @@ with tab_train:
                         del st.session_state[f"report_{run_id}"]
                         st.rerun()
 
-                # --- INLINE EDITOR ---
                 if st.session_state.get('editing_run_id') == run_id:
                     st.divider()
                     st.markdown(f"#### ✏️ Categorize Laps")
@@ -200,7 +211,6 @@ with tab_train:
 with tab_health:
     st.header("Holistic Health View")
     
-    # 1. Load Data
     stats = processor.get_health_stats()
     if not stats:
         st.warning("No health data found. Please run sync.")
@@ -209,11 +219,9 @@ with tab_health:
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
 
-        # 2. Key Metrics Row
         col1, col2, col3, col4 = st.columns(4)
         last_day = df.iloc[-1]
         
-        # Helper for safer delta calculation
         def safe_metric(label, key, avg_key=None, inverse=False):
             val = last_day.get(key)
             if pd.isna(val): return st.metric(label, "N/A")
@@ -234,20 +242,13 @@ with tab_health:
 
         st.divider()
 
-        # ==========================================
-        # 3. NEW FEATURE: HRV STATUS CHART (Garmin Style)
-        # ==========================================
         st.subheader("HRV Status (7-Day Average vs Baseline)")
-        
-        # Calculate 7-day average and dynamic baseline (21-day window)
         df['hrv_7d'] = df['hrv'].rolling(window=7, min_periods=1).mean()
         df['baseline_mean'] = df['hrv'].rolling(window=21, min_periods=1).mean()
-        # Use standard deviation to create the baseline range, clipping to at least +/- 3.5ms
         df['baseline_std'] = df['hrv'].rolling(window=21, min_periods=1).std().clip(lower=3.5)
         df['baseline_high'] = df['baseline_mean'] + df['baseline_std']
         df['baseline_low'] = df['baseline_mean'] - df['baseline_std']
 
-        # Determine if Balanced or Unbalanced
         def determine_hrv_status(row):
             if pd.isna(row['hrv_7d']) or pd.isna(row['baseline_low']): 
                 return "Unknown"
@@ -257,23 +258,19 @@ with tab_health:
 
         df['hrv_status'] = df.apply(determine_hrv_status, axis=1)
 
-        # Prepare dataframe for Altair (reset index to make 'date' a column again)
         chart_df = df.reset_index().dropna(subset=['hrv_7d'])
 
-        # Layer 1: The Baseline Range (Shaded Grey/Green area)
         baseline_band = alt.Chart(chart_df).mark_area(opacity=0.15, color='#888888').encode(
             x=alt.X('date:T', title='Date'),
             y=alt.Y('baseline_low:Q', title='HRV (ms)', scale=alt.Scale(zero=False)),
             y2='baseline_high:Q'
         )
 
-        # Layer 2: The Line connecting the dots
         hrv_line = alt.Chart(chart_df).mark_line(color='#A0A0A0', size=1.5).encode(
             x='date:T',
             y='hrv_7d:Q'
         )
 
-        # Layer 3: The Colored Status Points
         hrv_points = alt.Chart(chart_df).mark_circle(size=80).encode(
             x='date:T',
             y='hrv_7d:Q',
@@ -291,14 +288,9 @@ with tab_health:
             ]
         )
 
-        # Combine layers and render
-        final_hrv_chart = alt.layer(baseline_band, hrv_line, hrv_points).properties(
-            height=300
-        ).interactive()
-
+        final_hrv_chart = alt.layer(baseline_band, hrv_line, hrv_points).properties(height=300).interactive()
         st.altair_chart(final_hrv_chart, use_container_width=True)
 
-        # Existing Charts
         col_charts_1, col_charts_2 = st.columns(2)
         with col_charts_1:
             st.subheader("Sleep Quality vs. Volume")
@@ -307,17 +299,72 @@ with tab_health:
             st.subheader("RHR vs. Stress")
             st.line_chart(df[['rhr', 'stress']])
 
-        # 4. AI Holistic Analysis
+        # ==========================================
+        # 4. LANGGRAPH AGENT CHATBOX
+        # ==========================================
         st.divider()
-        st.subheader("🤖 Dr. AI Health Check")
-        if st.button("Analyze Recent Health Trends"):
-            with st.spinner("Reading sleep files and analyzing trends..."):
-                # Fetch yesterday's raw sleep file for deep dive
+        st.subheader("🤖 Unified AI Co-Pilot")
+        st.caption("Ask questions about your pacing, HRV, sleep, or training blocks. The Supervisor will route it to the right expert.")
+
+        # Button to trigger Doctor Analysis
+        if st.button("🩺 Analyze Today's Health"):
+            with st.spinner("Doctor is reviewing your charts..."):
                 yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
                 raw_sleep = processor.load_json_safe(processor.paths['sleep'], f"{yesterday_str}.json")
-                
-                analysis = analyst.analyze_holistic_health(
-                    history_df=df.tail(14), # Last 14 days context
-                    yesterday_raw=raw_sleep
+                agent.analyze_health(
+                    history_df=df.tail(14), 
+                    yesterday_raw=raw_sleep, 
+                    thread_id=thread_id
                 )
-                st.markdown(analysis)
+                st.rerun()
+
+        # Input block placed ABOVE the history rendering so spinner appears at the top
+        if prompt := st.chat_input("Ask your agents a question..."):
+            with st.spinner("Supervisor is routing your request..."):
+                today_str = datetime.date.today().isoformat()
+                context = f"""
+                INTERNAL DATA FACT SHEET:
+                Today's Date is: {today_str}
+                Today's HRV: {last_day.get('hrv', 'unknown')} ms. 
+                Sleep Score: {last_day.get('sleep_score', 'unknown')}. 
+                Last 7 days run miles: {df.tail(7)['run_miles'].sum():.1f}.
+                """
+                agent.chat(
+                    user_input=prompt, 
+                    thread_id=thread_id, 
+                    system_context=context
+                )
+            st.rerun()
+
+        # Fetch and process history
+        history = agent.get_history(thread_id)
+        chat_msgs = [msg for msg in history if msg.type != "system"]
+
+        # Group messages into Interaction Pairs (User + Assistant)
+        interactions = []
+        current_interaction = []
+        
+        for msg in chat_msgs:
+            if msg.type == "human":
+                if current_interaction:
+                    interactions.append(current_interaction)
+                current_interaction = [msg]
+            else:
+                current_interaction.append(msg)
+                
+        if current_interaction:
+            interactions.append(current_interaction)
+
+        # Slice to the last 10 interactions, then Reverse so newest is at the top
+        recent_interactions = interactions[-10:][::-1]
+
+        # Display the groups
+        for interaction in recent_interactions:
+            for msg in interaction:
+                content = msg.content
+                if isinstance(content, list):
+                    content = "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
+                    
+                role = "user" if msg.type == "human" else "assistant"
+                with st.chat_message(role):
+                    st.markdown(content)
