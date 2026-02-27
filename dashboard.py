@@ -2,6 +2,7 @@ import sys
 import subprocess
 import os
 import importlib.util
+import json  # <--- Added for permanent lap memory
 
 def install_package(package_name):
     print(f"📦 Installing missing package: {package_name}...")
@@ -139,7 +140,6 @@ with tab_train:
                             with st.spinner("Coach is thinking..."):
                                 ctx = processor.build_ai_context(run_id, current_block['id'])
                                 if ctx:
-                                    # Write the analysis to the Unified Thread
                                     report = agent.analyze_run(ctx, thread_id=thread_id)
                                     st.session_state[f"report_{run_id}"] = report
                                     st.rerun()
@@ -152,58 +152,112 @@ with tab_train:
                         del st.session_state[f"report_{run_id}"]
                         st.rerun()
 
+                # =========================================
+                # NEW DYNAMIC LAP EDITOR (NO FORM)
+                # =========================================
                 if st.session_state.get('editing_run_id') == run_id:
                     st.divider()
                     st.markdown(f"#### ✏️ Categorize Laps")
                     
-                    with st.form(key=f"edit_form_{run_id}"):
+                    # 1. State Management & Permanent Disk Storage
+                    lap_save_path = os.path.join("data", "get_activity_splits", f"{run_id}_cats.json")
+                    state_key = f"lap_cats_{run_id}"
+                    
+                    laps = processor.get_run_laps(run_id)
+                    
+                    if laps:
+                        # Load previous saved categories if they exist, else default
+                        if state_key not in st.session_state:
+                            if os.path.exists(lap_save_path):
+                                with open(lap_save_path, 'r') as f:
+                                    st.session_state[state_key] = json.load(f)
+                            else:
+                                st.session_state[state_key] = ["Hold Back Easy"] * len(laps)
+                                
                         new_name = st.text_input("Run Name", value=meta.get('name', run.get('activityName', '')))
                         w_num = st.number_input("Week #", value=meta.get('week_num', current_week['week_num']))
                         
-                        laps = processor.get_run_laps(run_id)
+                        lap_rows = []
+                        for i, lap in enumerate(laps):
+                            d_mi = lap.get('distance', 0) / 1609.34
+                            t_sec = lap.get('duration', 0)
+                            pace = "N/A"
+                            if t_sec > 0 and d_mi > 0:
+                                p_min = (t_sec / 60) / d_mi
+                                pace = f"{int(p_min)}:{int((p_min % 1) * 60):02d}"
+                            
+                            # Safely fetch state
+                            cat = st.session_state[state_key][i] if i < len(st.session_state[state_key]) else "Hold Back Easy"
+                            
+                            lap_rows.append({
+                                "Lap": i + 1,
+                                "Dist (mi)": round(d_mi, 2),
+                                "Pace": pace,
+                                "Avg HR": lap.get('averageHR', 0),
+                                "category": cat 
+                            })
                         
-                        if laps:
-                            lap_rows = []
-                            for i, lap in enumerate(laps):
-                                d_mi = lap.get('distance', 0) / 1609.34
-                                t_sec = lap.get('duration', 0)
-                                pace = "N/A"
-                                if t_sec > 0 and d_mi > 0:
-                                    p_min = (t_sec / 60) / d_mi
-                                    pace = f"{int(p_min)}:{int((p_min % 1) * 60):02d}"
+                        cat_options = ["Hold Back Easy", "Steady Effort", "Increasing Effort", "Marathon", "LT Effort", "VO2Max", "Sprint", "Rest"]
+                        
+                        # 2. Batch Edit UI
+                        st.markdown("##### ⚡️ Batch Edit Laps")
+                        col_batch1, col_batch2, col_batch3 = st.columns([2, 2, 1])
+                        with col_batch1:
+                            batch_laps = st.multiselect("Select Laps to update:", options=[r["Lap"] for r in lap_rows], key=f"bl_{run_id}")
+                        with col_batch2:
+                            batch_cat = st.selectbox("Assign Category:", options=cat_options, key=f"bc_{run_id}")
+                        with col_batch3:
+                            st.write("") # Formatting padding
+                            st.write("")
+                            if st.button("Apply to Selected", key=f"apply_{run_id}"):
+                                for lap_num in batch_laps:
+                                    idx = lap_num - 1
+                                    st.session_state[state_key][idx] = batch_cat
+                                st.rerun() # Immediately visually updates the grid
                                 
-                                lap_rows.append({
-                                    "Lap": i + 1,
-                                    "Dist (mi)": round(d_mi, 2),
-                                    "Pace": pace,
-                                    "Avg HR": lap.get('averageHR', 0),
-                                    "category": "Hold Back Easy" 
-                                })
-                            
-                            cat_options = ["Hold Back Easy", "Steady Effort", "Increasing Effort", "Marathon", "LT Effort", "VO2Max", "Sprint", "Rest"]
-                            
-                            edited_laps = st.data_editor(
-                                lap_rows,
-                                column_config={
-                                    "category": st.column_config.SelectboxColumn("Category", options=cat_options, required=True)
-                                },
-                                hide_index=True,
-                                key=f"editor_{run_id}"
-                            )
-
-                            if st.form_submit_button("Save & Calculate"):
+                        # 3. Individual Laps Grid
+                        st.markdown("##### 📝 Individual Laps")
+                        edited_laps = st.data_editor(
+                            lap_rows,
+                            column_config={
+                                "category": st.column_config.SelectboxColumn("Category", options=cat_options, required=True)
+                            },
+                            hide_index=True,
+                            key=f"editor_{run_id}"
+                        )
+                        
+                        # Sync any manual cell clicks instantly back to session state
+                        for i, row in enumerate(edited_laps):
+                            if i < len(st.session_state[state_key]):
+                                st.session_state[state_key][i] = row['category']
+                                
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        
+                        # 4. Save Actions
+                        c1, c2, c3 = st.columns([1, 1, 4])
+                        with c1:
+                            if st.button("Save & Calculate", type="primary", key=f"save_{run_id}"):
+                                # Apply final categories to the underlying lap objects
                                 for i, row in enumerate(edited_laps):
                                     laps[i]['category'] = row['category']
                                 
+                                # PERMANENTLY save lap assignments to disk
+                                with open(lap_save_path, 'w') as f:
+                                    json.dump(st.session_state[state_key], f)
+                                    
                                 cat_stats = processor.calculate_category_stats(laps)
                                 processor.save_run_metadata(run_id, w_num, new_name, cat_stats)
                                 st.session_state['editing_run_id'] = None
                                 st.rerun()
-                        else:
-                            st.error("No valid laps found.")
-                            if st.form_submit_button("Cancel"):
+                        with c2:
+                            if st.button("Cancel", key=f"cancel_{run_id}"):
                                 st.session_state['editing_run_id'] = None
                                 st.rerun()
+                    else:
+                        st.error("No valid laps found.")
+                        if st.button("Cancel", key=f"cancel_err_{run_id}"):
+                            st.session_state['editing_run_id'] = None
+                            st.rerun()
 
 # ==========================================
 # TAB 2: RECOVERY & HEALTH
@@ -306,7 +360,6 @@ with tab_health:
         st.subheader("🤖 Unified AI Co-Pilot")
         st.caption("Ask questions about your pacing, HRV, sleep, or training blocks. The Supervisor will route it to the right expert.")
 
-        # Button to trigger Doctor Analysis
         if st.button("🩺 Analyze Today's Health"):
             with st.spinner("Doctor is reviewing your charts..."):
                 yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -318,7 +371,6 @@ with tab_health:
                 )
                 st.rerun()
 
-        # Input block placed ABOVE the history rendering so spinner appears at the top
         if prompt := st.chat_input("Ask your agents a question..."):
             with st.spinner("Supervisor is routing your request..."):
                 today_str = datetime.date.today().isoformat()
@@ -336,11 +388,9 @@ with tab_health:
                 )
             st.rerun()
 
-        # Fetch and process history
         history = agent.get_history(thread_id)
         chat_msgs = [msg for msg in history if msg.type != "system"]
 
-        # Group messages into Interaction Pairs (User + Assistant)
         interactions = []
         current_interaction = []
         
@@ -355,10 +405,8 @@ with tab_health:
         if current_interaction:
             interactions.append(current_interaction)
 
-        # Slice to the last 10 interactions, then Reverse so newest is at the top
         recent_interactions = interactions[-10:][::-1]
 
-        # Display the groups
         for interaction in recent_interactions:
             for msg in interaction:
                 content = msg.content
