@@ -280,12 +280,13 @@ class DataProcessor:
             })
         return results
 
-    def save_run_metadata(self, activity_id, week_num, run_name, category_stats):
+    def save_run_metadata(self, activity_id, week_num, run_name, category_stats, notes=""):
         meta = {
             "name": run_name,
             "week_num": week_num,
             "category_stats": category_stats,
-            "updated_at": datetime.datetime.now().isoformat()
+            "updated_at": datetime.datetime.now().isoformat(),
+            "notes": notes
         }
         with open(os.path.join(self.paths['manual'], f"run_{activity_id}_meta.json"), 'w') as f:
             json.dump(meta, f, indent=4)
@@ -356,3 +357,141 @@ class DataProcessor:
             },
             "auxiliary_activities_last_7d": aux_events
         }
+    
+    def get_activity_telemetry(self, activity_id, laps=None, downsample_sec=10):
+        """
+        Loads the raw telemetry JSON, calculates pace manually via cumulative distance/time,
+        assigns Lap numbers, and builds the downsampled AI CSV.
+        """
+        import os
+        import json
+        import pandas as pd
+        import numpy as np
+
+        file_path = os.path.join("data", "get_activity_details", f"{activity_id}.json")
+        if not os.path.exists(file_path):
+            return None, None
+
+        with open(file_path, 'r') as f:
+            raw_data = json.load(f)
+
+        # 1. Map Metrics (We completely ignore the FIT 'factor' now, as the JSON floats are already true values!)
+        metrics_desc = raw_data.get('metricDescriptors', [])
+        metric_map = { m['key']: m['metricsIndex'] for m in metrics_desc }
+
+        def get_val(row_metrics, key):
+            idx = metric_map.get(key)
+            if idx is not None and idx < len(row_metrics):
+                return row_metrics[idx]
+            return None
+
+        # 2. Build Lap Boundaries (Cumulative seconds)
+        lap_boundaries = []
+        if laps:
+            cum_time = 0
+            for i, lap in enumerate(laps):
+                cum_time += lap.get('duration', 0)
+                lap_boundaries.append((cum_time, i + 1))
+        
+        def get_lap(sec):
+            if not lap_boundaries: return 1
+            for end_time, lap_num in lap_boundaries:
+                if sec <= end_time:
+                    return lap_num
+            return len(lap_boundaries)
+
+        # 3. Parse Data
+        # 3. Parse Data
+        details = raw_data.get('activityDetailMetrics', [])
+        parsed_data = []
+        
+        prev_dist = 0.0
+        prev_time = 0.0
+        
+        # REMOVED enumerate() - we rely on Garmin's actual timestamps now
+        for row in details:
+            metrics = row.get('metrics', [])
+            
+            sum_time = get_val(metrics, 'sumElapsedDuration')
+            if sum_time is None:
+                continue # Skip if Garmin didn't record a timestamp for this row
+                
+            current_sec = int(sum_time) # THIS IS THE TRUE X-AXIS TIME
+            
+            hr = get_val(metrics, 'directHeartRate')
+            sum_dist = get_val(metrics, 'sumDistance')
+            
+            # PACE FIX: Calculate manually from cumulative distance and time
+            speed_mps = None
+            if sum_dist is not None:
+                d_dist = sum_dist - prev_dist
+                d_time = sum_time - prev_time
+                if d_time > 0:
+                    speed_mps = d_dist / d_time
+                else:
+                    speed_mps = 0.0
+                prev_dist = sum_dist
+                prev_time = sum_time
+                
+            # Find true integer cadence
+            cadence = get_val(metrics, 'directRunCadence')
+            if cadence is None:
+                cadence = get_val(metrics, 'directDoubleCadence')
+                if cadence is not None:
+                    cadence = cadence / 2 
+            
+            if cadence is not None and cadence < 120:
+                cadence = cadence * 2
+                
+            # ELEVATION FIX: Grab absolute altitude
+            elevation = get_val(metrics, 'directElevation')
+
+            parsed_data.append({
+                "Lap": get_lap(current_sec), # Send the true time to the lap calculator
+                "Second": current_sec,       # The X-axis is now real elapsed time!
+                "HeartRate": hr,
+                "Speed_mps": speed_mps,
+                "Cadence": cadence,
+                "Elevation": elevation
+            })
+
+        df_raw = pd.DataFrame(parsed_data)
+        df_raw.ffill(inplace=True) # Patch 1-second sensor dropouts
+
+        # For the UI Chart, keep Pace as a raw numeric decimal so Altair can plot it
+        df_raw['Pace'] = np.where((df_raw['Speed_mps'] > 0.5), 26.8224 / df_raw['Speed_mps'], np.nan)
+
+        # 4. Downsample for AI
+        df_raw['IntervalBlock'] = df_raw['Second'] // downsample_sec
+        
+        df_ai = df_raw.groupby('IntervalBlock').agg({
+            'Lap': 'first',            
+            'Second': 'first',         
+            'HeartRate': 'mean',       
+            'Speed_mps': 'mean',       
+            'Cadence': 'mean',         
+            # Calculate Elevation Change over the interval using the absolute elevation values
+            'Elevation': lambda x: x.dropna().iloc[-1] - x.dropna().iloc[0] if len(x.dropna()) > 0 else 0  
+        }).reset_index(drop=True)
+
+        df_ai.rename(columns={'Elevation': 'ElevationChange'}, inplace=True)
+
+        # Clean AI DataFrame
+        df_ai['HeartRate'] = pd.to_numeric(df_ai['HeartRate'], errors='coerce').round(0)
+        df_ai['Cadence'] = pd.to_numeric(df_ai['Cadence'], errors='coerce').round(0)
+        df_ai['ElevationChange'] = pd.to_numeric(df_ai['ElevationChange'], errors='coerce').round(1)
+        
+        # Convert Speed to "MM:SS" format for the LLM
+        def speed_to_pace_str(mps):
+            if pd.isna(mps) or mps < 0.5: return "N/A"
+            pace_min = 26.8224 / mps
+            mins = int(pace_min)
+            secs = int((pace_min - mins) * 60)
+            return f"{mins}:{secs:02d}"
+            
+        df_ai['Pace'] = df_ai['Speed_mps'].apply(speed_to_pace_str)
+
+        # Final layout for AI context window
+        df_ai = df_ai[['Lap', 'Second', 'Pace', 'HeartRate', 'Cadence', 'ElevationChange']]
+
+        return df_raw, df_ai

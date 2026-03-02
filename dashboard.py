@@ -2,7 +2,6 @@ import sys
 import subprocess
 import os
 import importlib.util
-import json  # <--- Added for permanent lap memory
 
 def install_package(package_name):
     print(f"📦 Installing missing package: {package_name}...")
@@ -65,6 +64,10 @@ if st.sidebar.button("🔄 Sync Health Data"):
         processor.compile_health_ledger()
     st.sidebar.success("Updated!")
 
+st.sidebar.divider()
+st.sidebar.subheader("⚙️ AI Telemetry Settings")
+downsample_sec = st.sidebar.slider("Sampling Interval (sec)", min_value=5, max_value=60, value=10, step=5, help="Controls how granular the data sent to the AI is. Lower = More detail but more tokens.")
+
 # --- TABS ---
 tab_train, tab_health = st.tabs(["🏋️ Training Log", "❤️ Recovery & Health"])
 
@@ -112,7 +115,10 @@ with tab_train:
             
             splits_path = os.path.join("data", "get_activity_splits", f"{run_id}.json")
             has_splits = os.path.exists(splits_path)
+            telemetry_path = os.path.join("data", "get_activity_details", f"{run_id}.json")
+            has_telemetry = os.path.exists(telemetry_path)
 
+            laps = processor.get_run_laps(run_id)
             with st.container(border=True):
                 c1, c2 = st.columns([4, 1])
                 with c1:
@@ -140,9 +146,68 @@ with tab_train:
                             with st.spinner("Coach is thinking..."):
                                 ctx = processor.build_ai_context(run_id, current_block['id'])
                                 if ctx:
-                                    report = agent.analyze_run(ctx, thread_id=thread_id)
+                                    # --- NEW: INJECT METADATA DIRECTLY TO AI CONTEXT ---
+                                    # This ensures it reads your edited UI name, or falls back to Garmin's default
+                                    ctx['run_context']['name'] = meta.get('name', run.get('activityName', 'Unnamed Workout'))
+                                    
+                                    # This ensures your new subjective notes are passed to the Coach
+                                    ctx['run_context']['notes'] = meta.get('notes', '')
+                                    
+                                    df_ai = None
+                                    if has_telemetry and hasattr(processor, 'get_activity_telemetry'):
+                                        _, df_ai = processor.get_activity_telemetry(run_id, laps=laps, downsample_sec=downsample_sec)
+                                        
+                                    report = agent.analyze_run(ctx, thread_id=f"run_analysis_{run_id}", telemetry_df=df_ai)
+                                    
                                     st.session_state[f"report_{run_id}"] = report
                                     st.rerun()
+
+                # --- TELEMETRY VIEWER ---
+                if has_telemetry and hasattr(processor, 'get_activity_telemetry'):
+                    with st.expander("📈 View Telemetry Curves"):
+                        # --- UPDATE THIS ---
+                        df_raw, df_ai = processor.get_activity_telemetry(run_id, laps=laps, downsample_sec=downsample_sec)
+                        if df_raw is not None and not df_raw.empty:
+                            tab_hr, tab_pace, tab_elev, tab_ai_view = st.tabs(["❤️ Heart Rate", "👟 Pace", "⛰️ Elevation", "🤖 AI Data View"])
+                            
+                            with tab_hr:
+                                hr_chart = alt.Chart(df_raw.dropna(subset=['HeartRate'])).mark_line(color='#ff4b4b').encode(
+                                    x=alt.X('Second:Q', title='Time (seconds)'),
+                                    y=alt.Y('HeartRate:Q', scale=alt.Scale(zero=False), title='Heart Rate (bpm)'),
+                                    tooltip=['Second', 'HeartRate']
+                                ).interactive()
+                                st.altair_chart(hr_chart, use_container_width=True)
+                                
+                            with tab_pace:
+                                # Inverse Y axis for pace (lower is faster)
+                                pace_df = df_raw.dropna(subset=['Pace']).copy()
+                                pace_df['Pace'] = pace_df['Pace'].clip(lower=4, upper=15)
+                                pace_chart = alt.Chart(pace_df).mark_line(color='#4b4bff').encode(
+                                    x=alt.X('Second:Q', title='Time (seconds)'),
+                                    y=alt.Y('Pace:Q', scale=alt.Scale(reverse=True), title='Pace (min/mi)'),
+                                    tooltip=['Second', 'Pace']
+                                ).interactive()
+                                st.altair_chart(pace_chart, use_container_width=True)
+                            
+                            with tab_elev:
+                                elev_df = df_raw.dropna(subset=['Elevation']).copy()
+                                
+                                # Use mark_area to make it look like a solid hill/terrain profile
+                                elev_area = alt.Chart(elev_df).mark_area(opacity=0.3, color='#2ca02c').encode(
+                                    x=alt.X('Second:Q', title='Time (seconds)'),
+                                    y=alt.Y('Elevation:Q', scale=alt.Scale(zero=False), title='Elevation'),
+                                )
+                                elev_line = alt.Chart(elev_df).mark_line(color='#2ca02c', size=2).encode(
+                                    x=alt.X('Second:Q', title='Time (seconds)'),
+                                    y=alt.Y('Elevation:Q', scale=alt.Scale(zero=False), title='Elevation'),
+                                    tooltip=['Second', 'Elevation']
+                                )
+                                
+                                st.altair_chart((elev_area + elev_line).interactive(), use_container_width=True)
+
+                            with tab_ai_view:
+                                st.caption(f"This is the heavily downsampled CSV ({downsample_sec}s intervals) sent to the AI Coach.")
+                                st.dataframe(df_ai, hide_index=True)
 
                 if f"report_{run_id}" in st.session_state:
                     st.markdown("---")
@@ -153,28 +218,21 @@ with tab_train:
                         st.rerun()
 
                 # =========================================
-                # NEW DYNAMIC LAP EDITOR (NO FORM)
+                # NEW DYNAMIC LAP EDITOR
                 # =========================================
                 if st.session_state.get('editing_run_id') == run_id:
                     st.divider()
                     st.markdown(f"#### ✏️ Categorize Laps")
                     
-                    # 1. State Management & Permanent Disk Storage
-                    lap_save_path = os.path.join("data", "get_activity_splits", f"{run_id}_cats.json")
                     state_key = f"lap_cats_{run_id}"
-                    
                     laps = processor.get_run_laps(run_id)
                     
                     if laps:
-                        # Load previous saved categories if they exist, else default
                         if state_key not in st.session_state:
-                            if os.path.exists(lap_save_path):
-                                with open(lap_save_path, 'r') as f:
-                                    st.session_state[state_key] = json.load(f)
-                            else:
-                                st.session_state[state_key] = ["Hold Back Easy"] * len(laps)
+                            st.session_state[state_key] = ["Hold Back Easy"] * len(laps)
                                 
                         new_name = st.text_input("Run Name", value=meta.get('name', run.get('activityName', '')))
+                        notes = st.text_area("Subjective Notes (Optional)", value=meta.get('notes', ''), help="How did the run feel? Any aches, fatigue, or pacing thoughts?")
                         w_num = st.number_input("Week #", value=meta.get('week_num', current_week['week_num']))
                         
                         lap_rows = []
@@ -186,7 +244,6 @@ with tab_train:
                                 p_min = (t_sec / 60) / d_mi
                                 pace = f"{int(p_min)}:{int((p_min % 1) * 60):02d}"
                             
-                            # Safely fetch state
                             cat = st.session_state[state_key][i] if i < len(st.session_state[state_key]) else "Hold Back Easy"
                             
                             lap_rows.append({
@@ -199,7 +256,6 @@ with tab_train:
                         
                         cat_options = ["Hold Back Easy", "Steady Effort", "Increasing Effort", "Marathon", "LT Effort", "VO2Max", "Sprint", "Rest"]
                         
-                        # 2. Batch Edit UI
                         st.markdown("##### ⚡️ Batch Edit Laps")
                         col_batch1, col_batch2, col_batch3 = st.columns([2, 2, 1])
                         with col_batch1:
@@ -207,15 +263,14 @@ with tab_train:
                         with col_batch2:
                             batch_cat = st.selectbox("Assign Category:", options=cat_options, key=f"bc_{run_id}")
                         with col_batch3:
-                            st.write("") # Formatting padding
+                            st.write("") 
                             st.write("")
                             if st.button("Apply to Selected", key=f"apply_{run_id}"):
                                 for lap_num in batch_laps:
                                     idx = lap_num - 1
                                     st.session_state[state_key][idx] = batch_cat
-                                st.rerun() # Immediately visually updates the grid
+                                st.rerun() 
                                 
-                        # 3. Individual Laps Grid
                         st.markdown("##### 📝 Individual Laps")
                         edited_laps = st.data_editor(
                             lap_rows,
@@ -226,31 +281,28 @@ with tab_train:
                             key=f"editor_{run_id}"
                         )
                         
-                        # Sync any manual cell clicks instantly back to session state
                         for i, row in enumerate(edited_laps):
                             if i < len(st.session_state[state_key]):
                                 st.session_state[state_key][i] = row['category']
                                 
                         st.markdown("<br>", unsafe_allow_html=True)
                         
-                        # 4. Save Actions
                         c1, c2, c3 = st.columns([1, 1, 4])
                         with c1:
                             if st.button("Save & Calculate", type="primary", key=f"save_{run_id}"):
-                                # Apply final categories to the underlying lap objects
-                                for i, row in enumerate(edited_laps):
-                                    laps[i]['category'] = row['category']
-                                
-                                # PERMANENTLY save lap assignments to disk
-                                with open(lap_save_path, 'w') as f:
-                                    json.dump(st.session_state[state_key], f)
+                                for i, cat in enumerate(st.session_state[state_key]):
+                                    laps[i]['category'] = cat
                                     
                                 cat_stats = processor.calculate_category_stats(laps)
-                                processor.save_run_metadata(run_id, w_num, new_name, cat_stats)
+                                processor.save_run_metadata(run_id, w_num, new_name, cat_stats, notes=notes)
+                                
+                                del st.session_state[state_key]
                                 st.session_state['editing_run_id'] = None
                                 st.rerun()
                         with c2:
                             if st.button("Cancel", key=f"cancel_{run_id}"):
+                                if state_key in st.session_state:
+                                    del st.session_state[state_key]
                                 st.session_state['editing_run_id'] = None
                                 st.rerun()
                     else:
@@ -373,6 +425,7 @@ with tab_health:
 
         if prompt := st.chat_input("Ask your agents a question..."):
             with st.spinner("Supervisor is routing your request..."):
+                import datetime
                 today_str = datetime.date.today().isoformat()
                 context = f"""
                 INTERNAL DATA FACT SHEET:
