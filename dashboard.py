@@ -59,10 +59,30 @@ thread_id = st.session_state.thread_id
 st.title("🏃‍♂️ Training & Health Dashboard")
 
 # --- GLOBAL SIDEBAR ACTIONS ---
-if st.sidebar.button("🔄 Sync Health Data"):
+# --- GLOBAL SIDEBAR ACTIONS ---
+st.sidebar.subheader("🔄 Data Management")
+
+if st.sidebar.button("☁️ Download Garmin Data"):
+    with st.spinner("Syncing with Garmin Connect... (This may take a minute)"):
+        try:
+            # Run the sync script and capture the output
+            result = subprocess.run([sys.executable, "garmin_sync.py"], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                st.sidebar.success("Garmin data downloaded successfully!")
+            else:
+                st.sidebar.error("Garmin sync failed.")
+                with st.sidebar.expander("View Error Log"):
+                    st.code(result.stderr or result.stdout)
+        except Exception as e:
+            st.sidebar.error(f"Execution error: {e}")
+
+if st.sidebar.button("📊 Update Health Ledger"):
     with st.spinner("Aggregating daily metrics..."):
         processor.compile_health_ledger()
-    st.sidebar.success("Updated!")
+    st.sidebar.success("Health ledger updated!")
+
+st.sidebar.divider()
 
 st.sidebar.divider()
 st.sidebar.subheader("⚙️ AI Telemetry Settings")
