@@ -130,6 +130,13 @@ class AgenticCoach:
         except:
             return []
 
+    def follow_up_chat(self, user_input: str, thread_id: str):
+        """
+        Continues the conversation in an existing thread without injecting 
+        the heavy system context prompt again.
+        """
+        return self.chat(user_input=user_input, thread_id=thread_id, system_context=None)
+
     def analyze_run(self, context_dict: dict, thread_id: str, telemetry_df=None):
         run_ctx = context_dict['run_context']
         run_name = run_ctx.get('name', 'Unnamed Workout')
