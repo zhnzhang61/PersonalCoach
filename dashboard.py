@@ -245,6 +245,35 @@ with tab_train:
                     st.markdown("---")
                     st.markdown(f"### 📋 Coach's Review")
                     st.markdown(st.session_state[f"report_{run_id}"])
+                    
+                    # --- NEW: FOLLOW-UP CHAT UI ---
+                    st.markdown("#### 💬 Discuss this Run")
+                    
+                    # 1. 渲染历史对话记录
+                    chat_history = processor.get_run_chat_history(run_id)
+                    for msg in chat_history:
+                        with st.chat_message(msg["role"]):
+                            st.markdown(msg["content"])
+                            
+                    # 2. 渲染输入框并处理新问题
+                    if run_prompt := st.chat_input("Ask a follow-up about this run...", key=f"chat_input_{run_id}"):
+                        # 立即存入本地并展示用户的提问
+                        processor.save_run_chat_message(run_id, "user", run_prompt)
+                        with st.chat_message("user"):
+                            st.markdown(run_prompt)
+                        
+                        # 呼叫 AI 进行回答
+                        with st.chat_message("assistant"):
+                            with st.spinner("Coach is reviewing the telemetry..."):
+                                # 发送到这个 run_id 专属的 Thread 中
+                                response = agent.follow_up_chat(user_input=run_prompt, thread_id=f"run_analysis_{run_id}")
+                                st.markdown(response)
+                                # 将 AI 的回答存入本地
+                                processor.save_run_chat_message(run_id, "assistant", response)
+                        
+                        st.rerun() # 刷新 UI 状态
+
+                    st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("Close Report", key=f"close_{run_id}"):
                         del st.session_state[f"report_{run_id}"]
                         st.rerun()

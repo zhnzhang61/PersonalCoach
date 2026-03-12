@@ -497,3 +497,29 @@ class DataProcessor:
         df_ai = df_ai[['Lap', 'Second', 'Pace', 'HeartRate', 'Cadence', 'ElevationChange']]
 
         return df_raw, df_ai
+
+
+    def get_run_chat_history(self, activity_id):
+        """Loads the saved follow-up chat history for a specific run."""
+        path = os.path.join(self.paths['manual'], f"run_{activity_id}_chat.json")
+        if not os.path.exists(path):
+            return []
+        with open(path, 'r') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return []
+
+    def save_run_chat_message(self, activity_id, role, content):
+        """Appends a single message to the run's chat history JSON."""
+        path = os.path.join(self.paths['manual'], f"run_{activity_id}_chat.json")
+        history = self.get_run_chat_history(activity_id)
+        
+        history.append({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "role": role,
+            "content": content
+        })
+        
+        with open(path, 'w') as f:
+            json.dump(history, f, indent=4)
