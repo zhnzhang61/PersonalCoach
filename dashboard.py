@@ -100,7 +100,19 @@ with tab_train:
     current_block = blocks[0] 
     weeks = processor.get_weeks_for_block(current_block['id'])
     week_opts = {w['label']: w for w in weeks}
-    selected_week_label = st.selectbox("Select Week", list(week_opts.keys()), index=0)
+    
+    # --- 新增: 计算当前周的索引 ---
+    today_iso = datetime.date.today().isoformat()
+    default_idx = 0
+    for i, w in enumerate(weeks):
+        if w['start'] <= today_iso <= w['end']:
+            default_idx = i
+            break
+        elif today_iso > w['end']:
+            default_idx = i # 如果今天已经超过了课表，默认停留在最后一周
+
+    # 把 default_idx 传给 selectbox
+    selected_week_label = st.selectbox("Select Week", list(week_opts.keys()), index=default_idx)
     current_week = week_opts[selected_week_label]
 
     col_main, col_sidebar = st.columns([3, 1])
