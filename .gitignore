@@ -5,3 +5,4 @@ data/
 __pycache__/data_processor.cpython-314.pyc
 .DS_Store
 __pycache__/data_processor.cpython-314.pyc
+*.pyc
