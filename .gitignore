@@ -5,4 +5,6 @@ data/
 __pycache__/data_processor.cpython-314.pyc
 .DS_Store
 __pycache__/data_processor.cpython-314.pyc
+# 忽略 Python 缓存文件
+__pycache__/
 *.pyc
