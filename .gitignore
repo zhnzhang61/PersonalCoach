@@ -1,10 +1,13 @@
-data/activities/10990089677.fit
+# 数据和缓存文件
 data/
+*.fit
+
+# 环境变量和秘钥
 .env
+
+# 苹果系统垃圾文件
 .DS_Store
-__pycache__/data_processor.cpython-314.pyc
-.DS_Store
-__pycache__/data_processor.cpython-314.pyc
-# 忽略 Python 缓存文件
+
+# Python 编译缓存
 __pycache__/
 *.pyc

@@ -7,19 +7,19 @@ import sys
 import subprocess
 from dotenv import load_dotenv
 
-# --- Dependency Check ---
-required = {'garminconnect', 'python-dotenv'}
-installed = set()
-try:
-    import pkg_resources
-    installed = {pkg.key for pkg in pkg_resources.working_set}
-except ImportError:
-    pass
+# # --- Dependency Check ---
+# required = {'garminconnect', 'python-dotenv'}
+# installed = set()
+# try:
+#     import pkg_resources
+#     installed = {pkg.key for pkg in pkg_resources.working_set}
+# except ImportError:
+#     pass
 
-missing = required - installed
-if missing:
-    print(f"Installing missing dependencies: {missing}")
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', *missing])
+# missing = required - installed
+# if missing:
+#     print(f"Installing missing dependencies: {missing}")
+#     subprocess.check_call([sys.executable, '-m', 'pip', 'install', *missing])
 
 from garminconnect import Garmin
 load_dotenv()
@@ -163,4 +163,4 @@ if __name__ == "__main__":
     if not email or not password: print("⚠️ Credentials not found.")
     else:
         syncer = GarminSync(email, password)
-        if syncer.connect(): syncer.run_sync(days_back=20, activity_limit=50)
+        if syncer.connect(): syncer.run_sync(days_back=100, activity_limit=500)
