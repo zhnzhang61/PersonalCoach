@@ -282,14 +282,17 @@ class DataProcessor:
             })
         return results
 
-    def save_run_metadata(self, activity_id, week_num, run_name, category_stats, notes=""):
+    def save_run_metadata(self, activity_id, week_num, run_name, category_stats, notes="", lap_categories=None):
         meta = {
             "name": run_name,
             "week_num": week_num,
             "category_stats": category_stats,
             "updated_at": datetime.datetime.now().isoformat(),
-            "notes": notes
+            "notes": notes,
+            # 强行写入，哪怕没传也给个空列表，这样你能明确看到它到底存没存！
+            "lap_categories": lap_categories if lap_categories else [] 
         }
+            
         with open(os.path.join(self.paths['manual'], f"run_{activity_id}_meta.json"), 'w') as f:
             json.dump(meta, f, indent=4)
 

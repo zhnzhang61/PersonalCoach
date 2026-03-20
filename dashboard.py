@@ -290,7 +290,12 @@ with tab_train:
                     
                     if laps:
                         if state_key not in st.session_state:
-                            st.session_state[state_key] = ["Hold Back Easy"] * len(laps)
+                            # 尝试读取历史记录的每一圈标签
+                            saved_cats = meta.get('lap_categories', [])
+                            if saved_cats and len(saved_cats) == len(laps):
+                                st.session_state[state_key] = saved_cats.copy()
+                            else:
+                                st.session_state[state_key] = ["Hold Back Easy"] * len(laps)
                                 
                         new_name = st.text_input("Run Name", value=meta.get('name', run.get('activityName', '')))
                         notes = st.text_area("Subjective Notes (Optional)", value=meta.get('notes', ''), help="How did the run feel? Any aches, fatigue, or pacing thoughts?")
@@ -351,11 +356,14 @@ with tab_train:
                         c1, c2, c3 = st.columns([1, 1, 4])
                         with c1:
                             if st.button("Save & Calculate", type="primary", key=f"save_{run_id}"):
+                                lap_cats_to_save = []
                                 for i, cat in enumerate(st.session_state[state_key]):
                                     laps[i]['category'] = cat
+                                    lap_cats_to_save.append(cat)
                                     
                                 cat_stats = processor.calculate_category_stats(laps)
-                                processor.save_run_metadata(run_id, w_num, new_name, cat_stats, notes=notes)
+                                # 在这里把每一圈的标签列表传给存储函数
+                                processor.save_run_metadata(run_id, w_num, new_name, cat_stats, notes=notes, lap_categories=lap_cats_to_save)
                                 
                                 del st.session_state[state_key]
                                 st.session_state['editing_run_id'] = None
