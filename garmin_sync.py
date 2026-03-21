@@ -163,4 +163,4 @@ if __name__ == "__main__":
     if not email or not password: print("⚠️ Credentials not found.")
     else:
         syncer = GarminSync(email, password)
-        if syncer.connect(): syncer.run_sync(days_back=100, activity_limit=500)
+        if syncer.connect(): syncer.run_sync(days_back=20, activity_limit=50)
