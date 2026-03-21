@@ -7,28 +7,28 @@ def install_package(package_name):
     print(f"📦 Installing missing package: {package_name}...")
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', package_name])
 
-def check_dependencies():
-    packages = {
-        'streamlit': 'streamlit',
-        'pandas': 'pandas',
-        'google.genai': 'google-genai', 
-        'garminconnect': 'garminconnect',
-        'dotenv': 'python-dotenv',
-        'tabulate': 'tabulate',
-        'altair': 'altair',
-        'langgraph': 'langgraph',
-        'langchain_google_genai': 'langchain-google-genai',
-        'langchain_core': 'langchain-core',
-        'langgraph.checkpoint.sqlite': 'langgraph-checkpoint-sqlite'
-    }
-    for import_name, pip_name in packages.items():
-        try:
-            if importlib.util.find_spec(import_name) is None:
-                install_package(pip_name)
-        except ModuleNotFoundError:
-            install_package(pip_name)
+# def check_dependencies():
+#     packages = {
+#         'streamlit': 'streamlit',
+#         'pandas': 'pandas',
+#         'google.genai': 'google-genai', 
+#         'garminconnect': 'garminconnect',
+#         'dotenv': 'python-dotenv',
+#         'tabulate': 'tabulate',
+#         'altair': 'altair',
+#         'langgraph': 'langgraph',
+#         'langchain_google_genai': 'langchain-google-genai',
+#         'langchain_core': 'langchain-core',
+#         'langgraph.checkpoint.sqlite': 'langgraph-checkpoint-sqlite'
+#     }
+#     for import_name, pip_name in packages.items():
+#         try:
+#             if importlib.util.find_spec(import_name) is None:
+#                 install_package(pip_name)
+#         except ModuleNotFoundError:
+#             install_package(pip_name)
 
-check_dependencies()
+# check_dependencies()
 
 if __name__ == "__main__":
     if "streamlit" not in sys.modules:
