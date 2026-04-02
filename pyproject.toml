@@ -51,6 +51,8 @@ dependencies = [
     "packaging==26.0",
     "pandas==2.3.3",
     "pillow==12.1.1",
+    "pirate-garmin",
+    "playwright>=1.58.0",
     "protobuf==6.33.6",
     "pyarrow==23.0.1",
     "pyasn1==0.6.3",
@@ -86,3 +88,6 @@ dependencies = [
     "xxhash==3.6.0",
     "zstandard==0.25.0",
 ]
+
+[tool.uv.sources]
+pirate-garmin = { git = "https://github.com/jeffton/pirate-garmin.git" }

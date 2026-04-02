@@ -36,8 +36,27 @@ class GarminSync:
 
     def connect(self):
         try:
-            self.client = Garmin(self.email, self.password)
-            self.client.login()
+            #self.client = Garmin(self.email, self.password)
+            #self.client.login()
+            # 设定一个专门存通行证的隐藏文件夹
+            token_dir = os.path.join(os.path.expanduser("~"), ".garth")
+        
+            try:
+                # 尝试直接用通行证免密登录
+                print("Trying to login using cached token...")
+                client = Garmin()
+                client.login(token_dir)
+                self.client = client
+                print("Login successful using token!")
+            except Exception:
+                # 如果通行证过期了，或者第一次运行没有通行证，才用密码登录
+                print("Token expired or not found. Logging in with password...")
+                client = Garmin(email, password)
+                client.login()
+                # 登录成功后，立刻把新拿到的通行证存下来！
+                client.garth.dump(token_dir)
+                self.client = client
+                print("New token saved for future use.")
             print(f"✅ Login successful.")
             self._introspect_api()
             return True
