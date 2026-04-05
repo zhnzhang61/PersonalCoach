@@ -2,81 +2,84 @@
 
 由于 Garmin 目前全面启用了严格的 Cloudflare 防爬虫机制，使用 Playwright 等自动化浏览器登录极易触发 `HTTP 429 Too Many Requests` 和无限验证码死循环。
 
-本方案通过**浏览器手动抓包获取一次性票据 (Service Ticket)**，并在代码中光速完成兑换，最终提取出原生 `garminconnect` 可用的长效 `OAuth2` 通行证。
+本方案通过**浏览器手动获取一次性票据 (Service Ticket)**，再用项目脚本**立刻**完成兑换，最终提取出原生 `garminconnect`（Garth）可用的长效 `OAuth2` 通行证。
+
+**安全提示**：不要把 Service Ticket、密码或 token 写进仓库、截图或提交到 git。若曾在 `.venv` 里硬编码过 `ST-...`，请删掉或重装 `pirate-garmin`（见文末「恢复虚拟环境里的包」）。
+
+---
 
 ### 步骤 1：手动获取一次性服务票据 (Service Ticket)
-> ⚠️ **注意**：Service Ticket (`ST-xxxx`) 是一次性的，且有效期极短（不到 1 分钟），获取后必须立刻使用。
+
+> **注意**：Service Ticket (`ST-xxxx`) 是一次性的，且有效期极短（不到 1 分钟），获取后必须**立刻**在终端运行下一步脚本。
 
 1. 打开一个**全新/无痕模式**的浏览器窗口。
 2. 按 `F12` 打开开发者工具，切换到 **Network（网络）** 面板。
 3. **关键操作**：在 Network 面板顶部勾选 **Preserve log（保留日志）**。
 4. 在地址栏输入并访问以下专属移动端登录链接：
+
    ```text
-   [https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android](https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android)
+   https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android
    ```
+
 5. 正常输入账号密码登录（如有真人验证码则手动通过）。
 6. 登录成功后，页面会跳转并显示找不到网页 (`This site can't be reached`)，**这是正常现象**。
-7. 立刻查看浏览器地址栏，复制 `ticket=` 后面的完整字符串，这就是你的服务票据：
+7. 立刻查看浏览器地址栏，复制**整段 URL**，或只复制 `ticket=` 后面的服务票据：
+
    ```text
    ST-xxxxxxx-xxxxxxxxxxxxxx-sso
    ```
 
-### 步骤 2：魔改 `pirate-garmin` 拦截登录流程
-原生 `pirate-garmin` 强制使用无头浏览器登录，我们需要修改源码让它接收手动传入的 Ticket。
+---
 
-1. 找到本地环境中的 `pirate_garmin/auth.py` 文件（例如在 `.venv/lib/python3.x/site-packages/pirate_garmin/auth.py`）。
-2. 搜索 `def create_native_session` 方法。
-3. 将该方法内尝试调用浏览器登录的代码（`login_via_browser` 相关段落）替换为手动输入逻辑：
-   ```python
-   def create_native_session(self) -> NativeOAuth2Session:
-       # 强行注入手动抓取的 Service Ticket
-       manual_ticket = input("\n[+] 请粘贴最新的 ST-xxxx 票据并回车: ").strip()
-       
-       with httpx.Client(follow_redirects=True, timeout=self.timeout) as client:
-           di_slot = self.exchange_service_ticket_for_di_token(
-               client, manual_ticket, DI_CLIENT_IDS
-           )
-       # ... 保留后续原有的 it_slot 代码 ...
-   ```
-4. 运行 `uv run pirate-garmin login`，此时终端会暂停等待。
-5. **拼手速**：回到浏览器重新走一遍“步骤 1”拿一个新鲜的 Ticket，立刻粘贴到终端并回车。
-6. 成功后，长效 Token 会保存在 `~/.local/share/pirate-garmin/native-oauth2.json`。此时可将 `auth.py` 代码恢复原状。
+### 步骤 2：一键兑换并写入 Garth（推荐）
 
-### 步骤 3：将 Token 迁移给原生 `garminconnect` (Garth)
-`garminconnect` (底层基于 `garth`) 需要将 Token 放在 `~/.garth` 目录下。运行以下 Python 脚本完成“偷梁换柱”：
+无需再修改 `.venv` 里的 `pirate_garmin` 源码。在项目根目录执行：
 
-```python
-import json
-import os
+```bash
+# 方式 A：直接把重定向 URL 或 ST 字符串作为参数（最快）
+uv run python garmin_ticket_login.py --url "https://...ticket=ST-...."
 
-def migrate_token():
-    # 读取 pirate-garmin 抓到的新架构 Token
-    pirate_path = os.path.expanduser("~/.local/share/pirate-garmin/native-oauth2.json")
-    if not os.path.exists(pirate_path):
-        print("❌ 找不到 pirate-garmin 的 token 文件。")
-        return
+# 或
+uv run python garmin_ticket_login.py --ticket "ST-....-sso"
 
-    with open(pirate_path, "r") as f:
-        pirate_data = json.load(f)
-
-    # 提取核心的 DI OAuth2 Token
-    oauth2_token = pirate_data["di"]["token"]
-
-    # 存入 Garth 目录
-    garth_dir = os.path.expanduser("~/.garth")
-    os.makedirs(garth_dir, exist_ok=True)
-    
-    with open(os.path.join(garth_dir, "oauth2_token.json"), "w") as f:
-        json.dump(oauth2_token, f, indent=4)
-        
-    print("✅ 长效通行证已植入 ~/.garth/oauth2_token.json")
-
-if __name__ == "__main__":
-    migrate_token()
+# 方式 B：先打开浏览器到登录页，登录后把地址栏 URL 粘贴到终端（交互）
+uv run python garmin_ticket_login.py --open-browser
+# 按提示粘贴 URL 或 ST 后回车
 ```
 
-### 步骤 4：绕过旧版 OAuth1 检查（兼容性补丁）
-如果你的 `garminconnect` 库依然报错找不到 `oauth1_token.json`，这是因为旧版代码仍保留着双轨制检查。生成以下空壳文件“骗”过检查即可免密登录：
+脚本会：
+
+1. 用 `pirate_garmin` 的兑换逻辑把 ST 换成长效会话，写入 `~/.local/share/pirate-garmin/native-oauth2.json`（可用 `--app-dir` 覆盖）。
+2. 把其中的 DI token 写入 `~/.garth/oauth2_token.json`。
+
+可选参数：
+
+- `--compat`：同时生成 `oauth1_token.json` 与 `domain_profile.json` 占位文件（见步骤 3），兼容仍检查 OAuth1 的旧版 `garminconnect`。
+- `--run-sync`：成功后自动执行 `uv run python garmin_sync.py`。
+
+示例（兑换 + 兼容占位 + 拉数据）：
+
+```bash
+uv run python garmin_ticket_login.py --url "$PASTED_URL" --compat --run-sync
+```
+
+---
+
+### 步骤 3：仅迁移已有 `native-oauth2.json`（可选）
+
+若你已用其他方式生成了 `~/.local/share/pirate-garmin/native-oauth2.json`，只需写入 Garth：
+
+```bash
+uv run python migrate.py
+```
+
+（`migrate.py` 与 `garmin_ticket_login.py` 共用同一套迁移逻辑。）
+
+---
+
+### 步骤 4：旧版 `garminconnect` 的 OAuth1 检查（可选）
+
+若运行时仍提示缺少 `oauth1_token.json`，使用上面 **`--compat`** 即可；或手动生成占位文件：
 
 ```python
 import json
@@ -84,13 +87,27 @@ import os
 
 garth_dir = os.path.expanduser("~/.garth")
 
-# 生成假的 OAuth1 票据
 with open(os.path.join(garth_dir, "oauth1_token.json"), "w") as f:
     json.dump({"oauth_token": "dummy", "oauth_token_secret": "dummy"}, f)
 
-# 生成空的 domain profile
 with open(os.path.join(garth_dir, "domain_profile.json"), "w") as f:
     json.dump({}, f)
 
-print("✅ 兼容性假文件已生成！你的脚本现在应该可以满血运行了。")
+print("✅ 兼容性假文件已生成！")
 ```
+
+---
+
+### 恢复虚拟环境里的 `pirate_garmin`（若曾修改过 `site-packages`）
+
+不建议长期改 `.venv` 内文件；升级或同步依赖时也会被覆盖。若你曾改 `auth.py` 硬编码票据，可重装该包以恢复上游行为：
+
+```bash
+uv sync --reinstall-package pirate-garmin
+```
+
+---
+
+### 旧流程（不推荐）：魔改 `pirate-garmin` 再 `login`
+
+若仍需手动改 `create_native_session` 并运行 `pirate-garmin login`，可参考历史提交或备份；**新流程应优先使用 `garmin_ticket_login.py`**，避免修改 `site-packages`。
