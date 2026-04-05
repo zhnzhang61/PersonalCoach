@@ -169,10 +169,18 @@ def main() -> int:
         raw = args.url
     else:
         print(
-            "Paste the full redirect URL or the ST-...-sso token (ticket expires in under ~1 minute):",
+            "请在浏览器登录后，从地址栏复制「重定向后的完整 URL」（含 ticket=…）。",
+            "也可只粘贴 ST-…-sso；票据约 1 分钟内有效，请尽快。",
+            "",
+            sep="\n",
             flush=True,
         )
-        raw = sys.stdin.readline() if not sys.stdin.isatty() else input()
+        raw = (
+            sys.stdin.readline()
+            if not sys.stdin.isatty()
+            else input("粘贴重定向完整 URL: ")
+        )
+    raw = (raw or "").strip()
 
     try:
         st = parse_service_ticket(raw)

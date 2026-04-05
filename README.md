@@ -42,9 +42,11 @@ uv run python garmin_ticket_login.py --url "https://...ticket=ST-...."
 # 或
 uv run python garmin_ticket_login.py --ticket "ST-....-sso"
 
-# 方式 B：先打开浏览器到登录页，登录后把地址栏 URL 粘贴到终端（交互）
+# 方式 B：无参数运行，按提示粘贴「重定向后的完整 URL」（或只贴 ST-…-sso）
+uv run python garmin_ticket_login.py
+
+# 方式 C：先自动打开登录页，再在终端按提示粘贴地址栏 URL
 uv run python garmin_ticket_login.py --open-browser
-# 按提示粘贴 URL 或 ST 后回车
 ```
 
 脚本会：
