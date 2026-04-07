@@ -168,18 +168,31 @@ def main() -> int:
     elif args.url:
         raw = args.url
     else:
-        print(
-            "请在浏览器登录后，从地址栏复制「重定向后的完整 URL」（含 ticket=…）。",
-            "也可只粘贴 ST-…-sso；票据约 1 分钟内有效，请尽快。",
-            "",
-            sep="\n",
-            flush=True,
-        )
-        raw = (
-            sys.stdin.readline()
-            if not sys.stdin.isatty()
-            else input("粘贴重定向完整 URL: ")
-        )
+        import platform
+        # 如果是 Mac 并且没有可用的交互式终端（比如通过 Shortcut 后台运行）
+        if platform.system() == "Darwin" and not sys.stdin.isatty():
+            applescript = """
+            tell application "System Events"
+                activate
+                set response to display dialog "请粘贴浏览器重定向后的完整 URL (包含 ticket=) 或 ST-xxx 票据：" default answer "" with title "Garmin 登录授权"
+                return text returned of response
+            end tell
+            """
+            try:
+                res = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True, check=True)
+                raw = res.stdout.strip()
+            except subprocess.CalledProcessError:
+                raw = "" # 用户点击了取消
+        else:
+            # 如果是在普通的终端里运行，正常 print 和 input
+            print(
+                "请在浏览器登录后，从地址栏复制「重定向后的完整 URL」（含 ticket=…）。",
+                "也可只粘贴 ST-…-sso；票据约 1 分钟内有效，请尽快。",
+                sep="\n",
+                flush=True,
+            )
+            raw = input("粘贴重定向完整 URL: ")
+            
     raw = (raw or "").strip()
 
     try:
