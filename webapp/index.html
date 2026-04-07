@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PersonalCoach Mobile Dashboard</title>
+  <style>
+    :root { --bg:#111; --panel:#fff; --accent:#ff7a00; --muted:#666; }
+    body { margin:0; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; background:var(--bg); color:#111; }
+    .app { max-width: 860px; margin:0 auto; padding:12px; }
+    .card { background:var(--panel); border-radius:16px; padding:14px; margin-bottom:10px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; }
+    button { border:0; border-radius:999px; padding:9px 14px; background:#eee; cursor:pointer; }
+    button.primary { background:var(--accent); color:#fff; }
+    .tabs button.active { background:#222; color:#fff; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap:8px; }
+    input, select, textarea { width:100%; padding:8px; border-radius:8px; border:1px solid #ddd; }
+    table { width:100%; border-collapse: collapse; font-size:12px; }
+    td, th { border-bottom:1px solid #eee; padding:6px; text-align:left; }
+    .hidden { display:none; }
+    pre { background:#f8f8f8; padding:10px; border-radius:8px; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <h2 style="margin:0 0 8px 0">🏃 PersonalCoach Unified Dashboard</h2>
+    <div class="row">
+      <button class="primary" onclick="syncGarmin()">Download Garmin Data</button>
+      <button onclick="syncLedger()">Update Health Ledger</button>
+    </div>
+    <p id="syncResult" class="muted"></p>
+  </div>
+
+  <div class="card tabs row">
+    <button id="tab-training" class="active" onclick="showTab('training')">Training</button>
+    <button id="tab-recovery" onclick="showTab('recovery')">Recovery</button>
+    <button id="tab-chat" onclick="showTab('chat')">Unified Chat</button>
+  </div>
+
+  <section id="training" class="tab-view">
+    <div class="card">
+      <h3>Recent Runs</h3>
+      <div id="runs"></div>
+    </div>
+    <div class="card">
+      <h3>Lap Effort Editor</h3>
+      <div class="row">
+        <input id="lapRunId" placeholder="Activity ID" />
+        <button onclick="loadLaps()">Load Laps</button>
+      </div>
+      <div id="lapEditor"></div>
+    </div>
+  </section>
+
+  <section id="recovery" class="tab-view hidden">
+    <div class="card">
+      <h3>Today's Recovery</h3>
+      <div id="todayCards" class="grid"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" onclick="analyzeHealth()">Analyze Today's Health</button>
+      </div>
+      <pre id="healthReport"></pre>
+    </div>
+  </section>
+
+  <section id="chat" class="tab-view hidden">
+    <div class="card">
+      <h3>Unified AI Co-Pilot</h3>
+      <input id="threadId" value="unified_copilot_thread" />
+      <textarea id="chatInput" rows="3" placeholder="Ask about pacing / HRV / sleep..."></textarea>
+      <div class="row">
+        <button class="primary" onclick="sendChat()">Send</button>
+        <button onclick="loadHistory()">Load History</button>
+      </div>
+      <pre id="chatOutput"></pre>
+    </div>
+  </section>
+</div>
+
+<script>
+const API = '/api';
+
+function showTab(name){
+  for (const el of document.querySelectorAll('.tab-view')) el.classList.add('hidden');
+  document.getElementById(name).classList.remove('hidden');
+  for (const b of document.querySelectorAll('.tabs button')) b.classList.remove('active');
+  document.getElementById('tab-'+name).classList.add('active');
+}
+
+async function syncGarmin(){
+  const r = await fetch(`${API}/sync/garmin`, {method:'POST'});
+  const j = await r.json();
+  document.getElementById('syncResult').textContent = j.ok ? '✅ Garmin sync finished' : `❌ Sync failed: ${j.stderr || j.stdout}`;
+  loadRuns();
+}
+
+async function syncLedger(){
+  const r = await fetch(`${API}/sync/health-ledger`, {method:'POST'});
+  const j = await r.json();
+  document.getElementById('syncResult').textContent = `✅ Health ledger rows: ${j.rows}`;
+  loadToday();
+}
+
+async function loadRuns(){
+  const r = await fetch(`${API}/runs`);
+  const j = await r.json();
+  const box = document.getElementById('runs');
+  box.innerHTML = '';
+  (j.runs || []).slice(0, 20).forEach(run => {
+    const d = document.createElement('div');
+    d.className = 'card';
+    const name = run.manual_meta?.name || run.activityName || `Run ${run.activityId}`;
+    const notes = run.manual_meta?.notes || '';
+    d.innerHTML = `<b>${name}</b><div class='muted'>${(run.startTimeLocal||'').slice(0,10)} · ${(run.distance/1609.34||0).toFixed(2)} mi · id:${run.activityId}</div><div class='muted'>${notes}</div>`;
+    box.appendChild(d);
+  });
+}
+
+async function loadLaps(){
+  const id = document.getElementById('lapRunId').value.trim();
+  if(!id) return;
+  const r = await fetch(`${API}/runs/${id}/laps`);
+  if(!r.ok){ document.getElementById('lapEditor').innerHTML = 'No laps found'; return; }
+  const j = await r.json();
+  const laps = j.laps || [];
+  const opts = ["Hold Back Easy","Steady Effort","Increasing Effort","Marathon","LT Effort","VO2Max","Sprint","Rest"];
+  let html = `<input id='runName' placeholder='Run Name' value='${(j.meta?.name||'').replaceAll("'", "&#39;")}' />`;
+  html += `<input id='weekNum' placeholder='Week #' value='${j.meta?.week_num ?? 0}' />`;
+  html += `<textarea id='runNotes' placeholder='Notes'>${j.meta?.notes || ''}</textarea>`;
+  html += '<table><tr><th>Lap</th><th>Pace</th><th>Avg HR</th><th>Category</th></tr>';
+  laps.forEach((lap, i) => {
+    html += `<tr><td>${i+1}</td><td>${lap.duration ? ((lap.duration/60)/(lap.distance/1609.34)).toFixed(2) : 'N/A'}</td><td>${lap.averageHR || ''}</td><td><select id='cat_${i}'>${opts.map(o => `<option ${o===lap.category?'selected':''}>${o}</option>`).join('')}</select></td></tr>`;
+  });
+  html += '</table><button class="primary" onclick="saveLaps('+id+','+laps.length+')">Save & Calculate</button>';
+  document.getElementById('lapEditor').innerHTML = html;
+}
+
+async function saveLaps(id, n){
+  const categories = [];
+  for(let i=0;i<n;i++) categories.push(document.getElementById(`cat_${i}`).value);
+  const body = {
+    week_num: parseInt(document.getElementById('weekNum').value || '0', 10),
+    run_name: document.getElementById('runName').value || `Run ${id}`,
+    categories,
+    notes: document.getElementById('runNotes').value || ''
+  };
+  const r = await fetch(`${API}/runs/${id}/laps`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json();
+  document.getElementById('lapEditor').insertAdjacentHTML('beforeend', `<p>${j.ok ? '✅ Saved' : '❌ Failed'}</p>`);
+}
+
+async function loadToday(){
+  const r = await fetch(`${API}/health/today`);
+  if(!r.ok) return;
+  const j = await r.json();
+  const t = j.today;
+  const cards = [
+    ['Sleep Score', t.sleep_score],
+    ['RHR', t.rhr],
+    ['HRV', t.hrv],
+    ['Stress', t.stress],
+    ['Status', j.hrv_status],
+  ];
+  document.getElementById('todayCards').innerHTML = cards.map(([k,v]) => `<div class='card'><div class='muted'>${k}</div><b>${v ?? 'N/A'}</b></div>`).join('');
+}
+
+async function analyzeHealth(){
+  const r = await fetch(`${API}/ai/health-analysis`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({thread_id:'unified_copilot_thread'})});
+  const j = await r.json();
+  document.getElementById('healthReport').textContent = j.report || JSON.stringify(j, null, 2);
+}
+
+async function sendChat(){
+  const body = {
+    thread_id: document.getElementById('threadId').value,
+    message: document.getElementById('chatInput').value,
+  };
+  const r = await fetch(`${API}/ai/chat`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json();
+  document.getElementById('chatOutput').textContent = j.answer;
+}
+
+async function loadHistory(){
+  const thread = document.getElementById('threadId').value;
+  const r = await fetch(`${API}/ai/history/${encodeURIComponent(thread)}`);
+  const j = await r.json();
+  document.getElementById('chatOutput').textContent = (j.messages||[]).map(m => `[${m.type}] ${m.content}`).join('\n\n');
+}
+
+loadRuns();
+loadToday();
+</script>
+</body>
+</html>

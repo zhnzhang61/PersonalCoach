@@ -113,3 +113,36 @@ uv sync --reinstall-package pirate-garmin
 ### 旧流程（不推荐）：魔改 `pirate-garmin` 再 `login`
 
 若仍需手动改 `create_native_session` 并运行 `pirate-garmin login`，可参考历史提交或备份；**新流程应优先使用 `garmin_ticket_login.py`**，避免修改 `site-packages`。
+
+---
+
+## Unified API + Mobile Dashboard (New)
+
+A new FastAPI server is available to expose sync/data/AI features and a mobile-first single-page dashboard.
+
+### Run
+
+```bash
+uv run uvicorn api_server:app --reload --host 0.0.0.0 --port 8000
+```
+
+Open:
+
+- `http://localhost:8000/` → unified mobile-friendly dashboard
+- `http://localhost:8000/docs` → OpenAPI docs
+
+### Key endpoints
+
+- `POST /api/sync/garmin`
+- `POST /api/sync/health-ledger`
+- `GET /api/training/weeks`
+- `GET /api/runs`
+- `GET /api/runs/{activity_id}`
+- `GET /api/runs/{activity_id}/laps`
+- `PUT /api/runs/{activity_id}/laps`
+- `GET /api/health/today`
+- `GET /api/health/timeline`
+- `POST /api/ai/run-analysis`
+- `POST /api/ai/health-analysis`
+- `POST /api/ai/chat`
+- `GET /api/ai/history/{thread_id}`
