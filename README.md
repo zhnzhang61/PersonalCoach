@@ -16,18 +16,15 @@
 2. 按 `F12` 打开开发者工具，切换到 **Network（网络）** 面板。
 3. **关键操作**：在 Network 面板顶部勾选 **Preserve log（保留日志）**。
 4. 在地址栏输入并访问以下专属移动端登录链接：
-
-   ```text
+  ```text
    https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android
-   ```
-
+  ```
 5. 正常输入账号密码登录（如有真人验证码则手动通过）。
 6. 登录成功后，页面会跳转并显示找不到网页 (`This site can't be reached`)，**这是正常现象**。
 7. 立刻查看浏览器地址栏，复制**整段 URL**，或只复制 `ticket=` 后面的服务票据：
-
-   ```text
+  ```text
    ST-xxxxxxx-xxxxxxxxxxxxxx-sso
-   ```
+  ```
 
 ---
 
@@ -81,7 +78,7 @@ uv run python migrate.py
 
 ### 步骤 4：旧版 `garminconnect` 的 OAuth1 检查（可选）
 
-若运行时仍提示缺少 `oauth1_token.json`，使用上面 **`--compat`** 即可；或手动生成占位文件：
+若运行时仍提示缺少 `oauth1_token.json`，使用上面 `**--compat**` 即可；或手动生成占位文件：
 
 ```python
 import json
@@ -113,3 +110,43 @@ uv sync --reinstall-package pirate-garmin
 ### 旧流程（不推荐）：魔改 `pirate-garmin` 再 `login`
 
 若仍需手动改 `create_native_session` 并运行 `pirate-garmin login`，可参考历史提交或备份；**新流程应优先使用 `garmin_ticket_login.py`**，避免修改 `site-packages`。
+
+## 📜 授权与商用协议 (License & Commercial Use)
+
+本项目采用 **双轨授权模式 (Dual Licensing)**，旨在平衡开源共享与知识产权保护：
+
+### 1. 个人与非商业用途 (Personal & Non-Commercial)
+
+本项目代码在 [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) 协议下发布。
+
+- **允许**：个人用户免费使用、学习、修改及在非营利环境下运行。
+- **禁止**：严禁将本项目核心逻辑、AI 架构或爬虫接口用于任何盈利性产品、付费服务、企业内部商业系统或作为商业 App 的一部分。
+
+### 2. 商业授权 (Commercial Licensing)
+
+如果你希望将本项目的代码或架构（如：Garmin 鉴权绕过逻辑、多层 AI 记忆模型、LangGraph 运动分析流）集成到商业产品、收费 SaaS 或企业级应用中，**必须获得作者的正式书面授权**。
+
+- 如需商用，请联系作者：[zhnzhang61@gmail.com](mailto:zhnzhang61@gmail.com)
+- 商业授权将提供更稳定的技术支持建议及免除开源协议中的非商用限制。
+
+---
+
+## ⚖️ 免责声明 (Disclaimer)
+
+1. **非官方关联**：本项目是一个独立开发的个人研究项目，与 **Garmin (佳明)** 官方公司无任何关联、赞助或认可关系。
+2. **风险自负**：本项目涉及对 Garmin Connect 非公开 API 的调用。用户在使用过程中应严格遵守 Garmin 的服务条款。因频繁调用、逆向工程等行为导致的账号封禁、数据丢失或任何法律纠纷，**作者概不负责**。
+3. **数据安全**：本项目本地运行，不上传任何隐私数据。请勿将包含个人账号、ST 票据或 API Key 的 `.env` 文件及 `data/` 目录上传至任何公共仓库。
+
+---
+
+## 🙏 鸣谢 (Acknowledgements)
+
+本项目站在巨人的肩膀上，感谢以下优秀开源项目提供的支持与灵感：
+
+- [Streamlit](https://github.com/streamlit/streamlit) (Apache 2.0) - 提供了极其优雅的仪表盘前端框架。
+- [LangGraph](https://github.com/langchain-ai/langgraph) (MIT) - 赋予了 AI 教练复杂的多智能体推理与记忆能力。
+- [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (MIT) - 提供了基础的 Garmin API 封装。
+- [pirate-garmin](https://github.com/petergardfjall/pirate-garmin) - 在攻克移动端鉴权逻辑上提供了关键的逆向思路。
+- [Pandas](https://github.com/pandas-dev/pandas) & [Altair](https://github.com/altair-viz/altair) - 支撑了底层强大的数据处理与可视化。
+
+*注：以上引用的第三方库其所有权归原作者所有，并分别遵循其各自的开源协议。*
