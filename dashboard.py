@@ -176,23 +176,50 @@ with tab_train:
                     if has_stats:
                         if st.button("Analyze", key=f"ai_{run_id}"):
                             with st.spinner("Coach is thinking..."):
-                                ctx = processor.build_ai_context(run_id, current_block['id'])
-                                if ctx:
-                                    # --- NEW: INJECT METADATA DIRECTLY TO AI CONTEXT ---
-                                    # This ensures it reads your edited UI name, or falls back to Garmin's default
-                                    ctx['run_context']['name'] = meta.get('name', run.get('activityName', 'Unnamed Workout'))
+                                # --- 1. Build the NEW Working Memory Context ---
+                                ctx = processor.build_agent_working_memory(run_id, current_block['id'])
+                                
+                                if "error" not in ctx:
+                                    # Ensure latest manual edits are included
+                                    ctx['workout_summary']['name'] = meta.get('name', run.get('activityName', 'Unnamed Workout'))
+                                    ctx['workout_summary']['notes'] = meta.get('notes', '')
                                     
-                                    # This ensures your new subjective notes are passed to the Coach
-                                    ctx['run_context']['notes'] = meta.get('notes', '')
-                                    
+                                    # --- 2. Fetch Telemetry Data ---
                                     df_ai = None
                                     if has_telemetry and hasattr(processor, 'get_activity_telemetry'):
                                         _, df_ai = processor.get_activity_telemetry(run_id, laps=laps, downsample_sec=downsample_sec)
-                                        
-                                    report = agent.analyze_run(ctx, thread_id=f"run_analysis_{run_id}", telemetry_df=df_ai)
+                                    
+                                    # --- 3. Fetch Historical Memories (Episodic) ---
+                                    # Example: Find past runs with similar distance or type
+                                    # In a real app, you might extract tags dynamically first, but here we fetch general recent history
+                                    history = processor.search_episodic_memories(limit=3) 
+
+                                    # --- 4. Generate the Main Analysis Report ---
+                                    report = agent.analyze_run(
+                                        working_memory_dict=ctx, 
+                                        thread_id=f"run_analysis_{run_id}", 
+                                        telemetry_df=df_ai,
+                                        historical_memories=history
+                                    )
                                     
                                     st.session_state[f"report_{run_id}"] = report
+                                    
+                                    # --- 5. Generate and Save Episodic Memory (Background Task) ---
+                                    # We do this silently after the report is generated
+                                    try:
+                                        memory_payload = agent.generate_episodic_summary(ctx, telemetry_df=df_ai)
+                                        processor.save_episodic_memory(
+                                            activity_id=run_id,
+                                            date=ctx['date'],
+                                            summary_text=memory_payload.get('summary_text', 'Run completed.'),
+                                            tags=memory_payload.get('tags', [])
+                                        )
+                                    except Exception as e:
+                                        st.sidebar.warning(f"Failed to generate episodic memory for {run_id}: {e}")
+
                                     st.rerun()
+                                else:
+                                    st.error("Could not build agent context.")
 
                 # --- TELEMETRY VIEWER ---
                 if has_telemetry and hasattr(processor, 'get_activity_telemetry'):
@@ -275,6 +302,13 @@ with tab_train:
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("Close Report", key=f"close_{run_id}"):
+                        with st.spinner("🧠 正在巩固记忆档案..."):
+                            # 1. 总结这段对话的精华
+                            chat_summary = agent.summarize_thread(f"run_analysis_{run_id}")
+                            if chat_summary:
+                                # 2. 将精华追加到情景记忆库中
+                                processor.append_chat_to_episodic_memory(run_id, chat_summary)
+                                
                         del st.session_state[f"report_{run_id}"]
                         st.rerun()
 
@@ -485,28 +519,68 @@ with tab_health:
             with st.spinner("Doctor is reviewing your charts..."):
                 yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
                 raw_sleep = processor.load_json_safe(processor.paths['sleep'], f"{yesterday_str}.json")
-                agent.analyze_health(
+                
+                # 1. 生成报告 (LangGraph 会自动把对话原封不动存入 data/chat_memory.db)
+                report = agent.analyze_health(
                     history_df=df.tail(14), 
                     yesterday_raw=raw_sleep, 
                     thread_id=thread_id
                 )
+                
+                # 2. ⚡️ 将医生的核心裁决提取出来，写进永久的“情景记忆” JSON 中！
+                try:
+                    import datetime
+                    today_str = datetime.date.today().isoformat()
+                    processor.save_episodic_memory(
+                        activity_id=f"health_check_{today_str}",
+                        date=today_str,
+                        summary_text=f"Daily Health Check: {report}", # 直接把医生的分析存作永久档案
+                        tags=["Daily Health", "Doctor Analysis", "Recovery"]
+                    )
+                except Exception as e:
+                    st.sidebar.warning(f"Failed to save health memory: {e}")
+
                 st.rerun()
 
-        if prompt := st.chat_input("Ask your agents a question..."):
+        if prompt := st.chat_input("Ask your agents a question...", key="global_chat_input"):
             with st.spinner("Supervisor is routing your request..."):
                 import datetime
                 today_str = datetime.date.today().isoformat()
-                context = f"""
-                INTERNAL DATA FACT SHEET:
-                Today's Date is: {today_str}
-                Today's HRV: {last_day.get('hrv', 'unknown')} ms. 
-                Sleep Score: {last_day.get('sleep_score', 'unknown')}. 
-                Last 7 days run miles: {df.tail(7)['run_miles'].sum():.1f}.
-                """
+                
+                if not df.empty:
+                    latest_health_dict = df.iloc[-1].dropna().to_dict()
+                    if 'date' not in latest_health_dict:
+                        latest_health_dict['date'] = df.index[-1].isoformat()[:10]
+                else:
+                    latest_health_dict = {}
+                
+                recent_miles = df.tail(7)['run_miles'].sum() if not df.empty else 0
+                
+                # --- 新增：提取最近的 5 条永久记忆 (包含对话建议) ---
+                recent_memories = processor.search_episodic_memories(limit=5)
+                memory_log = ""
+                for m in recent_memories:
+                    memory_log += f"- {m['date']}: {m['summary']}\n"
+                    if 'coach_advice' in m:
+                        memory_log += f"  > 历史讨论建议: {m['coach_advice']}\n"
+                
+                # 构造全局视角的高密度 JSON
+                global_context = {
+                    "current_date": today_str,
+                    "athlete_status_today": latest_health_dict,
+                    "recent_training_load": {
+                        "last_7_days_miles": round(recent_miles, 1)
+                    },
+                    "episodic_memories": memory_log, # 将永久记忆注入！！
+                    "instruction": "You are the global coach/doctor. Use the real-time snapshot and EPISODIC MEMORIES to answer."
+                }
+                
+                context_str = f"=== REAL-TIME SNAPSHOT & MEMORIES ===\n{json.dumps(global_context, indent=2, ensure_ascii=False)}"
+                
                 agent.chat(
                     user_input=prompt, 
-                    thread_id=thread_id, 
-                    system_context=context
+                    thread_id=thread_id,
+                    system_context=context_str
                 )
             st.rerun()
 

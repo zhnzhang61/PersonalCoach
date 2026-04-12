@@ -17,9 +17,13 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 class AgenticCoach:
-    def __init__(self, db_path="data/chat_memory.db"):
+    # --- STEP 1: 引入 Semantic Memory ---
+    def __init__(self, db_path="data/chat_memory.db", user_profile: dict = None):
         self.db_path = db_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        
+        # 接收全局档案，如果没有传入则给个空的
+        self.user_profile = user_profile or {}
         
         self.api_key = self._find_api_key()
         if not self.api_key:
@@ -87,14 +91,33 @@ class AgenticCoach:
             return "doctor"
         return "coach"
 
+    # --- STEP 1 延续: 将全局记忆焊入 System Prompt ---
     def _coach_node(self, state: State):
-        sys_msg = SystemMessage(content="You are an elite Running Coach and Sports Physiologist. Focus on biomechanics, pace, splits, and training, but ALWAYS connect them to the athlete's overall health and recovery context.")
+        profile_str = json.dumps(self.user_profile, indent=2)
+        sys_msg = SystemMessage(content=f"""
+        You are an elite Running Coach and Sports Physiologist. 
+        Focus on biomechanics, pace, splits, and training, but ALWAYS connect them to the athlete's overall health context.
+        
+        === USER BASELINE PROFILE (SEMANTIC MEMORY) ===
+        {profile_str}
+        ===============================================
+        Use this baseline to evaluate all incoming data.
+        """)
         messages = [sys_msg] + state["messages"]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
 
     def _doctor_node(self, state: State):
-        sys_msg = SystemMessage(content="You are an elite physiological Health Doctor. Focus on HRV, Sleep Scores, and nervous system recovery. You share a history log with a Running Coach. Acknowledge running data if it explains fatigue, but stick to your domain.")
+        profile_str = json.dumps(self.user_profile, indent=2)
+        sys_msg = SystemMessage(content=f"""
+        You are an elite physiological Health Doctor. 
+        Focus on HRV, Sleep Scores, and nervous system recovery. 
+        
+        === USER BASELINE PROFILE (SEMANTIC MEMORY) ===
+        {profile_str}
+        ===============================================
+        Acknowledge running data if it explains fatigue, but stick to your domain.
+        """)
         messages = [sys_msg] + state["messages"]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
@@ -131,82 +154,128 @@ class AgenticCoach:
             return []
 
     def follow_up_chat(self, user_input: str, thread_id: str):
-        """
-        Continues the conversation in an existing thread without injecting 
-        the heavy system context prompt again.
-        """
         return self.chat(user_input=user_input, thread_id=thread_id, system_context=None)
 
-    def analyze_run(self, context_dict: dict, thread_id: str, telemetry_df=None):
-        run_ctx = context_dict['run_context']
-        run_name = run_ctx.get('name', 'Unnamed Workout')
-        athlete_notes = run_ctx.get('notes', '').strip()
+    def summarize_thread(self, thread_id: str):
+        """
+        读取特定 thread 的聊天记录，并总结出核心建议，准备写入永久记忆。
+        """
+        history = self.get_history(thread_id)
+        # 如果只有一条系统提示和一句用户的话，说明没怎么深聊，直接跳过
+        if len(history) <= 3: 
+            return None 
+            
+        chat_text = "\n".join([f"{msg.type}: {msg.content}" for msg in history if msg.type in ['human', 'ai']])
         
-        zones_text = "None Available"
-        if run_ctx.get('hr_zones'):
-            zones = run_ctx['hr_zones']
-            zones_text = "\n".join([f"- {z['name']}: {z['range']}" for z in zones])
+        prompt = f"""
+        请将以下教练与运动员的对话，压缩成1-2句话的核心结论或建议。
+        重点提取：运动员的痛点/感受，以及教练给出的具体对策。使用第三人称陈述句。
+        
+        对话记录：
+        {chat_text}
+        """
+        # 使用 router_llm (Temperature=0) 保证总结客观精准
+        response = self.router_llm.invoke([HumanMessage(content=prompt)])
+        return response.content.strip()
 
-        perf_data = json.dumps(run_ctx.get('category_stats', []), indent=2)
+    # --- STEP 2: Working Memory 融合分析 ---
+    # --- STEP 2: Working Memory 融合分析 ---
+    def analyze_run(self, working_memory_dict: dict, thread_id: str, telemetry_df=None, historical_memories: list = None):
+        """
+        Takes the dense JSON from dp.build_agent_working_memory() and historical records to perform a deep analysis.
+        """
+        run_name = working_memory_dict.get('workout_summary', {}).get('name', '未命名训练')
+        
+        # 提取历史相似记录 (如果有的话)
+        history_section = ""
+        if historical_memories:
+            history_section = "\n\n**历史背景 (过去的相似训练):**\n"
+            for mem in historical_memories:
+                history_section += f"- {mem['date']}: {mem['summary']}\n"
 
-        fatigue = "None reported."
-        if context_dict.get('auxiliary_activities_last_7d'):
-            fatigue = "\n".join([f"- {a['date']}: {a['type']} ({a['desc']})" for a in context_dict['auxiliary_activities_last_7d']])
-
-        # --- TELEMETRY CONTEXT ---
         telemetry_section = ""
         if telemetry_df is not None and not telemetry_df.empty:
             csv_data = telemetry_df.to_csv(index=False)
-            telemetry_section = f"\n\n**RAW TELEMETRY (Lap-by-Lap Downsampled Data):**\n```csv\n{csv_data}\n```"
+            telemetry_section = f"\n\n**原始遥测数据 (逐圈数据):**\n```csv\n{csv_data}\n```"
 
-        # --- SUBJECTIVE NOTES CONTEXT ---
-        notes_section = ""
-        if athlete_notes:
-            notes_section = f"\n- **Athlete's Subjective Notes:** \"{athlete_notes}\""
+        working_memory_str = json.dumps(working_memory_dict, indent=2)
 
         system_instructions = f"""
-        ACT AS AN ELITE SPORTS DATA SCIENTIST AND PHYSIOLOGIST.
+        请扮演一名顶尖的运动数据科学家和生理学家。
 
-        **THE PHILOSOPHY:**
-        1. **Subjective Feel is GROUND TRUTH:** The athlete has manually categorized the effort levels.
-        2. **Metrics are Malleable:** Heart rate varies by day based on health, elevation changes, and fatigue.
-        3. **Goal:** Evaluate how the objective telemetry matched the intended workout purpose.
+        **数据输入:**
+        - **今日工作记忆 (健康 + 训练上下文):**
+        ```json
+        {working_memory_str}
+        ```
+        {history_section}
+        {telemetry_section}
 
-        **DATA INPUTS:**
-        - **Workout Purpose / Title:** "{run_name}" 
-        - **Baseline Map (The Theory):** {zones_text}
-        - **Run Data / Assigned Categories (The Reality):** {perf_data}
-        - **Context (Fatigue/Auxiliary):** {fatigue}{telemetry_section}{notes_section}
+        **分析指令:**
+        1. **分析意图与执行:** 使用工作记忆 JSON 中的数据作为你的分析框架。将 `daily_readiness` (每日准备度/睡眠/HRV等) 指标与其实际的跑步表现直接联系起来。
+        2. **历史对比:** 如果提供了“历史背景”，请明确将今天的跑步数据与过去的表现进行对比，以指出他的进步或是反复出现的问题。
+        3. **遥测数据分析 (关键):**
+           - 评估被标记圈数 (Laps) 的曲线形状 (配速、步频、海拔)。
+           - 识别速度/间歇跑中的心脏滞后效应 (Cardiac Lag)。将实际/峰值心率与基准档案 (Baseline Profile) 里的预期心率区间进行比对。
 
-        **INSTRUCTIONS:**
-        1. **Analyze Intent vs Execution:** Use the "Workout Purpose / Title" to frame your analysis. 
-        2. **Subjective Notes Context:** If 'Athlete's Subjective Notes' are provided, use them as the primary context for how the run physically felt. If no notes are provided, rely purely on the objective telemetry and do NOT mention the lack of notes.
-        3. **TELEMETRY ANALYSIS (CRITICAL):**
-           - Evaluate the shape of the curves (Pace, Cadence, Elevation) for the identified laps.
-           - For Speed, VO2Max, or LT intervals, RECOGNIZE CARDIAC LAG. The average HR will be artificially low. Judge interval success by the PEAK HR and END HR found within that Lap's telemetry block. Explicitly call out cardiac lag if present.
-        4. **Map the Drift:** Identify the **Actual Average HR** (or Peak HR for speed intervals) for the efforts. Compare it to the Baseline Zone. Flag differences > 5 bpm as a **Significant Drift** 🚨. 
-
-        **OUTPUT FORMAT (Markdown):**
-        ### 🧠 Workout Analysis: {run_name}
-        *(Detailed observation of how the execution matched the workout's purpose and the subjective notes. Discuss specific Lap numbers, curve shapes, and fatigue impacts).*
+        **输出格式 (使用 Markdown):**
+        ### 🧠 训练分析: {run_name}
+        *(详细的观察报告：将当天的生理准备度与实际执行的遥测数据联系起来。如果适用，请与历史记录进行对比)。*
         
-        ### 🗺️ Proposed Map (Today's Reality)
-        | Effort Category | Baseline Zone | **Proposed Mapping** | Drift |
+        ### 🗺️ 心率区间映射 (今日实际情况)
+        | 努力等级 (Category) | 基准区间 (Baseline) | **实际映射 (Actual/Peak HR)** | 心率漂移 (Drift) |
         | :--- | :--- | :--- | :--- |
-        | [Category Name] | [e.g. 145-160] | **[Actual/Peak HR]** | [e.g. +7 bpm 🚨] |
+        | [例如：马拉松配速] | [例如：145-160] | **[填入实际或峰值心率]** | [例如：+7 bpm 🚨] |
         
-        ### 💡 Recommendation
-        *(Provide an actionable physiological takeaway).*
+        ### 💡 建议
+        *(给出下一步可执行的生理学或训练建议)。*
         """
 
-        run_date = run_ctx.get('date', 'today')
-        user_message = f"Please analyze my execution on {run_date} for the run titled '{run_name}'."
+        run_date = working_memory_dict.get('date', '今天')
+        user_message = f"请分析我在 {run_date} 进行的名为 '{run_name}' 的训练执行情况。"
 
         return self.chat(
             user_input=user_message, 
             thread_id=thread_id, 
             system_context=system_instructions
         )
+
+    # --- STEP 3: Episodic Memory (生成供未来 RAG 使用的短记忆) ---
+    def generate_episodic_summary(self, working_memory_dict: dict, telemetry_df=None):
+        """
+        Calls the LLM purely to generate a dense, factual summary and tags to be saved 
+        into the episodic vector/JSON database.
+        """
+        run_name = working_memory_dict.get('workout_summary', {}).get('name', 'Unnamed Workout')
+        working_memory_str = json.dumps(working_memory_dict, indent=2)
+        
+        prompt = f"""
+        You are an AI Memory Summarizer. Look at this run and compress the core physiological takeaways into a dense 50-75 word summary. 
+        Focus on facts: Distance, Pace, HR Drift, and how Daily Readiness (like sleep) affected it. 
+        Also, assign 2-4 broad categorization tags (e.g., "Long Run", "Fatigue", "VO2Max", "Hot Weather").
+
+        Context:
+        ```json
+        {working_memory_str}
+        ```
+
+        Output EXACTLY in this JSON format, nothing else:
+        {{
+            "tags": ["Tag1", "Tag2"],
+            "summary_text": "Your dense summary here."
+        }}
+        """
+        # Create a temporary stateless LLM call for formatting
+        formatting_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, api_key=self.api_key)
+        response = formatting_llm.invoke([SystemMessage(content="You return strictly JSON."), HumanMessage(content=prompt)])
+        
+        try:
+            # Clean up potential markdown formatting from the response
+            content = response.content.replace('```json', '').replace('```', '').strip()
+            return json.loads(content)
+        except Exception as e:
+            print(f"Error generating episodic memory: {e}")
+            return {"tags": ["Analysis"], "summary_text": f"Completed {run_name}."}
 
     def analyze_health(self, history_df, yesterday_raw, thread_id: str):
         import datetime
@@ -225,36 +294,40 @@ class AgenticCoach:
         }
 
         system_instructions = f"""
-        ACT AS A HOLISTIC HEALTH & PERFORMANCE DOCTOR.
+        请扮演一名全科健康与运动表现医生 (Holistic Health & Performance Doctor)。
         
-        **OBJECTIVE:** Analyze the athlete's recovery status for TODAY ({today_str}) based on LONG-TERM TRENDS and YESTERDAY'S SLEEP ({yesterday_str}).
+        **核心目标:** 根据长期数据趋势和昨晚的睡眠质量 ({yesterday_str})，深度分析运动员今天 ({today_str}) 的身体恢复状态。
 
-        **DATA SOURCE 1: 14-Day History (CSV)**
+        **数据源 1: 过去 14 天的历史趋势 (CSV 格式)**
         {trends}
-        *(Columns: sleep_score, rhr, hrv, run_miles, stress)*
+        *(列名说明: sleep_score=睡眠分数, rhr=静息心率, hrv=心率变异性, run_miles=跑步里程, stress=全天压力值)*
 
-        **DATA SOURCE 2: Last Night's Deep Dive (JSON Extract)**
-        - Deep Sleep: {sleep_details['deep_sleep_min']:.0f} mins
-        - REM Sleep: {sleep_details['rem_sleep_min']:.0f} mins
-        - Awake/Restless: {sleep_details['awake_min']:.0f} mins
-        - Garmin Feedback: "{sleep_details['feedback']}"
-        - Overnight Stress: {sleep_details['stress_during_sleep']} (Low is good)
+        **数据源 2: 昨夜睡眠深度解析 (JSON 提取)**
+        - 深度睡眠 (Deep Sleep): {sleep_details['deep_sleep_min']:.0f} 分钟
+        - 快速眼动睡眠 (REM Sleep): {sleep_details['rem_sleep_min']:.0f} 分钟
+        - 清醒/焦躁时间 (Awake/Restless): {sleep_details['awake_min']:.0f} 分钟
+        - 佳明官方反馈 (Garmin Feedback): "{sleep_details['feedback']}"
+        - 睡眠期间压力值 (Overnight Stress): {sleep_details['stress_during_sleep']} (该数值越低越好)
 
-        **ANALYSIS REQUIRED (Markdown):**
+        **分析要求 (请务必使用 Markdown 格式输出中文报告):**
         
-        ### 📉 Trend Detection
-        *Look at the 14-day history. Is RHR trending up? Is HRV crashing? How does Sleep Score correlate with Run Miles?*
-        *Be specific.*
+        ### 📉 趋势诊断
+        *查看 14 天的历史数据。静息心率 (RHR) 是否在上升？心率变异性 (HRV) 是否正在走低？睡眠分数与近期的跑步里程之间有什么相关性？*
+        *请给出非常具体的医学/生理学观察。*
 
-        ### 🛌 Last Night's Quality
-        *Don't just look at the score. Look at Deep vs. REM. Is the athlete physically recovered (Deep) but mentally tired (REM)?*
+        ### 🛌 昨夜睡眠质量
+        *不要只读总分。对比深度睡眠 (修复身体) 与快速眼动睡眠 (修复神经/精神) 的比例。分析一下该运动员昨晚是真的获得了充分休息，还是处于“身体恢复了但精神依然疲惫”的状态？结合睡眠压力值进行点评。*
 
-        ### 🚦 Readiness Verdict
-        *Synthesize everything into a training recommendation for {today_str}.*
-        *Options: [GREEN LIGHT: Push Hard], [YELLOW LIGHT: Aerobic Only], [RED LIGHT: Rest].*
+        ### 🚦 今日状态裁决
+        *综合以上所有客观数据，为今天 ({today_str}) 给出明确的训练建议。*
+        *请从以下三个选项中选择一个作为基调，并给出理由：*
+        * [🟢 绿灯：状态极佳，可以上高强度训练]
+        * [🟡 黄灯：恢复中，建议仅限轻松有氧或交叉训练]
+        * [🔴 红灯：严重疲劳或有生病风险，建议彻底休息]
         """
 
-        user_message = f"Please analyze my health condition for today ({today_str}), bearing in mind my recent workouts."
+        # 这里修改了隐形触发词，确保精准路由给 Doctor 处理健康问题
+        user_message = f"请结合我近期的生理指标，深度分析一下我今天 ({today_str}) 的身体健康、恢复状态和睡眠质量。"
 
         return self.chat(
             user_input=user_message, 
