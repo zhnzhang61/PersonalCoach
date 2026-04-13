@@ -402,14 +402,18 @@ class MemoryOS:
                 )
             sections.append("\n".join(pq_lines))
 
-        # Active topics
+        # Active topics — frame as questions the AI must ask
         if active_topics:
-            topic_lines = ["📌 **活跃话题 (认知图谱):**"]
+            topic_lines = ["📌 **活跃话题 — 你必须向用户逐一询问以下话题的最新进展:**"]
             for t in active_topics[:10]:
-                conclusion = t["working_conclusion"] or "（尚无结论）"
-                topic_lines.append(
-                    f"  - [{t['status']}] {t['name']} — {conclusion}"
-                )
+                if t["status"] == "Testing":
+                    topic_lines.append(
+                        f"  - [验证中] {t['name']} — 之前的结论: {t['working_conclusion'] or '无'}。请问用户验证结果如何？"
+                    )
+                else:
+                    topic_lines.append(
+                        f"  - [待探索] {t['name']}（尚无结论）。请询问用户目前情况如何？"
+                    )
             sections.append("\n".join(topic_lines))
 
         # Related episodes / lessons
@@ -685,6 +689,7 @@ class MemoryOS:
         Checks for:
           - Unresolved pending clarifications
           - Topics in 'Testing' status that may need follow-up
+          - Topics in 'Open' status that still lack conclusions
         """
         sections: list[str] = []
 
@@ -699,18 +704,28 @@ class MemoryOS:
         # Testing topics needing follow-up
         testing = self.list_topics(status="Testing")
         if testing:
-            lines = ["以下话题正在验证中，可以询问用户最新进展:"]
+            lines = ["以下话题正在验证中，请主动询问用户最新进展和结果:"]
             for t in testing:
                 lines.append(f"  - {t['name']}: {t['working_conclusion'] or '等待反馈'}")
+            sections.append("\n".join(lines))
+
+        # Open topics still without conclusion
+        open_topics = self.list_topics(status="Open")
+        if open_topics:
+            lines = ["以下话题仍然悬而未决，请询问用户是否有新的进展或信息:"]
+            for t in open_topics:
+                lines.append(f"  - {t['name']}（尚无结论）")
             sections.append("\n".join(lines))
 
         if not sections:
             return ""
 
         return (
-            "=== 记忆引擎主动提示 (Memory Concierge) ===\n"
+            "🚨 **重要指令 — 你必须在本次回复中执行以下操作：**\n"
+            "在回答用户当前问题之后，你**必须**在回复末尾专门用一个段落，逐一向用户询问以下遗留话题的最新进展。\n"
+            "不要跳过任何一条。用自然的对话方式提问。\n\n"
             + "\n\n".join(sections)
-            + "\n=== 请以自然的方式向用户提起以上话题 ==="
+            + "\n\n--- 以上内容必须在回复中体现，否则视为任务未完成 ---"
         )
 
     # ------------------------------------------------------------------
