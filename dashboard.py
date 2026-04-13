@@ -47,6 +47,23 @@ from cognitive_memory_engine import MemoryOS
 
 st.set_page_config(layout="wide", page_title="Training Block Manager")
 
+
+def _try_resolve_pending(user_text: str, memory_engine):
+    """
+    Check if the user's message is answering any pending clarification.
+    Uses simple keyword matching against pending questions.
+    Resolves all unresolved pending items with the user's answer.
+    """
+    pending = memory_engine.list_pending(resolved=False)
+    if not pending:
+        return
+    for p in pending:
+        # If user mentions the pending ID explicitly, or if there's only one pending item
+        if p["pending_id"] in user_text or len(pending) == 1:
+            memory_engine.resolve_pending_question(p["pending_id"], user_text)
+            st.toast(f"✅ 已记录你的回答并更新记忆: {p['pending_id']}")
+            return
+
 # Initialize Processors
 processor = DataProcessor()
 
@@ -291,11 +308,15 @@ with tab_train:
                             
                     # 2. 渲染输入框并处理新问题
                     if run_prompt := st.chat_input("Ask a follow-up about this run...", key=f"chat_input_{run_id}"):
+                        # 尝试自动解析待确认问题的回答
+                        if 'memory_engine' in st.session_state:
+                            _try_resolve_pending(run_prompt, st.session_state.memory_engine)
+
                         # 立即存入本地并展示用户的提问
                         processor.save_run_chat_message(run_id, "user", run_prompt)
                         with st.chat_message("user"):
                             st.markdown(run_prompt)
-                        
+
                         # 呼叫 AI 进行回答
                         with st.chat_message("assistant"):
                             with st.spinner("Coach is reviewing the telemetry..."):
@@ -304,7 +325,7 @@ with tab_train:
                                 st.markdown(response)
                                 # 将 AI 的回答存入本地
                                 processor.save_run_chat_message(run_id, "assistant", response)
-                        
+
                         st.rerun() # 刷新 UI 状态
 
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -552,6 +573,10 @@ with tab_health:
                 st.rerun()
 
         if prompt := st.chat_input("Ask your agents a question...", key="global_chat_input"):
+            # 尝试自动解析待确认问题的回答
+            if 'memory_engine' in st.session_state:
+                _try_resolve_pending(prompt, st.session_state.memory_engine)
+
             with st.spinner("Supervisor is routing your request..."):
                 import datetime
                 today_str = datetime.date.today().isoformat()
@@ -585,12 +610,21 @@ with tab_health:
                 }
                 
                 context_str = f"=== REAL-TIME SNAPSHOT & MEMORIES ===\n{json.dumps(global_context, indent=2, ensure_ascii=False)}"
-                
+
+                # Inject CME concierge prompts BEFORE the main context so LLM sees them first
+                if 'memory_engine' in st.session_state:
+                    concierge = st.session_state.memory_engine.get_active_concierge_prompts()
+                    if concierge:
+                        context_str = concierge + "\n\n" + context_str
+
                 agent.chat(
-                    user_input=prompt, 
+                    user_input=prompt,
                     thread_id=thread_id,
                     system_context=context_str
                 )
+
+                # 每次全局对话后自动触发记忆整理，将用户回答沉淀到认知图谱
+                agent.consolidate_and_learn(thread_id)
             st.rerun()
 
         history = agent.get_history(thread_id)
