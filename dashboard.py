@@ -39,19 +39,26 @@ if __name__ == "__main__":
 import streamlit as st
 import pandas as pd
 import datetime
+import json
 import altair as alt
 from data_processor import DataProcessor
-from agentic_coach import AgenticCoach 
+from agentic_coach import AgenticCoach
+from cognitive_memory_engine import MemoryOS
 
 st.set_page_config(layout="wide", page_title="Training Block Manager")
 
 # Initialize Processors
 processor = DataProcessor()
 
-# Initialize the LangGraph Agent globally
+# Initialize the LangGraph Agent globally (with Cognitive Memory Engine)
 if "agent" not in st.session_state:
-    st.session_state.agent = AgenticCoach()
-    st.session_state.thread_id = "unified_copilot_thread" 
+    memory_engine = MemoryOS(
+        db_path="data/cognition.db",
+        semantic_profile_path=processor.paths["semantic_memory"],
+    )
+    st.session_state.memory_engine = memory_engine
+    st.session_state.agent = AgenticCoach(memory_engine=memory_engine)
+    st.session_state.thread_id = "unified_copilot_thread"
 
 agent = st.session_state.agent
 thread_id = st.session_state.thread_id
@@ -308,7 +315,9 @@ with tab_train:
                             if chat_summary:
                                 # 2. 将精华追加到情景记忆库中
                                 processor.append_chat_to_episodic_memory(run_id, chat_summary)
-                                
+                            # 3. CME: 提取话题、事件、冲突到认知图谱
+                            agent.consolidate_and_learn(f"run_analysis_{run_id}")
+
                         del st.session_state[f"report_{run_id}"]
                         st.rerun()
 
