@@ -17,13 +17,16 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 class AgenticCoach:
-    # --- STEP 1: 引入 Semantic Memory ---
-    def __init__(self, db_path="data/chat_memory.db", user_profile: dict = None):
+    # --- STEP 1: 引入 Semantic Memory + Cognitive Memory Engine ---
+    def __init__(self, db_path="data/chat_memory.db", user_profile: dict = None, memory_engine=None):
         self.db_path = db_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        
+
         # 接收全局档案，如果没有传入则给个空的
         self.user_profile = user_profile or {}
+
+        # Cognitive Memory Engine (CME) — optional but recommended
+        self.memory_engine = memory_engine
         
         self.api_key = self._find_api_key()
         if not self.api_key:
@@ -91,17 +94,37 @@ class AgenticCoach:
             return "doctor"
         return "coach"
 
-    # --- STEP 1 延续: 将全局记忆焊入 System Prompt ---
+    # --- STEP 1 延续: 将全局记忆 + 认知引擎上下文焊入 System Prompt ---
+    def _build_cognitive_context(self, state: State) -> str:
+        """Extract cognitive memory context if CME is available."""
+        if not self.memory_engine:
+            return ""
+        try:
+            last_msg = state["messages"][-1].content if state["messages"] else ""
+            if isinstance(last_msg, list):
+                last_msg = "".join(
+                    block.get("text", "") for block in last_msg
+                    if isinstance(block, dict) and "text" in block
+                )
+            ctx = self.memory_engine.retrieve_working_context(last_msg)
+            if ctx:
+                return f"\n\n=== 认知记忆上下文 (COGNITIVE MEMORY) ===\n{ctx}\n=== END COGNITIVE MEMORY ==="
+        except Exception as e:
+            print(f"[CME] context retrieval error: {e}")
+        return ""
+
     def _coach_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
+        cme_ctx = self._build_cognitive_context(state)
         sys_msg = SystemMessage(content=f"""
-        You are an elite Running Coach and Sports Physiologist. 
+        You are an elite Running Coach and Sports Physiologist.
         Focus on biomechanics, pace, splits, and training, but ALWAYS connect them to the athlete's overall health context.
-        
+
         === USER BASELINE PROFILE (SEMANTIC MEMORY) ===
         {profile_str}
         ===============================================
         Use this baseline to evaluate all incoming data.
+        {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
         response = self.llm.invoke(messages)
@@ -109,14 +132,16 @@ class AgenticCoach:
 
     def _doctor_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
+        cme_ctx = self._build_cognitive_context(state)
         sys_msg = SystemMessage(content=f"""
-        You are an elite physiological Health Doctor. 
-        Focus on HRV, Sleep Scores, and nervous system recovery. 
-        
+        You are an elite physiological Health Doctor.
+        Focus on HRV, Sleep Scores, and nervous system recovery.
+
         === USER BASELINE PROFILE (SEMANTIC MEMORY) ===
         {profile_str}
         ===============================================
         Acknowledge running data if it explains fatigue, but stick to your domain.
+        {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
         response = self.llm.invoke(messages)
@@ -125,21 +150,27 @@ class AgenticCoach:
     def chat(self, user_input: str, thread_id: str, system_context: str = None):
         config = {"configurable": {"thread_id": thread_id}}
         messages_to_send = []
-        
+
+        # Inject CME concierge prompts for new conversations
+        if self.memory_engine and not system_context:
+            concierge = self.memory_engine.get_active_concierge_prompts()
+            if concierge:
+                messages_to_send.append(SystemMessage(content=concierge))
+
         if system_context:
             messages_to_send.append(SystemMessage(content=system_context))
-            
+
         messages_to_send.append(HumanMessage(content=user_input))
-        
+
         events = self.graph.stream(
-            {"messages": messages_to_send}, 
-            config, 
+            {"messages": messages_to_send},
+            config,
             stream_mode="values"
         )
-        
+
         for event in events:
             final_message = event["messages"][-1]
-            
+
         content = final_message.content
         if isinstance(content, list):
             return "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
@@ -276,6 +307,31 @@ class AgenticCoach:
         except Exception as e:
             print(f"Error generating episodic memory: {e}")
             return {"tags": ["Analysis"], "summary_text": f"Completed {run_name}."}
+
+    def consolidate_and_learn(self, thread_id: str):
+        """
+        Triggers CME background consolidation for a completed conversation.
+        Extracts topics, episodes, and conflicts from the chat history.
+        """
+        if not self.memory_engine:
+            return
+        history = self.get_history(thread_id)
+        if len(history) <= 2:
+            return
+        chat_list = []
+        for msg in history:
+            if msg.type in ("human", "ai"):
+                content = msg.content
+                if isinstance(content, list):
+                    content = "".join(
+                        block.get("text", "") for block in content
+                        if isinstance(block, dict) and "text" in block
+                    )
+                chat_list.append({"role": msg.type, "content": str(content)})
+        try:
+            self.memory_engine.consolidate_memory_background(thread_id, chat_list)
+        except Exception as e:
+            print(f"[CME] consolidation error: {e}")
 
     def analyze_health(self, history_df, yesterday_raw, thread_id: str):
         import datetime

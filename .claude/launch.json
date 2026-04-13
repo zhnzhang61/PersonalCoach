@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api-server",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "uvicorn", "api_server:app", "--reload"],
+      "port": 8000
+    },
+    {
+      "name": "streamlit-dashboard",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "streamlit", "run", "dashboard.py"],
+      "port": 8501
+    }
+  ]
+}

@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from agentic_coach import AgenticCoach
+from cognitive_memory_engine import MemoryOS
 from data_processor import DataProcessor
 
 
@@ -28,7 +29,11 @@ app.add_middleware(
 )
 
 processor = DataProcessor()
-agent = AgenticCoach()
+memory_engine = MemoryOS(
+    db_path="data/cognition.db",
+    semantic_profile_path=processor.paths["semantic_memory"],
+)
+agent = AgenticCoach(memory_engine=memory_engine)
 
 
 def _default_window() -> tuple[str, str]:
@@ -77,6 +82,35 @@ class ChatInput(BaseModel):
     thread_id: str
     message: str
     system_context: str | None = None
+
+
+class TopicCreate(BaseModel):
+    name: str
+    root_category: str
+    status: str = "Open"
+    working_conclusion: str | None = None
+
+
+class TopicUpdate(BaseModel):
+    status: str | None = None
+    working_conclusion: str | None = None
+    name: str | None = None
+
+
+class EpisodeCreate(BaseModel):
+    event_type: str
+    context: dict[str, Any]
+    lesson_learned: str | None = None
+    related_topic_ids: list[str] = Field(default_factory=list)
+    timestamp: str | None = None
+
+
+class PendingResolve(BaseModel):
+    user_answer: str
+
+
+class ConsolidateInput(BaseModel):
+    thread_id: str
 
 
 class RunAnalysisInput(BaseModel):
@@ -270,6 +304,122 @@ def ai_history(thread_id: str) -> dict[str, Any]:
             content = "".join([block.get("text", "") for block in content if isinstance(block, dict)])
         messages.append({"type": msg.type, "content": str(content)})
     return {"thread_id": thread_id, "messages": messages}
+
+
+# ==================================================================
+# 🧠 Cognitive Memory Engine endpoints
+# ==================================================================
+
+
+@app.get("/api/memory/stats")
+def memory_stats() -> dict[str, Any]:
+    return memory_engine.stats()
+
+
+@app.get("/api/memory/context")
+def memory_context(query: str = "", metrics: str | None = None) -> dict[str, Any]:
+    current_metrics = json.loads(metrics) if metrics else None
+    ctx = memory_engine.retrieve_working_context(query, current_metrics)
+    return {"context": ctx}
+
+
+@app.get("/api/memory/concierge")
+def memory_concierge() -> dict[str, Any]:
+    prompts = memory_engine.get_active_concierge_prompts()
+    return {"prompts": prompts}
+
+
+# --- Topics ---
+
+
+@app.get("/api/memory/topics")
+def list_topics(status: str | None = None) -> dict[str, Any]:
+    topics = memory_engine.list_topics(status=status)
+    return {"topics": topics}
+
+
+@app.get("/api/memory/topics/{topic_id}")
+def get_topic(topic_id: str) -> dict[str, Any]:
+    topic = memory_engine.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(404, "Topic not found")
+    return topic
+
+
+@app.post("/api/memory/topics")
+def create_topic(body: TopicCreate) -> dict[str, Any]:
+    tid = memory_engine.create_topic(
+        name=body.name,
+        root_category=body.root_category,
+        status=body.status,
+        working_conclusion=body.working_conclusion,
+    )
+    return {"ok": True, "topic_id": tid}
+
+
+@app.put("/api/memory/topics/{topic_id}")
+def update_topic(topic_id: str, body: TopicUpdate) -> dict[str, Any]:
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    ok = memory_engine.update_topic(topic_id, **updates)
+    if not ok:
+        raise HTTPException(404, "Topic not found or no valid updates")
+    return {"ok": True}
+
+
+# --- Episodes ---
+
+
+@app.get("/api/memory/episodes")
+def list_episodes(
+    limit: int = 20, event_type: str | None = None
+) -> dict[str, Any]:
+    episodes = memory_engine.list_episodes(limit=limit, event_type=event_type)
+    return {"episodes": episodes}
+
+
+@app.post("/api/memory/episodes")
+def create_episode(body: EpisodeCreate) -> dict[str, Any]:
+    eid = memory_engine.create_episode(
+        event_type=body.event_type,
+        context=body.context,
+        lesson_learned=body.lesson_learned,
+        related_topic_ids=body.related_topic_ids,
+        timestamp=body.timestamp,
+    )
+    return {"ok": True, "episode_id": eid}
+
+
+@app.get("/api/memory/episodes/search")
+def search_episodes(q: str, limit: int = 10) -> dict[str, Any]:
+    keywords = q.split()
+    episodes = memory_engine.search_episodes(keywords, limit=limit)
+    return {"episodes": episodes}
+
+
+# --- Pending Clarifications ---
+
+
+@app.get("/api/memory/pending")
+def list_pending(resolved: bool = False) -> dict[str, Any]:
+    items = memory_engine.list_pending(resolved=resolved)
+    return {"pending": items}
+
+
+@app.post("/api/memory/pending/{pending_id}/resolve")
+def resolve_pending(pending_id: str, body: PendingResolve) -> dict[str, Any]:
+    ok = memory_engine.resolve_pending_question(pending_id, body.user_answer)
+    if not ok:
+        raise HTTPException(404, "Pending question not found or already resolved")
+    return {"ok": True}
+
+
+# --- Consolidation ---
+
+
+@app.post("/api/memory/consolidate")
+def consolidate_memory(body: ConsolidateInput) -> dict[str, Any]:
+    agent.consolidate_and_learn(body.thread_id)
+    return {"ok": True, "thread_id": body.thread_id}
 
 
 @app.get("/healthz")
