@@ -139,6 +139,194 @@ with tab_train:
     selected_week_label = st.selectbox("Select Week", list(week_opts.keys()), index=default_idx)
     current_week = week_opts[selected_week_label]
 
+    # ==========================================
+    # TRAINING CYCLE SUMMARY + WEEKLY SUMMARY
+    # ==========================================
+    @st.cache_data(ttl=300)
+    def _compute_cycle_and_week_stats(_processor, block_start, block_end, week_start, week_end, all_week_labels):
+        """Compute training cycle aggregate and current week stats."""
+        from collections import defaultdict
+
+        # --- Cycle-wide stats ---
+        all_runs_raw = _processor.get_activities_in_range(block_start, block_end)
+        all_runs = [r for r in all_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+
+        cycle_miles = 0
+        cycle_time_sec = 0
+        cycle_elevation_m = 0
+        cycle_calories = 0
+        cycle_hrs = []
+        cat_totals = defaultdict(lambda: {'dist_m': 0, 'time_s': 0, 'hr_weighted': 0, 'pace_weighted': 0, 'elev_m': 0})
+        longest_run_mi = 0
+
+        for r in all_runs:
+            dist_m = r.get('distance', 0)
+            dur_s = r.get('movingDuration', 0) or r.get('duration', 0)
+            hr = r.get('averageHR', 0) or 0
+            elev = r.get('elevationGain', 0) or 0
+            cal = r.get('calories', 0) or 0
+
+            mi = dist_m / 1609.34
+            cycle_miles += mi
+            cycle_time_sec += dur_s
+            cycle_elevation_m += elev
+            cycle_calories += cal
+            if hr > 0:
+                cycle_hrs.append(hr)
+            if mi > longest_run_mi:
+                longest_run_mi = mi
+
+            meta = r.get('manual_meta', {})
+            cs = meta.get('category_stats')
+            if cs:
+                for cat in cs:
+                    c = cat['category']
+                    cat_totals[c]['dist_m'] += cat['distance_mi'] * 1609.34
+                    cat_totals[c]['hr_weighted'] += cat.get('avg_hr', 0) * cat['distance_mi']
+                    pace_str = cat.get('pace', '')
+                    if pace_str and ':' in pace_str:
+                        parts = pace_str.split(':')
+                        pace_dec = int(parts[0]) + int(parts[1]) / 60
+                        cat_totals[c]['pace_weighted'] += pace_dec * cat['distance_mi']
+
+                # Accumulate elevation per effort from lap-level data
+                lap_cats = meta.get('lap_categories', [])
+                if lap_cats:
+                    laps = _processor.get_run_laps(r['activityId'])
+                    for i, lap in enumerate(laps):
+                        if i < len(lap_cats):
+                            c = lap_cats[i]
+                            cat_totals[c]['elev_m'] += lap.get('elevationGain', 0) or 0
+
+        cycle_avg_hr = sum(cycle_hrs) / len(cycle_hrs) if cycle_hrs else 0
+        cycle_pace_dec = (cycle_time_sec / (cycle_miles * 60)) if cycle_miles > 0 else 0
+        cycle_pace_str = f"{int(cycle_pace_dec)}:{int((cycle_pace_dec % 1) * 60):02d}" if cycle_miles > 0 else "N/A"
+
+        # Category breakdown sorted by distance
+        cat_rows = []
+        for cat, v in sorted(cat_totals.items(), key=lambda x: -x[1]['dist_m']):
+            cat_mi = v['dist_m'] / 1609.34
+            cat_hr = int(v['hr_weighted'] / cat_mi) if cat_mi > 0 else 0
+            pct = (cat_mi / cycle_miles * 100) if cycle_miles > 0 else 0
+            if cat_mi > 0 and v['pace_weighted'] > 0:
+                avg_pace = v['pace_weighted'] / cat_mi
+                pace_str = f"{int(avg_pace)}:{int((avg_pace % 1) * 60):02d}"
+            else:
+                pace_str = "—"
+            elev_ft = int(v['elev_m'] * 3.281)
+            cat_rows.append({
+                "Effort": cat,
+                "Miles": round(cat_mi, 1),
+                "% of Total": f"{pct:.0f}%",
+                "Avg Pace": pace_str,
+                "Avg HR": cat_hr if cat_hr > 0 else "—",
+                "Elev (ft)": f"{elev_ft:,}" if elev_ft > 0 else "—",
+            })
+
+        # --- Weekly mileage trend (for sparkline context) ---
+        weekly_miles = []
+        for w in all_week_labels:
+            w_runs_raw = _processor.get_activities_in_range(w['start'], w['end'])
+            w_runs = [r for r in w_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+            wm = sum(r.get('distance', 0) for r in w_runs) / 1609.34
+            weekly_miles.append({"Week": f"W{w['week_num']}", "Miles": round(wm, 1)})
+
+        # --- Current week stats ---
+        wk_runs_raw = _processor.get_activities_in_range(week_start, week_end)
+        wk_runs = [r for r in wk_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+        wk_miles = sum(r.get('distance', 0) for r in wk_runs) / 1609.34
+        wk_time_sec = sum(r.get('movingDuration', 0) or r.get('duration', 0) for r in wk_runs)
+        wk_hrs = [r.get('averageHR', 0) for r in wk_runs if r.get('averageHR')]
+        wk_elev = sum(r.get('elevationGain', 0) or 0 for r in wk_runs)
+        wk_avg_hr = sum(wk_hrs) / len(wk_hrs) if wk_hrs else 0
+        wk_pace_dec = (wk_time_sec / (wk_miles * 60)) if wk_miles > 0 else 0
+        wk_pace_str = f"{int(wk_pace_dec)}:{int((wk_pace_dec % 1) * 60):02d}" if wk_miles > 0 else "N/A"
+
+        # Week category breakdown
+        wk_cat_totals = defaultdict(float)
+        for r in wk_runs:
+            meta = r.get('manual_meta', {})
+            cs = meta.get('category_stats')
+            if cs:
+                for cat in cs:
+                    wk_cat_totals[cat['category']] += cat['distance_mi']
+
+        # Compare to cycle average per week
+        elapsed_weeks = max(1, current_week['week_num'])
+        avg_weekly_miles = cycle_miles / elapsed_weeks if elapsed_weeks > 0 else 0
+
+        return {
+            'cycle': {
+                'total_runs': len(all_runs),
+                'total_miles': round(cycle_miles, 1),
+                'total_hours': round(cycle_time_sec / 3600, 1),
+                'avg_pace': cycle_pace_str,
+                'avg_hr': int(cycle_avg_hr),
+                'elevation_ft': int(cycle_elevation_m * 3.281),
+                'calories': int(cycle_calories),
+                'longest_run': round(longest_run_mi, 1),
+                'avg_weekly_miles': round(avg_weekly_miles, 1),
+                'cat_rows': cat_rows,
+            },
+            'week': {
+                'runs': len(wk_runs),
+                'miles': round(wk_miles, 1),
+                'hours': round(wk_time_sec / 3600, 1),
+                'avg_pace': wk_pace_str,
+                'avg_hr': int(wk_avg_hr),
+                'elevation_ft': int(wk_elev * 3.281),
+                'cat_totals': dict(wk_cat_totals),
+                'vs_avg': round(wk_miles - avg_weekly_miles, 1),
+            },
+            'weekly_miles': weekly_miles,
+        }
+
+    stats = _compute_cycle_and_week_stats(
+        processor, current_block['start_date'], current_block['end_date'],
+        current_week['start'], current_week['end'], weeks
+    )
+    cy = stats['cycle']
+    wk = stats['week']
+
+    # --- Block 1: Training Cycle Overview ---
+    with st.expander(f"📊 Training Cycle Overview — {current_block['name']}", expanded=False):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Miles", f"{cy['total_miles']}")
+        m2.metric("Total Runs", cy['total_runs'])
+        m3.metric("Total Hours", cy['total_hours'])
+        m4.metric("Avg Weekly Miles", cy['avg_weekly_miles'])
+
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("Avg Pace", cy['avg_pace'])
+        m6.metric("Avg HR", cy['avg_hr'])
+        m7.metric("Elevation", f"{cy['elevation_ft']:,} ft")
+        m8.metric("Longest Run", f"{cy['longest_run']} mi")
+
+        if cy['cat_rows']:
+            st.markdown("**Effort Distribution** (categorized runs)")
+            st.dataframe(pd.DataFrame(cy['cat_rows']), hide_index=True, use_container_width=True)
+
+        # Weekly mileage mini-chart
+        wm_df = pd.DataFrame(stats['weekly_miles'])
+        chart = alt.Chart(wm_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X('Week:N', sort=None, title=None),
+            y=alt.Y('Miles:Q', title='Miles'),
+            color=alt.condition(
+                alt.datum.Week == f"W{current_week['week_num']}",
+                alt.value('#ff4b4b'),
+                alt.value('#4e8cff')
+            ),
+            tooltip=['Week', 'Miles']
+        ).properties(height=180, title="Weekly Mileage Progression")
+        st.altair_chart(chart, use_container_width=True)
+
+    # --- Block 2: This Week Summary ---
+    if wk['runs'] > 0:
+        vs_label = f"{wk['vs_avg']:+.1f} vs avg" if wk['vs_avg'] != 0 else "on avg"
+        st.info(f"**Week Stats:** {wk['runs']} Runs | {wk['miles']} Miles ({vs_label}) | Pace {wk['avg_pace']} | HR {wk['avg_hr']} | ↑ {wk['elevation_ft']:,} ft")
+    else:
+        st.info("**Week Stats:** No runs this week yet")
+
     col_main, col_sidebar = st.columns([3, 1])
 
     with col_sidebar:
@@ -160,9 +348,6 @@ with tab_train:
     with col_main:
         runs = processor.get_activities_in_range(current_week['start'], current_week['end'])
         runs_only = [r for r in runs if 'running' in r.get('activityType', {}).get('typeKey', '')]
-        
-        total_dist = sum([r.get('distance', 0) for r in runs_only]) / 1609.34
-        st.info(f"**Week Stats:** {len(runs_only)} Runs | {total_dist:.1f} Miles")
         
         for run in runs_only:
             run_id = run['activityId']
