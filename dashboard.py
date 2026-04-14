@@ -199,37 +199,45 @@ with tab_train:
                     
                     if has_stats:
                         if st.button("Analyze", key=f"ai_{run_id}"):
+                            # 检查是否已有历史对话，有则直接加载，无则调用 API
+                            existing_chat = processor.get_run_chat_history(run_id)
+                            if existing_chat:
+                                # 从历史记录中恢复：第一条 assistant 消息即为原始报告
+                                first_report = next(
+                                    (m["content"] for m in existing_chat if m["role"] == "assistant"),
+                                    None
+                                )
+                                if first_report:
+                                    st.session_state[f"report_{run_id}"] = first_report
+                                    st.rerun()
+
+                            # 没有历史对话，首次生成分析
                             with st.spinner("Coach is thinking..."):
-                                # --- 1. Build the NEW Working Memory Context ---
                                 ctx = processor.build_agent_working_memory(run_id, current_block['id'])
-                                
+
                                 if "error" not in ctx:
-                                    # Ensure latest manual edits are included
                                     ctx['workout_summary']['name'] = meta.get('name', run.get('activityName', 'Unnamed Workout'))
                                     ctx['workout_summary']['notes'] = meta.get('notes', '')
-                                    
-                                    # --- 2. Fetch Telemetry Data ---
+
                                     df_ai = None
                                     if has_telemetry and hasattr(processor, 'get_activity_telemetry'):
                                         _, df_ai = processor.get_activity_telemetry(run_id, laps=laps, downsample_sec=downsample_sec)
-                                    
-                                    # --- 3. Fetch Historical Memories (Episodic) ---
-                                    # Example: Find past runs with similar distance or type
-                                    # In a real app, you might extract tags dynamically first, but here we fetch general recent history
-                                    history = processor.search_episodic_memories(limit=3) 
 
-                                    # --- 4. Generate the Main Analysis Report ---
+                                    history = processor.search_episodic_memories(limit=3)
+
                                     report = agent.analyze_run(
-                                        working_memory_dict=ctx, 
-                                        thread_id=f"run_analysis_{run_id}", 
+                                        working_memory_dict=ctx,
+                                        thread_id=f"run_analysis_{run_id}",
                                         telemetry_df=df_ai,
                                         historical_memories=history
                                     )
-                                    
+
                                     st.session_state[f"report_{run_id}"] = report
-                                    
-                                    # --- 5. Generate and Save Episodic Memory (Background Task) ---
-                                    # We do this silently after the report is generated
+
+                                    # 将首次分析报告也存入本地对话历史
+                                    processor.save_run_chat_message(run_id, "assistant", report)
+
+                                    # 生成 Episodic Memory
                                     try:
                                         memory_payload = agent.generate_episodic_summary(ctx, telemetry_df=df_ai)
                                         processor.save_episodic_memory(

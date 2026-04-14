@@ -372,10 +372,11 @@ class MemoryOS:
             if len(w) >= 2
         ]
 
-        # --- 2. Gather active topics ---
+        # --- 2. Gather active topics + recently resolved as reference knowledge ---
         active_topics = self.list_topics(status="Open") + self.list_topics(
             status="Testing"
         )
+        resolved_topics = self.list_topics(status="Resolved")
 
         # --- 3. Search related episodes ---
         related_episodes = self.search_episodes(keywords, limit=5) if keywords else []
@@ -415,6 +416,15 @@ class MemoryOS:
                         f"  - [待探索] {t['name']}（尚无结论）。请询问用户目前情况如何？"
                     )
             sections.append("\n".join(topic_lines))
+
+        # Resolved topics — settled knowledge the AI should reference
+        if resolved_topics:
+            resolved_lines = ["✅ **已解决的话题 (settled knowledge — 请在相关讨论中引用这些结论):**"]
+            for t in resolved_topics[:10]:
+                resolved_lines.append(
+                    f"  - {t['name']} — 最终结论: {t['working_conclusion']}"
+                )
+            sections.append("\n".join(resolved_lines))
 
         # Related episodes / lessons
         if related_episodes:
