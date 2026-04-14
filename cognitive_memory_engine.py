@@ -23,30 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# LLM helper – uses the same Gemini setup as the rest of the project
-# ---------------------------------------------------------------------------
-_llm_instance = None
-
-
-def _get_llm(api_key: str | None = None):
-    """Lazy-init a lightweight Gemini model for memory consolidation."""
-    global _llm_instance
-    if _llm_instance is not None:
-        return _llm_instance
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    if api_key is None:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-        api_key = os.getenv("GEMINI_KEY") or os.getenv("GEMINI_API_KEY")
-
-    _llm_instance = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash", temperature=0.1, api_key=api_key
-    )
-    return _llm_instance
+from llm_provider import get_llm, invoke_llm
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +80,9 @@ class MemoryOS:
         self,
         db_path: str = "data/cognition.db",
         semantic_profile_path: str = "data/memory/user_profile.json",
-        api_key: str | None = None,
     ):
         self.db_path = db_path
         self.semantic_profile_path = semantic_profile_path
-        self._api_key = api_key
 
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -131,21 +106,14 @@ class MemoryOS:
     def _llm_invoke(self, prompt: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        llm = _get_llm(self._api_key)
-        response = llm.invoke(
+        return invoke_llm(
             [
                 SystemMessage(content="You are a memory analysis assistant. Always respond in valid JSON when asked for JSON."),
                 HumanMessage(content=prompt),
-            ]
+            ],
+            role="structured",
+            tag_response=False,  # internal use, no attribution needed
         )
-        content = response.content
-        if isinstance(content, list):
-            content = "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and "text" in block
-            )
-        return content.strip()
 
     # ------------------------------------------------------------------
     # Topic CRUD

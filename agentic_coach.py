@@ -1,17 +1,15 @@
 import os
 import sqlite3
 import json
-import streamlit as st
-from dotenv import load_dotenv
-from pathlib import Path
 from typing import Annotated, Literal
 from typing_extensions import TypedDict
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite import SqliteSaver
+
+from llm_provider import get_llm, invoke_llm, find_api_key, get_active_provider
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
@@ -27,15 +25,10 @@ class AgenticCoach:
 
         # Cognitive Memory Engine (CME) — optional but recommended
         self.memory_engine = memory_engine
-        
-        self.api_key = self._find_api_key()
-        if not self.api_key:
-            print("⚠️ Agentic Coach: No API Key found.")
-        else:
-            os.environ["GEMINI_API_KEY"] = self.api_key
-        
-        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.4, api_key=self.api_key)
-        self.router_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.0, api_key=self.api_key)
+
+        # LLM instances via centralized provider (with automatic fallback)
+        self.llm = get_llm("creative")           # coach/doctor responses
+        self.router_llm = get_llm("precise")     # deterministic routing
         
         graph_builder = StateGraph(State)
         graph_builder.add_node("coach", self._coach_node)
@@ -54,18 +47,6 @@ class AgenticCoach:
         self.memory = SqliteSaver(self.conn)
         self.graph = graph_builder.compile(checkpointer=self.memory)
 
-    def _find_api_key(self):
-        key = os.getenv("GEMINI_KEY")
-        if key: return key
-        current_dir = Path(__file__).resolve().parent
-        env_path = current_dir / ".env"
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-            key = os.getenv("GEMINI_KEY")
-            if key: return key
-        try: return st.secrets["GEMINI_KEY"]
-        except: return None
-
     def _route_message(self, state: State) -> str:
         last_msg = state["messages"][-1].content
         if isinstance(last_msg, list):
@@ -83,8 +64,12 @@ class AgenticCoach:
         
         User message: {last_msg}
         """
-        response = self.router_llm.invoke([HumanMessage(content=prompt)])
-        
+        try:
+            response = self.router_llm.invoke([HumanMessage(content=prompt)])
+        except Exception:
+            # Fallback: if router fails, default to coach
+            return "coach"
+
         content = response.content
         if isinstance(content, list):
             content = "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
@@ -113,6 +98,23 @@ class AgenticCoach:
             print(f"[CME] context retrieval error: {e}")
         return ""
 
+    def _invoke_with_fallback(self, messages: list, role: str = "creative"):
+        """Invoke LLM with automatic fallback on failure. Sets self._last_provider."""
+        try:
+            response = self.llm.invoke(messages)
+            self._last_provider = get_active_provider(role)
+            return response
+        except Exception as e:
+            print(f"[LLM] Primary model failed: {e}, trying fallback...")
+            try:
+                fallback_llm = get_llm(role, provider="omlx")
+                response = fallback_llm.invoke(messages)
+                self._last_provider = "omlx"
+                return response
+            except Exception as e2:
+                print(f"[LLM] Fallback also failed: {e2}")
+                raise e  # re-raise original error
+
     def _coach_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
         cme_ctx = self._build_cognitive_context(state)
@@ -127,7 +129,7 @@ class AgenticCoach:
         {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
-        response = self.llm.invoke(messages)
+        response = self._invoke_with_fallback(messages, "creative")
         return {"messages": [response]}
 
     def _doctor_node(self, state: State):
@@ -144,7 +146,7 @@ class AgenticCoach:
         {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
-        response = self.llm.invoke(messages)
+        response = self._invoke_with_fallback(messages, "creative")
         return {"messages": [response]}
 
     def chat(self, user_input: str, thread_id: str, system_context: str = None):
@@ -173,8 +175,14 @@ class AgenticCoach:
 
         content = final_message.content
         if isinstance(content, list):
-            return "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
-        return str(content)
+            content = "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
+        content = str(content)
+
+        # Append model attribution tag (uses actual provider from _invoke_with_fallback)
+        from llm_provider import _get_provider_name
+        provider = getattr(self, "_last_provider", None) or get_active_provider("creative")
+        content += f"\n\n[Generated by {_get_provider_name(provider)}]"
+        return content
         
     def get_history(self, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
@@ -205,8 +213,12 @@ class AgenticCoach:
         对话记录：
         {chat_text}
         """
-        # 使用 router_llm (Temperature=0) 保证总结客观精准
-        response = self.router_llm.invoke([HumanMessage(content=prompt)])
+        # 使用 precise role (Temperature=0) 保证总结客观精准
+        try:
+            response = self.router_llm.invoke([HumanMessage(content=prompt)])
+        except Exception:
+            fallback = get_llm("precise", provider="omlx")
+            response = fallback.invoke([HumanMessage(content=prompt)])
         return response.content.strip()
 
     # --- STEP 2: Working Memory 融合分析 ---
@@ -296,8 +308,8 @@ class AgenticCoach:
             "summary_text": "Your dense summary here."
         }}
         """
-        # Create a temporary stateless LLM call for formatting
-        formatting_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, api_key=self.api_key)
+        # Use structured role (low temperature) for JSON formatting
+        formatting_llm = get_llm("structured")
         response = formatting_llm.invoke([SystemMessage(content="You return strictly JSON."), HumanMessage(content=prompt)])
         
         try:
