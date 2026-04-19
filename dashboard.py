@@ -82,6 +82,68 @@ thread_id = st.session_state.thread_id
 
 st.title("🏃‍♂️ Training & Health Dashboard")
 
+# --- CME Topic Decision Queue ---
+# When consolidation can't auto-match an LLM proposal to an existing topic
+# (cosine < MATCH_THRESHOLD), it parks the proposal here. User resolves:
+# merge into an existing topic, create as a new topic, or reject.
+memory_engine = st.session_state.memory_engine
+_pending_decisions = memory_engine.list_pending_decisions()
+if _pending_decisions:
+    with st.expander(
+        f"🧠 Memory decisions waiting ({len(_pending_decisions)})",
+        expanded=False,
+    ):
+        st.caption(
+            "The AI proposed new memory entries that didn't strongly match any "
+            "existing topic. Pick the right action for each."
+        )
+        for decision in _pending_decisions:
+            did = decision["decision_id"]
+            kind = decision["kind"]
+            proposal = decision["proposal"]
+            candidates = decision["candidates"]
+
+            header = (
+                f"**[{kind}]** {proposal.get('name') or proposal.get('subject_summary') or proposal.get('question_for_user', '')[:60]}"
+            )
+            st.markdown("---")
+            st.markdown(header)
+            if proposal.get("working_conclusion"):
+                st.markdown(f"_conclusion:_ {proposal['working_conclusion']}")
+            if proposal.get("question_for_user"):
+                st.markdown(f"_question:_ {proposal['question_for_user']}")
+
+            if candidates:
+                st.markdown("**Top candidates** (pick one to merge into):")
+                label_to_tid: dict[str, str] = {}
+                for c in candidates[:5]:
+                    label = f"{c['score']:.3f}  [{c['topic_id']}]  {c['name']} ({c['status']})"
+                    label_to_tid[label] = c["topic_id"]
+                chosen_label = st.radio(
+                    "candidate",
+                    options=list(label_to_tid.keys()),
+                    key=f"dec_radio_{did}",
+                    label_visibility="collapsed",
+                )
+                chosen_tid = label_to_tid[chosen_label]
+            else:
+                chosen_tid = None
+                st.caption("(no candidates — can only create-new or reject)")
+
+            col1, col2, col3 = st.columns(3)
+            if col1.button("Merge into selected", key=f"dec_merge_{did}", disabled=chosen_tid is None):
+                memory_engine.resolve_topic_decision(did, "merge", target_topic_id=chosen_tid)
+                st.toast(f"✅ Merged into {chosen_tid}")
+                st.rerun()
+            if col2.button("Create new", key=f"dec_create_{did}"):
+                new_tid = memory_engine.resolve_topic_decision(did, "create_new")
+                st.toast(f"➕ Created {new_tid}")
+                st.rerun()
+            if col3.button("Reject", key=f"dec_reject_{did}"):
+                memory_engine.resolve_topic_decision(did, "reject")
+                st.toast("🗑️ Rejected")
+                st.rerun()
+
 # --- GLOBAL SIDEBAR ACTIONS ---
 # --- GLOBAL SIDEBAR ACTIONS ---
 st.sidebar.subheader("🔄 Data Management")
@@ -492,13 +554,23 @@ with tab_train:
                     
                     # --- NEW: FOLLOW-UP CHAT UI ---
                     st.markdown("#### 💬 Discuss this Run")
-                    
+
+                    # Agent dropdown — Training Log tab defaults to Coach
+                    _run_agent_label_to_key = {"🏃 Coach (running, pace, training)": "coach", "❤️ Doctor (recovery, HRV, sleep)": "doctor"}
+                    _selected_run_agent = st.selectbox(
+                        "Who should answer?",
+                        options=list(_run_agent_label_to_key.keys()),
+                        index=0,  # Coach default on this tab
+                        key=f"agent_selector_run_{run_id}",
+                    )
+                    active_agent_run = _run_agent_label_to_key[_selected_run_agent]
+
                     # 1. 渲染历史对话记录
                     chat_history = processor.get_run_chat_history(run_id)
                     for msg in chat_history:
                         with st.chat_message(msg["role"]):
                             st.markdown(msg["content"])
-                            
+
                     # 2. 渲染输入框并处理新问题
                     if run_prompt := st.chat_input("Ask a follow-up about this run...", key=f"chat_input_{run_id}"):
                         # 尝试自动解析待确认问题的回答
@@ -514,7 +586,7 @@ with tab_train:
                         with st.chat_message("assistant"):
                             with st.spinner("Coach is reviewing the telemetry..."):
                                 # 发送到这个 run_id 专属的 Thread 中
-                                response = agent.follow_up_chat(user_input=run_prompt, thread_id=f"run_analysis_{run_id}")
+                                response = agent.follow_up_chat(user_input=run_prompt, thread_id=f"run_analysis_{run_id}", agent=active_agent_run)
                                 st.markdown(response)
                                 # 将 AI 的回答存入本地
                                 processor.save_run_chat_message(run_id, "assistant", response)
@@ -736,7 +808,17 @@ with tab_health:
         # ==========================================
         st.divider()
         st.subheader("🤖 Unified AI Co-Pilot")
-        st.caption("Ask questions about your pacing, HRV, sleep, or training blocks. The Supervisor will route it to the right expert.")
+        st.caption("Pick who answers, then ask away. Defaults to Doctor here — switch to Coach for training questions.")
+
+        # Agent dropdown — Recovery & Health tab defaults to Doctor
+        _agent_label_to_key = {"❤️ Doctor (recovery, HRV, sleep)": "doctor", "🏃 Coach (running, pace, training)": "coach"}
+        _selected_agent_health = st.selectbox(
+            "Who should answer?",
+            options=list(_agent_label_to_key.keys()),
+            index=0,  # Doctor default on this tab
+            key="agent_selector_health",
+        )
+        active_agent_health = _agent_label_to_key[_selected_agent_health]
 
         if st.button("🩺 Analyze Today's Health"):
             with st.spinner("Doctor is reviewing your charts..."):
@@ -813,7 +895,8 @@ with tab_health:
                 agent.chat(
                     user_input=prompt,
                     thread_id=thread_id,
-                    system_context=context_str
+                    system_context=context_str,
+                    agent=active_agent_health,
                 )
 
                 # 每次全局对话后自动触发记忆整理，将用户回答沉淀到认知图谱
