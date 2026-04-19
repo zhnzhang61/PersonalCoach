@@ -94,3 +94,8 @@ dependencies = [
 
 [tool.uv.sources]
 pirate-garmin = { git = "https://github.com/jeffton/pirate-garmin.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
