@@ -103,10 +103,44 @@ if _pending_decisions:
             proposal = decision["proposal"]
             candidates = decision["candidates"]
 
+            st.markdown("---")
+
+            if kind == "episode_linking":
+                st.markdown(f"**[episode_linking]** {proposal.get('what', '')[:80]}")
+                if proposal.get("lesson_learned"):
+                    st.markdown(f"_lesson:_ {proposal['lesson_learned']}")
+                st.caption(f"event_type: {proposal.get('event_type', '')}")
+
+                all_topics = memory_engine.list_topics()
+                tid_to_label = {
+                    t["topic_id"]: f"[{t['topic_id']}] {t['name']} ({t['status']})"
+                    for t in all_topics
+                }
+                picked = st.multiselect(
+                    "Pick topics this episode belongs to (leave empty to keep unlinked)",
+                    options=list(tid_to_label.keys()),
+                    format_func=lambda t: tid_to_label[t],
+                    key=f"dec_link_{did}",
+                )
+                col1, col2 = st.columns(2)
+                if col1.button("Link", key=f"dec_link_btn_{did}"):
+                    memory_engine.resolve_topic_decision(
+                        did, "link", target_topic_ids=picked
+                    )
+                    if picked:
+                        st.toast(f"🔗 Linked to {len(picked)} topic(s)")
+                    else:
+                        st.toast("Kept unlinked")
+                    st.rerun()
+                if col2.button("Reject", key=f"dec_reject_{did}"):
+                    memory_engine.resolve_topic_decision(did, "reject")
+                    st.toast("🗑️ Rejected")
+                    st.rerun()
+                continue
+
             header = (
                 f"**[{kind}]** {proposal.get('name') or proposal.get('subject_summary') or proposal.get('question_for_user', '')[:60]}"
             )
-            st.markdown("---")
             st.markdown(header)
             if proposal.get("working_conclusion"):
                 st.markdown(f"_conclusion:_ {proposal['working_conclusion']}")

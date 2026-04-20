@@ -436,6 +436,245 @@ class TestConsolidateV2:
             assert not mc.called
             assert not me.called
 
+    def test_duplicate_episode_skipped_on_rerun(self, mem):
+        """Same (thread, event_type, what) across two consolidation runs → one row."""
+        llm_json = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "Health_Observation",
+                    "what": "用户报告2026-03-22有点感冒",
+                    "lesson_learned": None,
+                    "related_topic_names": [],
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({}),
+        ):
+            mem.consolidate_memory_background("same_thread", self.CHAT)
+            mem.consolidate_memory_background("same_thread", self.CHAT)
+
+        count = mem.conn.execute(
+            "SELECT COUNT(*) FROM episodes WHERE event_type='Health_Observation'"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_duplicate_dedup_scoped_to_thread(self, mem):
+        """Same (event_type, what) but different thread → two rows (dedup is per-thread)."""
+        llm_json = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "Health_Observation",
+                    "what": "头疼",
+                    "lesson_learned": None,
+                    "related_topic_names": [],
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({}),
+        ):
+            mem.consolidate_memory_background("thread_A", self.CHAT)
+            mem.consolidate_memory_background("thread_B", self.CHAT)
+
+        count = mem.conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        assert count == 2
+
+    def test_duplicate_skip_still_adds_new_topic_links(self, mem):
+        """If the second run discovers a matching topic, link it to the existing row."""
+        llm_json_first = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "Training_Insight",
+                    "what": "长跑后心率偏高",
+                    "lesson_learned": None,
+                    "related_topic_names": [],  # first run: no topic match
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json_first)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({}),
+        ):
+            mem.consolidate_memory_background("t_link", self.CHAT)
+
+        # After run 1: episode exists, no links
+        eid = mem.conn.execute("SELECT episode_id FROM episodes").fetchone()[0]
+        n_links = mem.conn.execute(
+            "SELECT COUNT(*) FROM topic_episode_links WHERE episode_id=?", (eid,)
+        ).fetchone()[0]
+        assert n_links == 0
+
+        # Between runs: a matching topic gets created
+        hr_tid = mem.create_topic(name="心率区间", root_category="Running")
+
+        llm_json_second = dict(llm_json_first)
+        llm_json_second["new_episodes"] = [
+            dict(llm_json_first["new_episodes"][0], related_topic_names=["心率区间"])
+        ]
+
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json_second)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({"心率区间": [1.0, 0.0, 0.0]}),
+        ):
+            mem.consolidate_memory_background("t_link", self.CHAT)
+
+        # Still one episode, now linked to hr_tid
+        assert mem.conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
+        assert mem.conn.execute(
+            "SELECT COUNT(*) FROM topic_episode_links WHERE episode_id=? AND topic_id=?",
+            (eid, hr_tid),
+        ).fetchone()[0] == 1
+
+    def test_empty_related_topic_names_parks_decision(self, mem):
+        """LLM returns related_topic_names=[] → park episode_linking decision."""
+        mem.create_topic(name="心率区间", root_category="Running")  # need ≥1 topic
+        llm_json = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "Training_Insight",
+                    "what": "说不清关联哪个 topic",
+                    "lesson_learned": None,
+                    "related_topic_names": [],
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({}),
+        ):
+            mem.consolidate_memory_background("t_orphan", self.CHAT)
+
+        pending = [d for d in mem.list_pending_decisions() if d["kind"] == "episode_linking"]
+        assert len(pending) == 1
+        assert pending[0]["proposal"]["what"] == "说不清关联哪个 topic"
+        assert pending[0]["proposal"]["episode_id"].startswith("epi_")
+
+    def test_non_empty_related_topic_names_does_not_park(self, mem):
+        """LLM fills related_topic_names → normal link path, no decision parked."""
+        mem.create_topic(name="心率区间", root_category="Running")
+        llm_json = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "Training_Insight",
+                    "what": "心率太高",
+                    "lesson_learned": None,
+                    "related_topic_names": ["心率区间"],
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({"心率区间": [1.0, 0.0, 0.0]}),
+        ):
+            mem.consolidate_memory_background("t_ok", self.CHAT)
+
+        assert not [d for d in mem.list_pending_decisions() if d["kind"] == "episode_linking"]
+
+    def test_resolve_link_action_writes_junction_rows(self, mem):
+        """resolve_topic_decision(action='link', target_topic_ids=[...]) wires up junction."""
+        t1 = mem.create_topic(name="心率区间", root_category="Running")
+        t2 = mem.create_topic(name="训练强度", root_category="Running")
+        eid = mem.create_episode(
+            event_type="Training_Insight",
+            context={"what": "orphan", "source_thread": "x"},
+        )
+        did = mem.park_topic_decision(
+            "episode_linking",
+            {"episode_id": eid, "event_type": "Training_Insight", "what": "orphan"},
+            [],
+        )
+
+        result = mem.resolve_topic_decision(did, "link", target_topic_ids=[t1, t2])
+        assert set(result) == {t1, t2}
+
+        links = mem.conn.execute(
+            "SELECT topic_id FROM topic_episode_links WHERE episode_id=?", (eid,)
+        ).fetchall()
+        assert {r["topic_id"] for r in links} == {t1, t2}
+
+        row = mem.conn.execute(
+            "SELECT status, resolution FROM topic_decisions WHERE decision_id=?", (did,)
+        ).fetchone()
+        assert row["status"] == "linked"
+        assert t1 in row["resolution"] and t2 in row["resolution"]
+
+    def test_resolve_link_with_empty_list_keeps_unlinked(self, mem):
+        """Empty target_topic_ids closes the decision without writing junction rows."""
+        eid = mem.create_episode(
+            event_type="General", context={"what": "x", "source_thread": "y"}
+        )
+        did = mem.park_topic_decision(
+            "episode_linking",
+            {"episode_id": eid, "event_type": "General", "what": "x"},
+            [],
+        )
+        mem.resolve_topic_decision(did, "link", target_topic_ids=[])
+
+        n_links = mem.conn.execute(
+            "SELECT COUNT(*) FROM topic_episode_links WHERE episode_id=?", (eid,)
+        ).fetchone()[0]
+        assert n_links == 0
+        row = mem.conn.execute(
+            "SELECT status FROM topic_decisions WHERE decision_id=?", (did,)
+        ).fetchone()
+        assert row["status"] == "linked"
+
+    def test_timestamp_source_defaults_to_unknown(self, mem):
+        """LLM returning no event_timestamp/event_date_text → stored as 'unknown', not NULL."""
+        llm_json = {
+            "new_topics": [], "topic_updates": [], "conflicts": [],
+            "new_episodes": [
+                {
+                    "event_type": "General",
+                    "what": "something fuzzy",
+                    "lesson_learned": None,
+                    "related_topic_names": [],
+                    # event_timestamp / event_date_text omitted
+                }
+            ],
+        }
+        with patch(
+            "cognitive_memory_engine.call_llm",
+            return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
+        ), patch(
+            "cognitive_memory_engine.call_embedding",
+            side_effect=_stub_embeddings({}),
+        ):
+            mem.consolidate_memory_background("t_ts", self.CHAT)
+
+        row = mem.conn.execute(
+            "SELECT event_timestamp, event_date_text, timestamp_source FROM episodes"
+        ).fetchone()
+        assert row["event_timestamp"] is None
+        assert row["event_date_text"] is None
+        assert row["timestamp_source"] == "unknown"
+
 
 # ==========================================================================
 # E. Decision queue (low-confidence proposals → UI confirmation)
