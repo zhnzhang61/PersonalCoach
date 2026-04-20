@@ -71,12 +71,12 @@ CREATE TABLE IF NOT EXISTS pending_clarifications (
 -- rows for the user to confirm: merge-into-X / create-new / reject.
 CREATE TABLE IF NOT EXISTS topic_decisions (
     decision_id     TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK(kind IN ('new_topic', 'conflict')),
+    kind            TEXT NOT NULL CHECK(kind IN ('new_topic', 'conflict', 'episode_linking')),
     proposal_json   TEXT NOT NULL,           -- LLM proposal as emitted
     candidates_json TEXT NOT NULL DEFAULT '[]',  -- [{topic_id, name, status, score}, ...]
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending', 'merged', 'created', 'rejected')),
-    resolution      TEXT,                     -- "merged:tpc_xxx" | "created:tpc_xxx" | "rejected"
+                    CHECK(status IN ('pending', 'merged', 'created', 'rejected', 'linked')),
+    resolution      TEXT,                     -- "merged:tpc_xxx" | "created:tpc_xxx" | "linked:tpc_a,tpc_b" | "rejected"
     created_at      TEXT NOT NULL,
     resolved_at     TEXT
 );
@@ -107,6 +107,7 @@ class MemoryOS:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA_SQL)
         self.conn.commit()
+        self._migrate_topic_decisions_check()
 
         # In-memory topic-embedding cache. Key: topic_id. Value: (signature, vector).
         # The `signature` is a hash of (name + working_conclusion) — if it
@@ -117,6 +118,42 @@ class MemoryOS:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _migrate_topic_decisions_check(self) -> None:
+        """
+        CHECK constraints in SQLite are immutable; if the existing DB was
+        created before `episode_linking`/`linked` were legal values, rebuild
+        the table. Idempotent: noop when the current schema already allows them.
+        """
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='topic_decisions'"
+        ).fetchone()
+        if not row or not row["sql"]:
+            return
+        if "episode_linking" in row["sql"] and "linked" in row["sql"]:
+            return  # already migrated
+
+        self.conn.executescript(
+            """
+            BEGIN;
+            CREATE TABLE topic_decisions_new (
+                decision_id     TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL CHECK(kind IN ('new_topic', 'conflict', 'episode_linking')),
+                proposal_json   TEXT NOT NULL,
+                candidates_json TEXT NOT NULL DEFAULT '[]',
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK(status IN ('pending', 'merged', 'created', 'rejected', 'linked')),
+                resolution      TEXT,
+                created_at      TEXT NOT NULL,
+                resolved_at     TEXT
+            );
+            INSERT INTO topic_decisions_new SELECT * FROM topic_decisions;
+            DROP TABLE topic_decisions;
+            ALTER TABLE topic_decisions_new RENAME TO topic_decisions;
+            CREATE INDEX IF NOT EXISTS idx_topic_decisions_pending ON topic_decisions(status);
+            COMMIT;
+            """
+        )
+
     def _now(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -268,6 +305,26 @@ class MemoryOS:
             )
         self.conn.commit()
         return episode_id
+
+    def _find_duplicate_episode(
+        self, thread_id: str, event_type: str, what: str
+    ) -> str | None:
+        """
+        Return the episode_id of an existing row with the same (thread, type, what),
+        or None if no match. Used by consolidation to skip re-extraction of the same
+        historical fact across consecutive runs.
+        """
+        if not what:
+            return None
+        row = self.conn.execute(
+            """SELECT episode_id FROM episodes
+               WHERE event_type = ?
+                 AND json_extract(context_json, '$.source_thread') = ?
+                 AND json_extract(context_json, '$.what') = ?
+               LIMIT 1""",
+            (event_type, thread_id, what),
+        ).fetchone()
+        return row["episode_id"] if row else None
 
     def add_topic_episode_link(self, topic_id: str, episode_id: str) -> bool:
         """
@@ -706,9 +763,10 @@ class MemoryOS:
     ) -> str:
         """
         Queue a consolidation proposal that the matcher couldn't auto-resolve.
-        kind: 'new_topic' or 'conflict'. UI surfaces pending rows for user action.
+        kind: 'new_topic' | 'conflict' | 'episode_linking'. UI surfaces
+        pending rows for user action.
         """
-        if kind not in ("new_topic", "conflict"):
+        if kind not in ("new_topic", "conflict", "episode_linking"):
             raise ValueError(f"Unknown decision kind: {kind}")
         decision_id = f"dec_{uuid.uuid4().hex[:8]}"
         self.conn.execute(
@@ -743,7 +801,8 @@ class MemoryOS:
         decision_id: str,
         action: str,
         target_topic_id: str | None = None,
-    ) -> str | None:
+        target_topic_ids: list[str] | None = None,
+    ) -> str | list[str] | None:
         """
         Apply the user's verdict on a parked decision.
 
@@ -752,10 +811,16 @@ class MemoryOS:
                            For new_topic: updates target's conclusion.
                            For conflict: promote_topic_to_conflicting on target.
           - 'create_new' → create the topic the LLM originally proposed.
+          - 'link'       → (episode_linking only) link the parked episode to
+                           every topic in `target_topic_ids`. Empty list means
+                           "keep episode unlinked" (still closes the decision).
           - 'reject'     → discard the proposal entirely.
 
-        Returns the resulting topic_id (for merge / create_new), or None for reject.
-        Returns the empty string "" on failure (decision missing or already resolved).
+        Returns:
+          - topic_id str for 'merge' / 'create_new'
+          - list[str] of linked topic_ids for 'link'
+          - None for 'reject'
+          - ""  on failure (decision missing or already resolved).
         """
         row = self.conn.execute(
             "SELECT * FROM topic_decisions WHERE decision_id = ? AND status = 'pending'",
@@ -834,6 +899,18 @@ class MemoryOS:
                 self.conn.commit()
             resolution = f"created:{result_tid}"
 
+        elif action == "link":
+            if kind != "episode_linking":
+                raise ValueError("action='link' only valid for kind='episode_linking'")
+            episode_id = proposal.get("episode_id")
+            if not episode_id:
+                raise ValueError("episode_linking proposal missing episode_id")
+            ids = target_topic_ids or []
+            for tid in ids:
+                self.add_topic_episode_link(tid, episode_id)
+            result_tid = ids  # type: ignore[assignment]
+            resolution = f"linked:{','.join(ids)}" if ids else "linked:"
+
         elif action == "reject":
             result_tid = None
             resolution = "rejected"
@@ -841,13 +918,17 @@ class MemoryOS:
         else:
             raise ValueError(f"Unknown action: {action}")
 
+        status_map = {
+            "merge": "merged",
+            "create_new": "created",
+            "link": "linked",
+            "reject": "rejected",
+        }
         self.conn.execute(
             """UPDATE topic_decisions
-               SET status = CASE ? WHEN 'merge' THEN 'merged' WHEN 'create_new' THEN 'created' ELSE 'rejected' END,
-                   resolution = ?,
-                   resolved_at = ?
+               SET status = ?, resolution = ?, resolved_at = ?
                WHERE decision_id = ?""",
-            (action, resolution, self._now(), decision_id),
+            (status_map[action], resolution, self._now(), decision_id),
         )
         self.conn.commit()
         return result_tid
@@ -987,7 +1068,7 @@ class MemoryOS:
       "lesson_learned": "经验教训",
       "related_topic_names": ["相关话题的名字"],
       "event_date_text": "用户提到的日期原文，如 '3月28号' '上周三' '最近'；没提就 null",
-      "event_timestamp": "能解析成 ISO 8601 就填，相对日期请基于今日日期推算；含糊/无法推断就 null"
+      "event_timestamp": "ISO 8601 日期 YYYY-MM-DD。**只要 what 里出现了任何可以推出具体日期的线索**（'3月22号' / '2026-04-02' / '上周三' / '前天'），就必须换算成 ISO 日期。今日是 {today_iso}，相对日期按此推算。只有真的模糊到无法推断（'最近' '前阵子'）才填 null。"
     }}
   ],
   "conflicts": [
@@ -1006,6 +1087,8 @@ class MemoryOS:
 - conflicts[] 只在新信息与用户档案或既有话题**真正矛盾**时才生成。**不要**为"同一话题再讨论一次"生成 conflict。
 - topic_updates 只针对 topic_id 在上方列表中已存在的
 - related_topic_names 写话题的名字（不是 id），系统会自动匹配到正确的 topic_id
+- **event_timestamp 铁律**：只要 what 里写了日期（任何形式），就必须同时在 event_timestamp 填成 YYYY-MM-DD。日期不能只存在文本里而结构化字段为 null。
+- **related_topic_names 铁律**：如果 episode 的内容明显关联上方列表里的某个 topic（同一症状、同一训练主题、同一偏好等），必须把那个 topic 的名字填进 related_topic_names。不要偷懒留空数组；只有当 episode 真的和所有已知 topic 都无关时才填 []。
 """
 
         try:
@@ -1131,6 +1214,18 @@ class MemoryOS:
                 if mid and mid not in tids:
                     tids.append(mid)
 
+            event_type = ep.get("event_type", "General")
+            what = ep.get("what", "")
+
+            # Dedup: same (thread, event_type, what) already exists → skip create,
+            # but still try to connect any newly-discovered topic links.
+            dup_id = self._find_duplicate_episode(thread_id, event_type, what)
+            if dup_id:
+                for tid in tids:
+                    self.add_topic_episode_link(tid, dup_id)
+                print(f"[CME] duplicate episode skipped: {dup_id}")
+                continue
+
             event_ts = ep.get("event_timestamp")
             event_date_text = ep.get("event_date_text")
             ts_source = "unknown"
@@ -1138,24 +1233,39 @@ class MemoryOS:
                 ts_source = "user_explicit" if event_date_text else "caller"
 
             episode_id = self.create_episode(
-                event_type=ep.get("event_type", "General"),
+                event_type=event_type,
                 context={
-                    "what": ep.get("what", ""),
+                    "what": what,
                     "emotion": ep.get("emotion"),
                     "source_thread": thread_id,
                 },
                 lesson_learned=ep.get("lesson_learned"),
                 related_topic_ids=tids,
             )
-            # Backfill event-time columns (create_episode doesn't know about them yet)
-            if event_ts or event_date_text or ts_source != "unknown":
-                self.conn.execute(
-                    """UPDATE episodes
-                       SET event_timestamp = ?, event_date_text = ?, timestamp_source = ?
-                       WHERE episode_id = ?""",
-                    (event_ts, event_date_text, ts_source, episode_id),
+            # Always write event-time columns so timestamp_source reflects provenance
+            # ('unknown' when the LLM couldn't extract a date, not NULL).
+            self.conn.execute(
+                """UPDATE episodes
+                   SET event_timestamp = ?, event_date_text = ?, timestamp_source = ?
+                   WHERE episode_id = ?""",
+                (event_ts, event_date_text, ts_source, episode_id),
+            )
+            self.conn.commit()
+
+            # If the LLM left related_topic_names empty, park a decision so the
+            # user can pick manually. Don't auto-guess via heuristics — ground
+            # truth comes from the user (see feedback memory).
+            if not tids and all_topics:
+                self.park_topic_decision(
+                    kind="episode_linking",
+                    proposal={
+                        "episode_id": episode_id,
+                        "event_type": event_type,
+                        "what": what,
+                        "lesson_learned": ep.get("lesson_learned"),
+                    },
+                    candidates=[],
                 )
-                self.conn.commit()
 
     # ==================================================================
     # API 4: get_active_concierge_prompts
