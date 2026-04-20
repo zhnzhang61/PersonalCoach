@@ -9,10 +9,20 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from llm_provider import get_llm, invoke_llm, find_api_key, get_active_provider
+# The ONE and ONLY function in this project allowed to call an LLM API.
+from llm_provider import call_llm, get_provider_model_name
+
+
+AgentType = Literal["coach", "doctor"]
+
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    # Which expert should answer. Set by chat() from the UI dropdown
+    # (no LLM classification — Training Log tab defaults to "coach",
+    # Recovery & Health tab defaults to "doctor").
+    agent: str
+
 
 class AgenticCoach:
     # --- STEP 1: 引入 Semantic Memory + Cognitive Memory Engine ---
@@ -26,58 +36,35 @@ class AgenticCoach:
         # Cognitive Memory Engine (CME) — optional but recommended
         self.memory_engine = memory_engine
 
-        # LLM instances via centralized provider (with automatic fallback)
-        self.llm = get_llm("creative")           # coach/doctor responses
-        self.router_llm = get_llm("precise")     # deterministic routing
-        
+        # Tracks which provider produced the last response (for attribution tagging).
+        # Updated inside _coach_node / _doctor_node via call_llm().
+        self._last_provider: str | None = None
+
         graph_builder = StateGraph(State)
         graph_builder.add_node("coach", self._coach_node)
         graph_builder.add_node("doctor", self._doctor_node)
-        
+
         graph_builder.add_conditional_edges(
-            START, 
-            self._route_message, 
-            {"coach": "coach", "doctor": "doctor"}
+            START,
+            self._route_message,
+            {"coach": "coach", "doctor": "doctor"},
         )
-        
+
         graph_builder.add_edge("coach", END)
         graph_builder.add_edge("doctor", END)
-        
+
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.memory = SqliteSaver(self.conn)
         self.graph = graph_builder.compile(checkpointer=self.memory)
 
     def _route_message(self, state: State) -> str:
-        last_msg = state["messages"][-1].content
-        if isinstance(last_msg, list):
-            last_msg = "".join([block.get("text", "") for block in last_msg if isinstance(block, dict) and "text" in block])
-            
-        if "bearing in mind my workouts" in last_msg.lower():
-            return "coach"
-
-        prompt = f"""
-        You are a routing supervisor. Decide if the following message should be handled by the 'coach' or 'doctor'.
-        - COACH: Running, pace, splits, workouts, run analysis, training blocks.
-        - DOCTOR: Health, HRV, sleep, stress, resting heart rate, recovery.
-        If it's a general greeting or ambiguous, pick 'coach'.
-        Output ONLY the exact word 'coach' or 'doctor'.
-        
-        User message: {last_msg}
         """
-        try:
-            response = self.router_llm.invoke([HumanMessage(content=prompt)])
-        except Exception:
-            # Fallback: if router fails, default to coach
-            return "coach"
-
-        content = response.content
-        if isinstance(content, list):
-            content = "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
-            
-        decision = content.strip().lower()
-        if "doctor" in decision:
-            return "doctor"
-        return "coach"
+        Pure pass-through router. No LLM involved — the UI passes `agent` into
+        chat() and we just read it back from state. Defaults to 'coach' if the
+        caller forgot to set it.
+        """
+        agent = state.get("agent", "coach")
+        return "doctor" if agent == "doctor" else "coach"
 
     # --- STEP 1 延续: 将全局记忆 + 认知引擎上下文焊入 System Prompt ---
     def _build_cognitive_context(self, state: State) -> str:
@@ -98,23 +85,6 @@ class AgenticCoach:
             print(f"[CME] context retrieval error: {e}")
         return ""
 
-    def _invoke_with_fallback(self, messages: list, role: str = "creative"):
-        """Invoke LLM with automatic fallback on failure. Sets self._last_provider."""
-        try:
-            response = self.llm.invoke(messages)
-            self._last_provider = get_active_provider(role)
-            return response
-        except Exception as e:
-            print(f"[LLM] Primary model failed: {e}, trying fallback...")
-            try:
-                fallback_llm = get_llm(role, provider="omlx")
-                response = fallback_llm.invoke(messages)
-                self._last_provider = "omlx"
-                return response
-            except Exception as e2:
-                print(f"[LLM] Fallback also failed: {e2}")
-                raise e  # re-raise original error
-
     def _coach_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
         cme_ctx = self._build_cognitive_context(state)
@@ -129,8 +99,9 @@ class AgenticCoach:
         {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
-        response = self._invoke_with_fallback(messages, "creative")
-        return {"messages": [response]}
+        msg, provider = call_llm(messages, role="creative")
+        self._last_provider = provider
+        return {"messages": [msg]}
 
     def _doctor_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
@@ -146,10 +117,27 @@ class AgenticCoach:
         {cme_ctx}
         """)
         messages = [sys_msg] + state["messages"]
-        response = self._invoke_with_fallback(messages, "creative")
-        return {"messages": [response]}
+        msg, provider = call_llm(messages, role="creative")
+        self._last_provider = provider
+        return {"messages": [msg]}
 
-    def chat(self, user_input: str, thread_id: str, system_context: str = None):
+    def chat(
+        self,
+        user_input: str,
+        thread_id: str,
+        system_context: str = None,
+        agent: AgentType = "coach",
+    ):
+        """
+        Run one turn through the LangGraph.
+
+        Args:
+            user_input: the user's message text.
+            thread_id: persistence key for LangGraph checkpointer.
+            system_context: optional system prompt to inject for this turn.
+            agent: which expert answers — "coach" or "doctor". Driven by the
+                   UI dropdown (default "coach"). No LLM classification happens.
+        """
         config = {"configurable": {"thread_id": thread_id}}
         messages_to_send = []
 
@@ -165,35 +153,39 @@ class AgenticCoach:
         messages_to_send.append(HumanMessage(content=user_input))
 
         events = self.graph.stream(
-            {"messages": messages_to_send},
+            {"messages": messages_to_send, "agent": agent},
             config,
-            stream_mode="values"
+            stream_mode="values",
         )
 
+        final_message = None
         for event in events:
             final_message = event["messages"][-1]
 
         content = final_message.content
         if isinstance(content, list):
-            content = "".join([block.get("text", "") for block in content if isinstance(block, dict) and "text" in block])
+            content = "".join(
+                block.get("text", "") for block in content
+                if isinstance(block, dict) and "text" in block
+            )
         content = str(content)
 
-        # Append model attribution tag (uses actual provider from _invoke_with_fallback)
-        from llm_provider import _get_provider_name
-        provider = getattr(self, "_last_provider", None) or get_active_provider("creative")
-        content += f"\n\n[Generated by {_get_provider_name(provider)}]"
+        # Append model attribution tag (provider was recorded by the node that ran)
+        provider = self._last_provider or "unknown"
+        model_name = get_provider_model_name(provider) if provider != "unknown" else provider
+        content += f"\n\n[Generated by {model_name}]"
         return content
-        
+
     def get_history(self, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
         try:
             state = self.graph.get_state(config)
             return state.values.get("messages", [])
-        except:
+        except Exception:
             return []
 
-    def follow_up_chat(self, user_input: str, thread_id: str):
-        return self.chat(user_input=user_input, thread_id=thread_id, system_context=None)
+    def follow_up_chat(self, user_input: str, thread_id: str, agent: AgentType = "coach"):
+        return self.chat(user_input=user_input, thread_id=thread_id, system_context=None, agent=agent)
 
     def summarize_thread(self, thread_id: str):
         """
@@ -201,34 +193,30 @@ class AgenticCoach:
         """
         history = self.get_history(thread_id)
         # 如果只有一条系统提示和一句用户的话，说明没怎么深聊，直接跳过
-        if len(history) <= 3: 
-            return None 
-            
+        if len(history) <= 3:
+            return None
+
         chat_text = "\n".join([f"{msg.type}: {msg.content}" for msg in history if msg.type in ['human', 'ai']])
-        
+
         prompt = f"""
         请将以下教练与运动员的对话，压缩成1-2句话的核心结论或建议。
         重点提取：运动员的痛点/感受，以及教练给出的具体对策。使用第三人称陈述句。
-        
+
         对话记录：
         {chat_text}
         """
-        # 使用 precise role (Temperature=0) 保证总结客观精准
-        try:
-            response = self.router_llm.invoke([HumanMessage(content=prompt)])
-        except Exception:
-            fallback = get_llm("precise", provider="omlx")
-            response = fallback.invoke([HumanMessage(content=prompt)])
-        return response.content.strip()
+        # precise role (Temperature=0) 保证总结客观精准
+        msg, _ = call_llm([HumanMessage(content=prompt)], role="precise")
+        return str(msg.content).strip()
 
-    # --- STEP 2: Working Memory 融合分析 ---
     # --- STEP 2: Working Memory 融合分析 ---
     def analyze_run(self, working_memory_dict: dict, thread_id: str, telemetry_df=None, historical_memories: list = None):
         """
         Takes the dense JSON from dp.build_agent_working_memory() and historical records to perform a deep analysis.
+        Always routed to the coach (running analysis).
         """
         run_name = working_memory_dict.get('workout_summary', {}).get('name', '未命名训练')
-        
+
         # 提取历史相似记录 (如果有的话)
         history_section = ""
         if historical_memories:
@@ -264,12 +252,12 @@ class AgenticCoach:
         **输出格式 (使用 Markdown):**
         ### 🧠 训练分析: {run_name}
         *(详细的观察报告：将当天的生理准备度与实际执行的遥测数据联系起来。如果适用，请与历史记录进行对比)。*
-        
+
         ### 🗺️ 心率区间映射 (今日实际情况)
         | 努力等级 (Category) | 基准区间 (Baseline) | **实际映射 (Actual/Peak HR)** | 心率漂移 (Drift) |
         | :--- | :--- | :--- | :--- |
         | [例如：马拉松配速] | [例如：145-160] | **[填入实际或峰值心率]** | [例如：+7 bpm 🚨] |
-        
+
         ### 💡 建议
         *(给出下一步可执行的生理学或训练建议)。*
         """
@@ -278,23 +266,24 @@ class AgenticCoach:
         user_message = f"请分析我在 {run_date} 进行的名为 '{run_name}' 的训练执行情况。"
 
         return self.chat(
-            user_input=user_message, 
-            thread_id=thread_id, 
-            system_context=system_instructions
+            user_input=user_message,
+            thread_id=thread_id,
+            system_context=system_instructions,
+            agent="coach",
         )
 
     # --- STEP 3: Episodic Memory (生成供未来 RAG 使用的短记忆) ---
     def generate_episodic_summary(self, working_memory_dict: dict, telemetry_df=None):
         """
-        Calls the LLM purely to generate a dense, factual summary and tags to be saved 
+        Calls the LLM purely to generate a dense, factual summary and tags to be saved
         into the episodic vector/JSON database.
         """
         run_name = working_memory_dict.get('workout_summary', {}).get('name', 'Unnamed Workout')
         working_memory_str = json.dumps(working_memory_dict, indent=2)
-        
+
         prompt = f"""
-        You are an AI Memory Summarizer. Look at this run and compress the core physiological takeaways into a dense 50-75 word summary. 
-        Focus on facts: Distance, Pace, HR Drift, and how Daily Readiness (like sleep) affected it. 
+        You are an AI Memory Summarizer. Look at this run and compress the core physiological takeaways into a dense 50-75 word summary.
+        Focus on facts: Distance, Pace, HR Drift, and how Daily Readiness (like sleep) affected it.
         Also, assign 2-4 broad categorization tags (e.g., "Long Run", "Fatigue", "VO2Max", "Hot Weather").
 
         Context:
@@ -308,13 +297,14 @@ class AgenticCoach:
             "summary_text": "Your dense summary here."
         }}
         """
-        # Use structured role (low temperature) for JSON formatting
-        formatting_llm = get_llm("structured")
-        response = formatting_llm.invoke([SystemMessage(content="You return strictly JSON."), HumanMessage(content=prompt)])
-        
+        # structured role (low temperature) for JSON formatting; full fallback chain applies
+        msg, _ = call_llm(
+            [SystemMessage(content="You return strictly JSON."), HumanMessage(content=prompt)],
+            role="structured",
+        )
+
         try:
-            # Clean up potential markdown formatting from the response
-            content = response.content.replace('```json', '').replace('```', '').strip()
+            content = str(msg.content).replace('```json', '').replace('```', '').strip()
             return json.loads(content)
         except Exception as e:
             print(f"Error generating episodic memory: {e}")
@@ -346,10 +336,11 @@ class AgenticCoach:
             print(f"[CME] consolidation error: {e}")
 
     def analyze_health(self, history_df, yesterday_raw, thread_id: str):
+        """Always routed to the doctor (recovery analysis)."""
         import datetime
         today_str = datetime.date.today().isoformat()
         yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-        
+
         trends = history_df.to_markdown()
 
         sleep_dto = yesterday_raw.get('dailySleepDTO', {})
@@ -363,7 +354,7 @@ class AgenticCoach:
 
         system_instructions = f"""
         请扮演一名全科健康与运动表现医生 (Holistic Health & Performance Doctor)。
-        
+
         **核心目标:** 根据长期数据趋势和昨晚的睡眠质量 ({yesterday_str})，深度分析运动员今天 ({today_str}) 的身体恢复状态。
 
         **数据源 1: 过去 14 天的历史趋势 (CSV 格式)**
@@ -378,7 +369,7 @@ class AgenticCoach:
         - 睡眠期间压力值 (Overnight Stress): {sleep_details['stress_during_sleep']} (该数值越低越好)
 
         **分析要求 (请务必使用 Markdown 格式输出中文报告):**
-        
+
         ### 📉 趋势诊断
         *查看 14 天的历史数据。静息心率 (RHR) 是否在上升？心率变异性 (HRV) 是否正在走低？睡眠分数与近期的跑步里程之间有什么相关性？*
         *请给出非常具体的医学/生理学观察。*
@@ -394,11 +385,11 @@ class AgenticCoach:
         * [🔴 红灯：严重疲劳或有生病风险，建议彻底休息]
         """
 
-        # 这里修改了隐形触发词，确保精准路由给 Doctor 处理健康问题
         user_message = f"请结合我近期的生理指标，深度分析一下我今天 ({today_str}) 的身体健康、恢复状态和睡眠质量。"
 
         return self.chat(
-            user_input=user_message, 
-            thread_id=thread_id, 
-            system_context=system_instructions
+            user_input=user_message,
+            thread_id=thread_id,
+            system_context=system_instructions,
+            agent="doctor",
         )
