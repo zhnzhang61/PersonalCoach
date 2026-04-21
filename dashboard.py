@@ -855,8 +855,8 @@ with tab_health:
         active_agent_health = _agent_label_to_key[_selected_agent_health]
 
         if st.button("🩺 Analyze Today's Health"):
-            with st.spinner("Doctor is reviewing your charts..."):
-                yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+            with st.spinner("Doctor is reviewing your charts..."):                
+                yesterday_str = (datetime.date.today()).isoformat()
                 raw_sleep = processor.load_json_safe(processor.paths['sleep'], f"{yesterday_str}.json")
                 
                 # 1. 生成报告 (LangGraph 会自动把对话原封不动存入 data/chat_memory.db)
