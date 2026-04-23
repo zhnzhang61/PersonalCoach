@@ -195,10 +195,14 @@ today_iso = datetime.date.today().isoformat()
 # ==========================================
 # TAB 1: EXISTING TRAINING LOGIC
 # ==========================================
-with tab_train:
+# Wrapped in a function so the empty-blocks early-exit uses `return`
+# instead of `st.stop()`. st.stop() kills the whole script, which would
+# prevent the Setup tab from rendering — the exact place users need to
+# reach to recover from an empty blocks list.
+def _render_training_log_body():
     if not blocks:
         st.info("No training blocks yet. Go to the **⚙️ Setup** tab to create one.")
-        st.stop()
+        return
 
     # Active block selector — defaults to the block containing today
     block_label_to_id = {
@@ -739,6 +743,11 @@ with tab_train:
                         if st.button("Cancel", key=f"cancel_err_{run_id}"):
                             st.session_state['editing_run_id'] = None
                             st.rerun()
+
+
+with tab_train:
+    _render_training_log_body()
+
 
 # ==========================================
 # TAB 2: RECOVERY & HEALTH
