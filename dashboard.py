@@ -178,60 +178,57 @@ if _pending_decisions:
                 st.toast("🗑️ Rejected")
                 st.rerun()
 
-# --- GLOBAL SIDEBAR ACTIONS ---
-# --- GLOBAL SIDEBAR ACTIONS ---
-st.sidebar.subheader("🔄 Data Management")
-
-if st.sidebar.button("☁️ Download Garmin Data"):
-    with st.spinner("Syncing with Garmin Connect... (This may take a minute)"):
-        try:
-            # Run the sync script and capture the output
-            result = subprocess.run([sys.executable, "garmin_sync.py"], capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                st.sidebar.success("Garmin data downloaded successfully!")
-            else:
-                st.sidebar.error("Garmin sync failed.")
-                with st.sidebar.expander("View Error Log"):
-                    st.code(result.stderr or result.stdout)
-        except Exception as e:
-            st.sidebar.error(f"Execution error: {e}")
-
-if st.sidebar.button("📊 Update Health Ledger"):
-    with st.spinner("Aggregating daily metrics..."):
-        processor.compile_health_ledger()
-    st.sidebar.success("Health ledger updated!")
-
-st.sidebar.divider()
-
-st.sidebar.divider()
-st.sidebar.subheader("⚙️ AI Telemetry Settings")
-downsample_sec = st.sidebar.slider("Sampling Interval (sec)", min_value=5, max_value=60, value=10, step=5, help="Controls how granular the data sent to the AI is. Lower = More detail but more tokens.")
-
 # --- TABS ---
-tab_train, tab_health = st.tabs(["🏋️ Training Log", "❤️ Recovery & Health"])
+tab_train, tab_health, tab_setup = st.tabs(
+    ["🏋️ Training Log", "❤️ Recovery & Health", "⚙️ Setup"]
+)
+
+# AI Telemetry sampling rate lives in session_state so the Setup slider
+# and the Training Log consumer stay in sync across reruns.
+if 'downsample_sec' not in st.session_state:
+    st.session_state['downsample_sec'] = 10
+downsample_sec = st.session_state['downsample_sec']
+
+blocks = processor.get_blocks()
+today_iso = datetime.date.today().isoformat()
 
 # ==========================================
 # TAB 1: EXISTING TRAINING LOGIC
 # ==========================================
 with tab_train:
-    blocks = processor.get_blocks()
-    if not blocks: st.stop()
-    current_block = blocks[0] 
+    if not blocks:
+        st.info("No training blocks yet. Go to the **⚙️ Setup** tab to create one.")
+        st.stop()
+
+    # Active block selector — defaults to the block containing today
+    block_label_to_id = {
+        f"{b['name']}  ({b['start_date']} → {b['end_date']})": b['id']
+        for b in blocks
+    }
+    default_block_idx = 0
+    for i, b in enumerate(blocks):
+        if b['start_date'] <= today_iso <= b['end_date']:
+            default_block_idx = i
+            break
+    selected_block_label = st.selectbox(
+        "Active Block",
+        list(block_label_to_id.keys()),
+        index=default_block_idx,
+    )
+    current_block = next(b for b in blocks if b['id'] == block_label_to_id[selected_block_label])
+
     weeks = processor.get_weeks_for_block(current_block['id'])
     week_opts = {w['label']: w for w in weeks}
-    
-    # --- 新增: 计算当前周的索引 ---
-    today_iso = datetime.date.today().isoformat()
+
+    # Default week = the week containing today (or the last week if today > block end)
     default_idx = 0
     for i, w in enumerate(weeks):
         if w['start'] <= today_iso <= w['end']:
             default_idx = i
             break
         elif today_iso > w['end']:
-            default_idx = i # 如果今天已经超过了课表，默认停留在最后一周
+            default_idx = i
 
-    # 把 default_idx 传给 selectbox
     selected_week_label = st.selectbox("Select Week", list(week_opts.keys()), index=default_idx)
     current_week = week_opts[selected_week_label]
 
@@ -1162,3 +1159,146 @@ with tab_health:
                 role = "user" if msg.type == "human" else "assistant"
                 with st.chat_message(role):
                     st.markdown(content)
+
+# ==========================================
+# TAB 3: SETUP — data sync, AI settings, training block management
+# ==========================================
+with tab_setup:
+    st.header("⚙️ Setup")
+
+    st.subheader("🔄 Data Management")
+    dm_col1, dm_col2 = st.columns(2)
+    with dm_col1:
+        if st.button("☁️ Download Garmin Data", use_container_width=True):
+            with st.spinner("Syncing with Garmin Connect... (This may take a minute)"):
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "garmin_sync.py"],
+                        capture_output=True, text=True,
+                    )
+                    if result.returncode == 0:
+                        st.success("Garmin data downloaded successfully!")
+                    else:
+                        st.error("Garmin sync failed.")
+                        with st.expander("View Error Log"):
+                            st.code(result.stderr or result.stdout)
+                except Exception as e:
+                    st.error(f"Execution error: {e}")
+    with dm_col2:
+        if st.button("📊 Update Health Ledger", use_container_width=True):
+            with st.spinner("Aggregating daily metrics..."):
+                processor.compile_health_ledger()
+            st.success("Health ledger updated!")
+
+    st.divider()
+
+    st.subheader("⚙️ AI Telemetry Settings")
+    st.slider(
+        "Sampling Interval (sec)",
+        min_value=5, max_value=60, step=5,
+        key='downsample_sec',
+        help="Controls how granular the data sent to the AI is. "
+             "Lower = more detail but more tokens.",
+    )
+
+    st.divider()
+
+    st.subheader("🗂️ Training Blocks")
+    st.caption(
+        "A training block represents one training cycle (e.g. a marathon "
+        "build). Runs are auto-attached to whichever block covers their date."
+    )
+    _setup_blocks = processor.get_blocks()
+
+    for b in _setup_blocks:
+        col_info, col_edit, col_del = st.columns([4, 1, 1])
+        with col_info:
+            st.markdown(
+                f"**{b['name']}** — {b['start_date']} → {b['end_date']} "
+                f"· _{b.get('primary_event', 'running')}_"
+            )
+        with col_edit:
+            if st.button("Edit", key=f"setup_edit_block_{b['id']}"):
+                st.session_state['editing_block_id'] = b['id']
+                st.rerun()
+        with col_del:
+            confirm_key = f"setup_confirm_del_{b['id']}"
+            if st.session_state.get(confirm_key):
+                if st.button("Confirm?", key=f"setup_really_del_{b['id']}", type="primary"):
+                    processor.delete_block(b['id'])
+                    st.session_state.pop(confirm_key, None)
+                    st.toast(f"🗑️ Deleted {b['name']}")
+                    st.rerun()
+            else:
+                if st.button("Delete", key=f"setup_del_block_{b['id']}"):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+
+    # Edit form (shared state key with the legacy main-tab version, so "edit"
+    # still works regardless of where the button was clicked)
+    _editing_id = st.session_state.get('editing_block_id')
+    if _editing_id:
+        _target = next((b for b in _setup_blocks if b['id'] == _editing_id), None)
+        if _target:
+            st.markdown(f"#### ✏️ Edit: {_target['name']}")
+            with st.form(f"setup_edit_block_form_{_editing_id}"):
+                e_name = st.text_input("Name", value=_target['name'])
+                e_start = st.date_input(
+                    "Start date",
+                    value=datetime.date.fromisoformat(_target['start_date']),
+                )
+                e_end = st.date_input(
+                    "End date",
+                    value=datetime.date.fromisoformat(_target['end_date']),
+                )
+                _events = ["running", "cycling", "triathlon", "strength", "other"]
+                _curr_event = _target.get('primary_event', 'running')
+                e_event = st.selectbox(
+                    "Primary event",
+                    _events,
+                    index=_events.index(_curr_event) if _curr_event in _events else 0,
+                )
+                submit_col, cancel_col = st.columns(2)
+                if submit_col.form_submit_button("Save"):
+                    try:
+                        processor.update_block(
+                            _editing_id,
+                            name=e_name,
+                            start_date=e_start.isoformat(),
+                            end_date=e_end.isoformat(),
+                            primary_event=e_event,
+                        )
+                        st.session_state.pop('editing_block_id', None)
+                        st.toast("✅ Block updated")
+                        st.rerun()
+                    except ValueError as err:
+                        st.error(str(err))
+                if cancel_col.form_submit_button("Cancel"):
+                    st.session_state.pop('editing_block_id', None)
+                    st.rerun()
+
+    st.markdown("#### ➕ New Block")
+    with st.form("setup_new_block_form"):
+        n_name = st.text_input("Name", placeholder="e.g. Fall 2026 Marathon Build")
+        ncol1, ncol2 = st.columns(2)
+        n_start = ncol1.date_input("Start date", value=datetime.date.today())
+        n_end = ncol2.date_input(
+            "End date",
+            value=datetime.date.today() + datetime.timedelta(weeks=16),
+        )
+        n_event = st.selectbox(
+            "Primary event",
+            ["running", "cycling", "triathlon", "strength", "other"],
+        )
+        if st.form_submit_button("Create Block"):
+            try:
+                processor.create_block(
+                    name=n_name,
+                    start_date=n_start.isoformat(),
+                    end_date=n_end.isoformat(),
+                    primary_event=n_event,
+                )
+                st.toast(f"✅ Created '{n_name}'")
+                st.rerun()
+            except ValueError as err:
+                st.error(str(err))
