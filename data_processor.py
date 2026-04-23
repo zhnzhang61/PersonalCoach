@@ -48,17 +48,10 @@ class DataProcessor:
             else:
                 os.makedirs(path, exist_ok=True)
                 
-        # Initialize Blocks
+        # Initialize Blocks (empty list — users create their own via the UI)
         if not os.path.exists(self.paths['blocks']):
-            default_block = [{
-                "id": "block_001",
-                "name": "Spring 2026 Build",
-                "start_date": "2025-12-25",
-                "end_date": "2026-04-19",
-                "primary_event": "running",
-                "baseline_snapshot": {"period": "N/A", "note": "Baseline"}
-            }]
-            with open(self.paths['blocks'], 'w') as f: json.dump(default_block, f, indent=4)
+            with open(self.paths['blocks'], 'w') as f:
+                json.dump([], f, indent=4)
             
         # Initialize Aux
         if not os.path.exists(self.paths['aux']):
@@ -306,32 +299,114 @@ class DataProcessor:
     # ==========================================
     
     def get_blocks(self):
-        return self.load_json_safe(self.paths['blocks'])
+        blocks = self.load_json_safe(self.paths['blocks'])
+        return blocks if isinstance(blocks, list) else []
+
+    def _save_blocks(self, blocks: list[dict]) -> None:
+        """Sort by start_date descending (newest first) before persisting."""
+        blocks.sort(key=lambda b: b.get('start_date', ''), reverse=True)
+        with open(self.paths['blocks'], 'w') as f:
+            json.dump(blocks, f, indent=4)
+
+    def _next_block_id(self, blocks: list[dict]) -> str:
+        """Smallest block_NNN id not already in use."""
+        existing = {b.get('id') for b in blocks}
+        n = 1
+        while f"block_{n:03d}" in existing:
+            n += 1
+        return f"block_{n:03d}"
+
+    def create_block(self, name: str, start_date: str, end_date: str,
+                     primary_event: str = "running") -> str:
+        """
+        Append a new training block. Caller must pass ISO dates (YYYY-MM-DD)
+        and ensure end_date ≥ start_date — validation at call site keeps
+        UI errors close to where the user can fix them.
+        """
+        if not name or not name.strip():
+            raise ValueError("Block name cannot be empty")
+        if end_date < start_date:
+            raise ValueError("end_date must be on or after start_date")
+        blocks = self.get_blocks()
+        new_id = self._next_block_id(blocks)
+        blocks.append({
+            "id": new_id,
+            "name": name.strip(),
+            "start_date": start_date,
+            "end_date": end_date,
+            "primary_event": primary_event,
+        })
+        self._save_blocks(blocks)
+        return new_id
+
+    def update_block(self, block_id: str, **fields) -> bool:
+        """
+        Patch an existing block. Silently drops the deprecated
+        baseline_snapshot field on write. Returns False if the id is unknown.
+        """
+        blocks = self.get_blocks()
+        for b in blocks:
+            if b.get('id') != block_id:
+                continue
+            if 'end_date' in fields and 'start_date' in fields:
+                if fields['end_date'] < fields['start_date']:
+                    raise ValueError("end_date must be on or after start_date")
+            for k, v in fields.items():
+                if k == 'id':
+                    continue
+                b[k] = v
+            b.pop('baseline_snapshot', None)
+            self._save_blocks(blocks)
+            return True
+        return False
+
+    def delete_block(self, block_id: str) -> bool:
+        """Remove a block by id. Run/episode files are untouched — they live
+        separately and re-attach to whatever block covers their date range."""
+        blocks = self.get_blocks()
+        remaining = [b for b in blocks if b.get('id') != block_id]
+        if len(remaining) == len(blocks):
+            return False
+        self._save_blocks(remaining)
+        return True
 
     # --- RESTORED METHODS FOR UI ---
     def get_weeks_for_block(self, block_id):
+        """
+        Split a block into ISO-style weeks (Monday-start). Week 0 is the
+        partial week from the block's start date up to the first Sunday;
+        subsequent weeks are full 7-day windows Monday→Sunday. Returns
+        [] if the block id is unknown.
+        """
         blocks = self.get_blocks()
         block = next((b for b in blocks if b['id'] == block_id), None)
-        if not block: return []
+        if not block:
+            return []
         start = datetime.date.fromisoformat(block['start_date'])
         end = datetime.date.fromisoformat(block['end_date'])
         weeks = []
-        
-        if start.isoformat() == "2025-12-25":
-            weeks.append({"week_num": 0, "start": "2025-12-25", "end": "2025-12-27", "label": "Week 0 (Dec 27)"})
-            weeks.append({"week_num": 1, "start": "2025-12-28", "end": "2026-01-04", "label": "Week 1 (Jan 04)"})
-            curr = datetime.date(2026, 1, 5)
-            week_num = 2
-        else:
-            days_until_sunday = 6 - start.weekday() 
-            w0_end = min(start + timedelta(days=days_until_sunday), end)
-            weeks.append({"week_num": 0, "start": start.isoformat(), "end": w0_end.isoformat(), "label": f"Week 0 ({w0_end.strftime('%b %d')})"})
-            curr = w0_end + timedelta(days=1)
-            week_num = 1
+
+        # Week 0 — from block start through the first Sunday (or block end,
+        # whichever is earlier). Monday=0 … Sunday=6 in Python's weekday().
+        days_until_sunday = 6 - start.weekday()
+        w0_end = min(start + timedelta(days=days_until_sunday), end)
+        weeks.append({
+            "week_num": 0,
+            "start": start.isoformat(),
+            "end": w0_end.isoformat(),
+            "label": f"Week 0 ({w0_end.strftime('%b %d')})",
+        })
+        curr = w0_end + timedelta(days=1)
+        week_num = 1
 
         while curr <= end:
             w_end = min(curr + timedelta(days=6), end)
-            weeks.append({"week_num": week_num, "start": curr.isoformat(), "end": w_end.isoformat(), "label": f"Week {week_num} ({w_end.strftime('%b %d')})"})
+            weeks.append({
+                "week_num": week_num,
+                "start": curr.isoformat(),
+                "end": w_end.isoformat(),
+                "label": f"Week {week_num} ({w_end.strftime('%b %d')})",
+            })
             curr += timedelta(days=7)
             week_num += 1
         return weeks
