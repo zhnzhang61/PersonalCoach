@@ -21,6 +21,12 @@ class DataProcessor:
             'hrv': os.path.join(data_dir, 'get_hrv_data'),
             'stress': os.path.join(data_dir, 'get_stress_data'),
             'details': os.path.join(data_dir, 'get_activity_details'),
+            'stats_body': os.path.join(data_dir, 'get_stats_and_body'),
+            'training_readiness': os.path.join(data_dir, 'get_training_readiness'),
+            'training_status': os.path.join(data_dir, 'get_training_status'),
+            'respiration': os.path.join(data_dir, 'get_respiration_data'),
+            'fitness_age': os.path.join(data_dir, 'get_fitnessage_data'),
+            'intensity_min': os.path.join(data_dir, 'get_intensity_minutes_data'),
             
             # 2. Derived & Manual Paths
             'manual': os.path.join(data_dir, 'manual_inputs'),
@@ -523,3 +529,256 @@ class DataProcessor:
         history = self.get_run_chat_history(activity_id)
         history.append({"timestamp": datetime.datetime.now().isoformat(), "role": role, "content": content})
         with open(path, 'w') as f: json.dump(history, f, indent=4)
+
+    # ==========================================
+    # 🧬 RECOVERY & HEALTH DASHBOARD DATA
+    # All shaping/aggregation for the Recovery & Health tab lives here.
+    # dashboard.py should only call these functions and render.
+    # ==========================================
+
+    def _latest_available_date(self, folder_key: str, max_lookback: int = 7) -> str | None:
+        """
+        Return the most recent ISO date for which `folder_key/{date}.json` exists,
+        searching backward from today. None if nothing within max_lookback days.
+        """
+        folder = self.paths.get(folder_key)
+        if not folder or not os.path.isdir(folder):
+            return None
+        today = datetime.date.today()
+        for i in range(max_lookback):
+            d = (today - timedelta(days=i)).isoformat()
+            if os.path.exists(os.path.join(folder, f"{d}.json")):
+                return d
+        return None
+
+    def get_last_night_sleep(self) -> dict:
+        """
+        Last-night sleep details — stage minutes, respiration, sleep stress — plus
+        7-day averages of each for comparison. Garmin names each night's file by
+        wake date, so "last night" is today's file.
+
+        Returns {} when no recent sleep file exists.
+        """
+        latest = self._latest_available_date('sleep')
+        if not latest:
+            return {}
+
+        sleep = self.load_json_safe(self.paths['sleep'], f"{latest}.json")
+        dto = sleep.get('dailySleepDTO', {}) or {}
+
+        def _mins(key):
+            val = dto.get(key)
+            return round(val / 60) if val else 0
+
+        current = {
+            'date': latest,
+            'deep_min': _mins('deepSleepSeconds'),
+            'rem_min': _mins('remSleepSeconds'),
+            'light_min': _mins('lightSleepSeconds'),
+            'awake_min': _mins('awakeSleepSeconds'),
+            'total_min': _mins('sleepTimeSeconds'),
+            'avg_respiration': dto.get('averageRespirationValue'),
+            'sleep_stress': dto.get('avgSleepStress'),  # nested under DTO, not top-level
+        }
+
+        # 7-day averages (excluding today) for delta comparisons
+        today = datetime.date.fromisoformat(latest)
+        samples = {k: [] for k in ['deep_min','rem_min','light_min','awake_min','total_min','avg_respiration','sleep_stress']}
+        for i in range(1, 8):
+            d = (today - timedelta(days=i)).isoformat()
+            s = self.load_json_safe(self.paths['sleep'], f"{d}.json")
+            if not s:
+                continue
+            sdto = s.get('dailySleepDTO', {}) or {}
+            samples['deep_min'].append((sdto.get('deepSleepSeconds') or 0) / 60)
+            samples['rem_min'].append((sdto.get('remSleepSeconds') or 0) / 60)
+            samples['light_min'].append((sdto.get('lightSleepSeconds') or 0) / 60)
+            samples['awake_min'].append((sdto.get('awakeSleepSeconds') or 0) / 60)
+            samples['total_min'].append((sdto.get('sleepTimeSeconds') or 0) / 60)
+            if sdto.get('averageRespirationValue') is not None:
+                samples['avg_respiration'].append(sdto['averageRespirationValue'])
+            if sdto.get('avgSleepStress') is not None:
+                samples['sleep_stress'].append(sdto['avgSleepStress'])
+
+        current['avg_7d'] = {
+            k: (round(sum(v) / len(v), 1) if v else None) for k, v in samples.items()
+        }
+        return current
+
+    def get_body_battery_series(self, days: int = 14) -> pd.DataFrame:
+        """
+        Daily Body Battery history from stats_and_body. One row per day with
+        wake / lowest / most-recent / charged / drained values.
+        """
+        today = datetime.date.today()
+        rows = []
+        for i in range(days):
+            d = (today - timedelta(days=i)).isoformat()
+            stats = self.load_json_safe(self.paths['stats_body'], f"{d}.json")
+            if not stats:
+                continue
+            rows.append({
+                'date': d,
+                'wake': stats.get('bodyBatteryAtWakeTime'),
+                'lowest': stats.get('bodyBatteryLowestValue'),
+                'highest': stats.get('bodyBatteryHighestValue'),
+                'current': stats.get('bodyBatteryMostRecentValue'),
+                'charged': stats.get('bodyBatteryChargedValue'),
+                'drained': stats.get('bodyBatteryDrainedValue'),
+            })
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date').reset_index(drop=True)
+        return df
+
+    def get_training_readiness_today(self) -> dict:
+        """
+        Today's Training Readiness score, level, feedback, and the five factor
+        percentages the Garmin algorithm uses. Returns {} if no recent file.
+        """
+        latest = self._latest_available_date('training_readiness')
+        if not latest:
+            return {}
+        raw = self.load_json_safe(self.paths['training_readiness'], f"{latest}.json")
+        entry = raw[0] if isinstance(raw, list) and raw else raw if isinstance(raw, dict) else {}
+        if not entry:
+            return {}
+        return {
+            'date': latest,
+            'score': entry.get('score'),
+            'level': entry.get('level'),
+            'feedback_long': entry.get('feedbackLong'),
+            'feedback_short': entry.get('feedbackShort'),
+            'sleep_score': entry.get('sleepScore'),
+            'recovery_time_min': entry.get('recoveryTime'),
+            'hrv_weekly_avg': entry.get('hrvWeeklyAverage'),
+            'factors': {
+                'Sleep':                          entry.get('sleepScoreFactorPercent'),
+                'Recovery Time':                  entry.get('recoveryTimeFactorPercent'),
+                'HRV':                            entry.get('hrvFactorPercent'),
+                'Acute:Chronic Workload Ratio':   entry.get('acwrFactorPercent'),
+                'Stress History':                 entry.get('stressHistoryFactorPercent'),
+            },
+        }
+
+    def _first_device_entry(self, device_map: dict) -> dict:
+        """Garmin nests per-device data; grab the first (primary) device entry."""
+        if not isinstance(device_map, dict) or not device_map:
+            return {}
+        return next(iter(device_map.values()), {}) or {}
+
+    def get_training_status_today(self) -> dict:
+        """
+        Training Status snapshot: status phrase, ACWR ratio+status, VO2 max,
+        heat acclimation percent. {} if no recent file.
+        """
+        latest = self._latest_available_date('training_status')
+        if not latest:
+            return {}
+        raw = self.load_json_safe(self.paths['training_status'], f"{latest}.json")
+        # Garmin nests: mostRecentTrainingStatus.latestTrainingStatusData[deviceId]
+        status_map = ((raw.get('mostRecentTrainingStatus') or {})
+                      .get('latestTrainingStatusData') or {})
+        entry = self._first_device_entry(status_map)
+        acute = entry.get('acuteTrainingLoadDTO') or {}
+        vo2 = (raw.get('mostRecentVO2Max') or {}).get('generic') or {}
+        heat = (raw.get('mostRecentVO2Max') or {}).get('heatAltitudeAcclimation') or {}
+        return {
+            'date': latest,
+            'status_feedback': entry.get('trainingStatusFeedbackPhrase'),
+            'status_code': entry.get('trainingStatus'),
+            'fitness_trend': entry.get('fitnessTrend'),
+            'acwr_percent': acute.get('acwrPercent'),
+            'acwr_status': acute.get('acwrStatus'),
+            'acwr_ratio': acute.get('dailyAcuteChronicWorkloadRatio'),
+            'vo2_max': vo2.get('vo2MaxPreciseValue') or vo2.get('vo2MaxValue'),
+            'heat_acclimation_pct': heat.get('heatAcclimationPercentage'),
+        }
+
+    def get_vo2_max_series(self, days: int = 30) -> pd.DataFrame:
+        """
+        VO2 Max history from training_status files. Garmin only writes a new
+        value when it re-estimates, so rows are sparse — we forward-fill so
+        the chart is a continuous line.
+        """
+        today = datetime.date.today()
+        rows = []
+        for i in range(days):
+            d = (today - timedelta(days=i)).isoformat()
+            raw = self.load_json_safe(self.paths['training_status'], f"{d}.json")
+            if not raw:
+                continue
+            vo2 = (raw.get('mostRecentVO2Max') or {}).get('generic') or {}
+            val = vo2.get('vo2MaxPreciseValue') or vo2.get('vo2MaxValue')
+            if val is None:
+                continue
+            rows.append({'date': d, 'vo2_max': val})
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.sort_values('date').reset_index(drop=True)
+        return df
+
+    def get_weekly_intensity(self) -> dict:
+        """
+        This week's intensity-minute totals and goal. Uses today's file.
+        """
+        latest = self._latest_available_date('intensity_min')
+        if not latest:
+            return {}
+        raw = self.load_json_safe(self.paths['intensity_min'], f"{latest}.json")
+        if not raw:
+            return {}
+        moderate = raw.get('weeklyModerate') or 0
+        vigorous = raw.get('weeklyVigorous') or 0
+        # WHO guideline: vigorous minutes count double toward a moderate-equivalent total
+        total = raw.get('weeklyTotal') or (moderate + vigorous * 2)
+        goal = raw.get('weekGoal') or 150
+        return {
+            'date': latest,
+            'moderate_min': moderate,
+            'vigorous_min': vigorous,
+            'total_min': total,
+            'goal_min': goal,
+            'percent': round(100 * total / goal) if goal else 0,
+        }
+
+    def get_fitness_age(self) -> dict:
+        """Current Garmin fitness-age estimate, plus what's achievable."""
+        latest = self._latest_available_date('fitness_age')
+        if not latest:
+            return {}
+        raw = self.load_json_safe(self.paths['fitness_age'], f"{latest}.json")
+        if not raw:
+            return {}
+        return {
+            'chronological': raw.get('chronologicalAge'),
+            'fitness': raw.get('fitnessAge'),
+            'achievable': raw.get('achievableFitnessAge'),
+            'previous': raw.get('previousFitnessAge'),
+        }
+
+    # Human-readable translations of Garmin's cryptic status codes.
+    # Kept here so the dashboard never has to interpret raw API strings.
+    TRAINING_STATUS_LABELS = {
+        0: "No Status", 1: "Detraining", 2: "Unproductive", 3: "Recovery",
+        4: "Maintaining", 5: "Productive", 6: "Peaking", 7: "Overreaching",
+    }
+    READINESS_FEEDBACK_TEXT = {
+        "BOOSTED_BY_GOOD_SLEEP": "Boosted by good sleep",
+        "LIMITED_BY_POOR_SLEEP": "Limited by poor sleep",
+        "LIMITED_BY_HIGH_STRESS": "Limited by high stress",
+        "LIMITED_BY_LOW_HRV": "Limited by low HRV",
+        "LIMITED_BY_RECOVERY": "Still recovering",
+        "GOOD_RECOVERY": "Good recovery",
+    }
+
+    def describe_training_status(self, code: int | None) -> str:
+        return self.TRAINING_STATUS_LABELS.get(code, "Unknown") if code is not None else "Unknown"
+
+    def describe_readiness_feedback(self, short: str | None, long: str | None) -> str:
+        """Prefer a clean known translation; fall back to Garmin's raw token."""
+        if short and short in self.READINESS_FEEDBACK_TEXT:
+            return self.READINESS_FEEDBACK_TEXT[short]
+        return (long or short or "").replace("_", " ").title()

@@ -747,96 +747,293 @@ with tab_train:
 # TAB 2: RECOVERY & HEALTH
 # ==========================================
 with tab_health:
-    st.header("Holistic Health View")
-    
+    st.header("Recovery & Health")
+
+    # `df` (historical ledger) is still needed by the AI Co-Pilot below.
     stats = processor.get_health_stats()
-    if not stats:
-        st.warning("No health data found. Please run sync.")
-    else:
-        df = pd.DataFrame(stats)
+    df = pd.DataFrame(stats) if stats else pd.DataFrame()
+    if not df.empty:
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
 
-        col1, col2, col3, col4 = st.columns(4)
-        last_day = df.iloc[-1]
-        
-        def safe_metric(label, key, avg_key=None, inverse=False):
-            val = last_day.get(key)
-            if pd.isna(val): return st.metric(label, "N/A")
-            
-            val = float(val)
+    # ==================================================================
+    # BLOCK 1 — Last night sleep + basic trend
+    # ==================================================================
+    st.subheader("🛌 Last Night")
+    sleep_data = processor.get_last_night_sleep()
+
+    if not sleep_data:
+        st.info("No recent sleep data. Sync Garmin first.")
+    else:
+        # One row per stage — bar length = minutes, label on left, 7d avg as tick
+        avg7 = sleep_data.get('avg_7d', {})
+        stage_df = pd.DataFrame([
+            {'stage': 'Deep',  'minutes': sleep_data['deep_min'],  'avg7d': avg7.get('deep_min')  or 0},
+            {'stage': 'REM',   'minutes': sleep_data['rem_min'],   'avg7d': avg7.get('rem_min')   or 0},
+            {'stage': 'Light', 'minutes': sleep_data['light_min'], 'avg7d': avg7.get('light_min') or 0},
+            {'stage': 'Awake', 'minutes': sleep_data['awake_min'], 'avg7d': avg7.get('awake_min') or 0},
+        ])
+        stage_order = ['Deep', 'REM', 'Light', 'Awake']
+        stage_colors = ['#1f4e8c', '#5b9bd5', '#a9cce3', '#ec7063']
+
+        bars = alt.Chart(stage_df).mark_bar().encode(
+            y=alt.Y('stage:N', sort=stage_order, title=None),
+            x=alt.X('minutes:Q', title='Minutes'),
+            color=alt.Color('stage:N',
+                            scale=alt.Scale(domain=stage_order, range=stage_colors),
+                            legend=None),
+            tooltip=[
+                alt.Tooltip('stage:N', title='Stage'),
+                alt.Tooltip('minutes:Q', title='Last Night (min)'),
+                alt.Tooltip('avg7d:Q', title='7-Day Avg (min)', format='.0f'),
+            ],
+        )
+        # Tick mark showing 7-day average, so you can see last night vs baseline at a glance
+        avg_ticks = alt.Chart(stage_df).mark_tick(
+            color='#333', thickness=2, size=24,
+        ).encode(
+            y=alt.Y('stage:N', sort=stage_order),
+            x=alt.X('avg7d:Q'),
+            tooltip=[alt.Tooltip('avg7d:Q', title='7-Day Avg (min)', format='.0f')],
+        )
+        labels = alt.Chart(stage_df).mark_text(
+            align='left', baseline='middle', dx=6,
+        ).encode(
+            y=alt.Y('stage:N', sort=stage_order),
+            x=alt.X('minutes:Q'),
+            text=alt.Text('minutes:Q', format='.0f'),
+        )
+        stage_chart = alt.layer(bars, avg_ticks, labels).properties(height=180)
+        st.altair_chart(stage_chart, use_container_width=True)
+
+        hours = sleep_data['total_min'] // 60
+        mins = sleep_data['total_min'] % 60
+        st.caption(
+            f"Total sleep: {hours}h {mins}m  •  "
+            f"Colored bar = last night minutes · black tick = 7-day avg"
+        )
+
+        # Sleep signals row
+        sig1, sig2, sig3 = st.columns(3)
+        with sig1:
+            resp = sleep_data.get('avg_respiration')
             delta = None
-            if avg_key and not pd.isna(df[avg_key].mean()):
-                diff = val - df[avg_key].mean()
-                delta = f"{diff:.1f}"
-                
-            color = "inverse" if inverse else "normal"
-            st.metric(label, f"{int(val)}", delta=delta, delta_color=color)
+            if resp is not None and avg7.get('avg_respiration') is not None:
+                delta = f"{resp - avg7['avg_respiration']:+.1f} vs 7d"
+            st.metric("Sleep Respiration (bpm)", f"{resp:.0f}" if resp else "—", delta=delta)
+        with sig2:
+            stress = sleep_data.get('sleep_stress')
+            delta = None
+            if stress is not None and avg7.get('sleep_stress') is not None:
+                delta = f"{stress - avg7['sleep_stress']:+.1f} vs 7d"
+            # Lower stress is better — invert color so ↑ reads red, ↓ reads green
+            st.metric("Sleep Stress", f"{stress:.0f}" if stress is not None else "—",
+                      delta=delta, delta_color="inverse")
+        with sig3:
+            total = sleep_data['total_min']
+            delta = None
+            if avg7.get('total_min'):
+                delta = f"{int(total - avg7['total_min']):+d} min vs 7d"
+            st.metric("Total Sleep (min)", total, delta=delta)
 
-        with col1: safe_metric("Sleep Score", "sleep_score", "sleep_score")
-        with col2: safe_metric("RHR", "rhr", "rhr", inverse=True)
-        with col3: safe_metric("HRV (ms)", "hrv", "hrv")
-        with col4: safe_metric("Stress", "stress", "stress", inverse=True)
+    st.markdown("**28-Day Trend — Resting Heart Rate & Sleep Score**")
+    if not df.empty:
+        trend_df = (df[['rhr', 'sleep_score']]
+                    .tail(28)
+                    .rename(columns={'rhr': 'Resting Heart Rate', 'sleep_score': 'Sleep Score'})
+                    .reset_index()
+                    .melt('date', var_name='metric', value_name='value')
+                    .dropna(subset=['value']))
+        trend_chart = alt.Chart(trend_df).mark_line(point=True).encode(
+            x=alt.X('date:T', axis=alt.Axis(format='%b %d', title=None, labelAngle=-30)),
+            y=alt.Y('value:Q', title=None),
+            color=alt.Color('metric:N', legend=alt.Legend(title=None, orient='bottom')),
+            tooltip=[alt.Tooltip('date:T', format='%b %d'), 'metric:N', alt.Tooltip('value:Q', format='.1f')],
+        ).properties(height=240)
+        st.altair_chart(trend_chart, use_container_width=True)
+    else:
+        st.info("No historical data yet.")
 
-        st.divider()
+    st.divider()
 
-        st.subheader("HRV Status (7-Day Average vs Baseline)")
+    # ==================================================================
+    # BLOCK 2 — HRV Status + Body Battery
+    # ==================================================================
+    st.subheader("🫀 HRV & Body Battery")
+
+    if not df.empty and 'hrv' in df.columns:
+        # HRV chart — baseline band + colored status dots
         df['hrv_7d'] = df['hrv'].rolling(window=7, min_periods=1).mean()
         df['baseline_mean'] = df['hrv'].rolling(window=21, min_periods=1).mean()
         df['baseline_std'] = df['hrv'].rolling(window=21, min_periods=1).std().clip(lower=3.5)
         df['baseline_high'] = df['baseline_mean'] + df['baseline_std']
         df['baseline_low'] = df['baseline_mean'] - df['baseline_std']
 
-        def determine_hrv_status(row):
-            if pd.isna(row['hrv_7d']) or pd.isna(row['baseline_low']): 
-                return "Unknown"
+        def _hrv_status(row):
+            if pd.isna(row['hrv_7d']) or pd.isna(row['baseline_low']):
+                return "Range"
             if row['hrv_7d'] < row['baseline_low'] or row['hrv_7d'] > row['baseline_high']:
                 return "Unbalanced"
             return "Balanced"
 
-        df['hrv_status'] = df.apply(determine_hrv_status, axis=1)
-
+        df['hrv_status'] = df.apply(_hrv_status, axis=1)
         chart_df = df.reset_index().dropna(subset=['hrv_7d'])
 
+        date_axis = alt.Axis(format='%b %d', title=None, labelAngle=-30)
         baseline_band = alt.Chart(chart_df).mark_area(opacity=0.15, color='#888888').encode(
-            x=alt.X('date:T', title='Date'),
+            x=alt.X('date:T', axis=date_axis),
             y=alt.Y('baseline_low:Q', title='HRV (ms)', scale=alt.Scale(zero=False)),
             y2='baseline_high:Q'
         )
-
         hrv_line = alt.Chart(chart_df).mark_line(color='#A0A0A0', size=1.5).encode(
-            x='date:T',
-            y='hrv_7d:Q'
-        )
-
+            x=alt.X('date:T', axis=date_axis), y='hrv_7d:Q')
         hrv_points = alt.Chart(chart_df).mark_circle(size=80).encode(
-            x='date:T',
-            y='hrv_7d:Q',
-            color=alt.Color('hrv_status:N', 
-                            scale=alt.Scale(domain=['Balanced', 'Unbalanced', 'Unknown'], 
-                                            range=['#2ca02c', '#d62728', '#7f7f7f']),
-                            legend=alt.Legend(title="Status")),
+            x=alt.X('date:T', axis=date_axis), y='hrv_7d:Q',
+            color=alt.Color('hrv_status:N',
+                            scale=alt.Scale(domain=['Balanced','Unbalanced','Range'],
+                                            range=['#2ca02c','#d62728','#7f7f7f']),
+                            legend=alt.Legend(title="7-Day Avg Status")),
             tooltip=[
-                alt.Tooltip('date:T', title='Date'),
-                alt.Tooltip('hrv_7d:Q', title='7-Day Avg HRV', format='.1f'),
-                alt.Tooltip('hrv:Q', title='Last Night HRV', format='.1f'),
-                alt.Tooltip('baseline_low:Q', title='Baseline Low', format='.1f'),
-                alt.Tooltip('baseline_high:Q', title='Baseline High', format='.1f'),
-                alt.Tooltip('hrv_status:N', title='Status')
+                alt.Tooltip('date:T', format='%b %d', title='Date'),
+                alt.Tooltip('hrv_7d:Q', title='7d Avg', format='.1f'),
+                alt.Tooltip('hrv:Q', title='Last Night', format='.1f'),
+                alt.Tooltip('hrv_status:N', title='Status'),
             ]
         )
+        st.altair_chart(
+            alt.layer(baseline_band, hrv_line, hrv_points).properties(height=260).interactive(),
+            use_container_width=True,
+        )
+        st.caption("Gray band = Garmin's expected HRV range (21-day baseline ± 1σ). Dots show 7-day rolling average colored by whether it sits inside or outside that range.")
 
-        final_hrv_chart = alt.layer(baseline_band, hrv_line, hrv_points).properties(height=300).interactive()
-        st.altair_chart(final_hrv_chart, use_container_width=True)
+    bb_df = processor.get_body_battery_series(days=14)
+    if bb_df.empty:
+        st.info("No Body Battery history available.")
+    else:
+        latest_bb = bb_df.iloc[-1]
+        bb1, bb2, bb3 = st.columns(3)
+        with bb1: st.metric("Current", int(latest_bb['current']) if pd.notna(latest_bb['current']) else "—")
+        with bb2: st.metric("Wake Level", int(latest_bb['wake']) if pd.notna(latest_bb['wake']) else "—")
+        with bb3:
+            charged = latest_bb['charged']
+            drained = latest_bb['drained']
+            net = (charged or 0) - (drained or 0)
+            st.metric("Overnight Net", f"{net:+d}" if net else "—",
+                      delta=f"+{int(charged)} / -{int(drained)}" if pd.notna(charged) and pd.notna(drained) else None,
+                      delta_color="off")
 
-        col_charts_1, col_charts_2 = st.columns(2)
-        with col_charts_1:
-            st.subheader("Sleep Quality vs. Volume")
-            st.line_chart(df[['sleep_score', 'run_miles']])
-        with col_charts_2:
-            st.subheader("RHR vs. Stress")
-            st.line_chart(df[['rhr', 'stress']])
+        bb_long = bb_df.melt(id_vars='date', value_vars=['wake', 'lowest', 'current'],
+                             var_name='metric', value_name='value').dropna(subset=['value'])
+        bb_chart = alt.Chart(bb_long).mark_line(point=True).encode(
+            x=alt.X('date:T', axis=alt.Axis(format='%b %d', title=None, labelAngle=-30)),
+            y=alt.Y('value:Q', title='Body Battery', scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color('metric:N', legend=alt.Legend(title=None, orient='bottom')),
+            tooltip=[alt.Tooltip('date:T', format='%b %d'), 'metric:N', alt.Tooltip('value:Q', format='.0f')],
+        ).properties(height=220)
+        st.altair_chart(bb_chart, use_container_width=True)
 
+    st.divider()
+
+    # ==================================================================
+    # BLOCK 3 — Training load (status / VO2 / intensity / fitness age)
+    # ==================================================================
+    st.subheader("💪 Training Load")
+    status = processor.get_training_status_today()
+    intensity = processor.get_weekly_intensity()
+    fitness_age = processor.get_fitness_age()
+    vo2_df = processor.get_vo2_max_series(days=30)
+
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
+        if status:
+            label = processor.describe_training_status(status.get('status_code'))
+            st.metric("Training Status", label)
+            if status.get('acwr_ratio') is not None:
+                ratio = status['acwr_ratio']
+                acwr_status = status.get('acwr_status') or ''
+                st.caption(
+                    f"Acute:Chronic Workload Ratio: **{ratio:.2f}** ({acwr_status.title()})"
+                )
+                # Typical safe window: 0.8 – 1.3; clip for the bar
+                st.progress(min(max(ratio / 2.0, 0.0), 1.0))
+        else:
+            st.info("No training status data.")
+    with row1_col2:
+        if vo2_df.empty or pd.isna(vo2_df['vo2_max'].iloc[-1]):
+            st.info("No VO2 Max data.")
+        else:
+            current_vo2 = vo2_df['vo2_max'].iloc[-1]
+            delta = None
+            if len(vo2_df) > 1:
+                delta = f"{current_vo2 - vo2_df['vo2_max'].iloc[0]:+.1f} vs 30d ago"
+            st.metric("VO2 Max", f"{current_vo2:.1f}", delta=delta)
+            vo2_chart = alt.Chart(vo2_df).mark_line(point=True, color='#5b9bd5').encode(
+                x=alt.X('date:T', axis=alt.Axis(format='%b %d', title=None, labelAngle=-30)),
+                y=alt.Y('vo2_max:Q', scale=alt.Scale(zero=False), title=None),
+                tooltip=[alt.Tooltip('date:T', format='%b %d'), alt.Tooltip('vo2_max:Q', format='.1f')],
+            ).properties(height=140)
+            st.altair_chart(vo2_chart, use_container_width=True)
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        if intensity:
+            st.markdown("**Weekly Intensity Minutes**")
+            pct = min(intensity['percent'] / 100, 1.0)
+            st.progress(pct, text=f"{intensity['total_min']} / {intensity['goal_min']} min  ({intensity['percent']}%)")
+            st.caption(f"Moderate: {intensity['moderate_min']}  •  Vigorous: {intensity['vigorous_min']}")
+        else:
+            st.info("No intensity data.")
+    with row2_col2:
+        if fitness_age and fitness_age.get('fitness') is not None:
+            actual = fitness_age['chronological']
+            fit = fitness_age['fitness']
+            delta_years = fit - actual
+            st.metric("Fitness Age", f"{fit:.1f}",
+                      delta=f"{delta_years:+.1f} vs actual ({actual})",
+                      delta_color="inverse")
+            if fitness_age.get('achievable'):
+                st.caption(f"Achievable: {fitness_age['achievable']:.1f}")
+        else:
+            st.info("No fitness age data.")
+
+    st.divider()
+
+    # ==================================================================
+    # BLOCK 4 — Today's Training Readiness + factor breakdown
+    # ==================================================================
+    st.subheader("🚦 Today's Training Readiness")
+    readiness = processor.get_training_readiness_today()
+
+    if not readiness:
+        st.info("No readiness data yet today.")
+    else:
+        level = readiness.get('level') or 'UNKNOWN'
+        badge = {"HIGH": "🟢", "MODERATE": "🟡", "LOW": "🔴"}.get(level, "⚪️")
+        score = readiness.get('score')
+
+        r1, r2 = st.columns([1, 2])
+        with r1:
+            st.metric("Score", f"{score}" if score is not None else "—", delta=f"{badge} {level}")
+        with r2:
+            feedback = processor.describe_readiness_feedback(
+                readiness.get('feedback_short'), readiness.get('feedback_long')
+            )
+            if feedback:
+                st.markdown(f"> 💬 {feedback}")
+
+        st.markdown("**Factor Breakdown**  _(higher = more favorable)_")
+        factors = readiness.get('factors', {})
+        for name, pct in factors.items():
+            if pct is None:
+                continue
+            st.progress(pct / 100, text=f"{name}  —  {pct}%")
+
+    st.divider()
+
+    # ==================================================================
+    # BLOCK 5 — AI Co-Pilot (unchanged)
+    # ==================================================================
+    if not df.empty:
         # ==========================================
         # 4. LANGGRAPH AGENT CHATBOX
         # ==========================================
