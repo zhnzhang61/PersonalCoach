@@ -46,23 +46,23 @@ export function SleepDetailView() {
 
   return (
     <div className="mx-auto w-full max-w-3xl">
-      <header className="px-3 pt-4 pb-5 sm:px-6 sm:pt-8">
+      <header className="px-3 pt-3 pb-3 sm:px-6 sm:pt-6">
         <Link
           href="/"
-          className="-ml-1 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 py-2.5 text-base font-medium text-muted-foreground transition-colors hover:text-foreground active:bg-muted"
+          className="-ml-1 inline-flex min-h-12 items-center gap-2 rounded-lg px-3 py-3 text-lg font-medium text-foreground/80 transition-colors hover:text-foreground active:bg-muted"
         >
-          <ArrowLeft className="size-5" aria-hidden />
+          <ArrowLeft className="size-6" strokeWidth={2.25} aria-hidden />
           Health
         </Link>
-        <div className="eyebrow mt-4 px-2 sm:px-2">
+        <div className="eyebrow mt-3 px-2">
           {data?.date ? `Night of ${fmtDate(data.date, "EEE, MMM d")}` : "Last night"}
         </div>
-        <h1 className="font-heading mt-1 px-2 text-4xl font-semibold leading-[1.05] tracking-tight sm:px-2 sm:text-5xl">
+        <h1 className="font-heading mt-1 px-2 text-4xl font-semibold leading-[1.05] tracking-tight sm:text-5xl">
           Sleep
         </h1>
       </header>
 
-      <div className="space-y-6 px-5 pb-8 sm:px-8">
+      <div className="space-y-4 px-5 pb-6 sm:px-8">
         {error ? (
           <Card>
             <CardContent className="p-5 text-sm text-rose-600 dark:text-rose-400">
