@@ -46,18 +46,18 @@ export function SleepDetailView() {
 
   return (
     <div className="mx-auto w-full max-w-3xl">
-      <header className="px-5 pt-8 pb-5 sm:px-8 sm:pt-12">
+      <header className="px-3 pt-4 pb-5 sm:px-6 sm:pt-8">
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          className="-ml-1 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 py-2.5 text-base font-medium text-muted-foreground transition-colors hover:text-foreground active:bg-muted"
         >
-          <ArrowLeft className="size-4" aria-hidden />
+          <ArrowLeft className="size-5" aria-hidden />
           Health
         </Link>
-        <div className="eyebrow mt-4">
+        <div className="eyebrow mt-4 px-2 sm:px-2">
           {data?.date ? `Night of ${fmtDate(data.date, "EEE, MMM d")}` : "Last night"}
         </div>
-        <h1 className="font-heading mt-1 text-4xl font-semibold leading-[1.05] tracking-tight sm:text-5xl">
+        <h1 className="font-heading mt-1 px-2 text-4xl font-semibold leading-[1.05] tracking-tight sm:px-2 sm:text-5xl">
           Sleep
         </h1>
       </header>
@@ -75,20 +75,18 @@ export function SleepDetailView() {
               <CardContent className="space-y-5 p-6 sm:p-7">
                 <div>
                   <div className="eyebrow">Total sleep</div>
-                  <div className="font-heading mt-1 flex items-baseline gap-2 text-5xl font-semibold tabular-nums leading-none sm:text-6xl">
-                    {isLoading ? (
-                      <Skeleton className="h-12 w-40" />
-                    ) : (
-                      <>
-                        <span>{fmtHM(data?.total_min)}</span>
-                        {data?.avg_7d.total_min != null && (
-                          <span className="text-base font-normal text-muted-foreground">
-                            7d avg {fmtHM(data.avg_7d.total_min)}
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </div>
+                  {isLoading ? (
+                    <Skeleton className="mt-1 h-12 w-40" />
+                  ) : (
+                    <div className="font-heading mt-1 whitespace-nowrap text-5xl font-semibold tabular-nums leading-none sm:text-6xl">
+                      {fmtHM(data?.total_min)}
+                    </div>
+                  )}
+                  {data?.avg_7d.total_min != null && !isLoading && (
+                    <div className="mt-2 text-sm text-muted-foreground">
+                      7-day average · {fmtHM(data.avg_7d.total_min)}
+                    </div>
+                  )}
                 </div>
 
                 {isLoading ? (

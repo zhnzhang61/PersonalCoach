@@ -9,7 +9,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-fraunces);
+  --font-heading: var(--font-heading-serif);
   --color-warm-bg: var(--warm-bg);
   --color-warm-fg: var(--warm-fg);
   --color-warm-accent: var(--warm-accent);
@@ -146,7 +146,6 @@
 }
 
 .font-heading {
-  font-family: var(--font-fraunces), ui-serif, Georgia, serif;
-  font-feature-settings: "ss01", "ss02";
-  letter-spacing: -0.01em;
+  font-family: var(--font-heading-serif), ui-serif, Georgia, serif;
+  letter-spacing: -0.005em;
 }

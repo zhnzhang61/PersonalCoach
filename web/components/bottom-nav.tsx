@@ -25,7 +25,8 @@ export function BottomNav() {
   const pathname = usePathname();
   return (
     <nav
-      className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-background/90 backdrop-blur-md pb-[env(safe-area-inset-bottom)]"
+      className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-background/95 backdrop-blur-md"
+      style={{ paddingBottom: "max(env(safe-area-inset-bottom), 4px)" }}
       aria-label="Primary"
     >
       <ul className="mx-auto flex max-w-2xl items-stretch justify-around">
@@ -37,7 +38,7 @@ export function BottomNav() {
               <Link
                 href={item.href}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-1 py-3 text-xs font-medium transition-colors",
+                  "flex flex-col items-center justify-center gap-0.5 pt-2 pb-1.5 text-[10px] font-medium tracking-wide transition-colors",
                   active
                     ? "text-foreground"
                     : "text-muted-foreground hover:text-foreground",
@@ -46,7 +47,7 @@ export function BottomNav() {
               >
                 <Icon
                   className={cn(
-                    "size-5",
+                    "size-[22px]",
                     active ? "stroke-[2.25]" : "stroke-[1.75]",
                   )}
                   aria-hidden
