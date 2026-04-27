@@ -51,8 +51,8 @@ export function TodayCards() {
         value={fmtNum(today?.sleep_score)}
         hint={
           today?.sleep_hours != null
-            ? `${fmtNum(today.sleep_hours, 1)} hours`
-            : undefined
+            ? `${fmtNum(today.sleep_hours, 1)} hours · tap for stages`
+            : "tap for stages"
         }
         badge={
           today?.sleep_score != null
@@ -60,6 +60,7 @@ export function TodayCards() {
             : undefined
         }
         loading={isLoading}
+        href="/health/sleep"
       />
       <MetricCard
         label="HRV"
