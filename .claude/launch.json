@@ -4,14 +4,27 @@
     {
       "name": "api-server",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "uvicorn", "api_server:app", "--reload"],
-      "port": 8000
+      "runtimeArgs": [
+        "run",
+        "uvicorn",
+        "api_server:app",
+        "--reload",
+        "--port",
+        "8765"
+      ],
+      "port": 8765
     },
     {
       "name": "streamlit-dashboard",
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "streamlit", "run", "dashboard.py"],
       "port": 8501
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "web", "run", "dev"],
+      "port": 3000
     }
   ]
 }
