@@ -19,6 +19,26 @@ export interface HealthTimelineResponse {
   timeline: HealthDay[];
 }
 
+export interface SyncStatus {
+  last_sync: string | null;
+  last_attempt: string | null;
+  outcome: "ok" | "token_expired" | "error" | null;
+}
+
+export interface SyncResult {
+  ok: boolean;
+  reason: "token_expired" | "error" | null;
+  returncode?: number;
+  stderr?: string;
+}
+
+export interface RefreshTokenResult {
+  ok: boolean;
+  returncode: number;
+  stdout?: string;
+  stderr?: string;
+}
+
 export interface SleepDetail {
   date: string;
   deep_min: number;

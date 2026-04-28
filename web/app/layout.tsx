@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Lora } from "next/font/google";
 import { BottomNav } from "@/components/bottom-nav";
+import { SyncBanner } from "@/components/sync-banner";
 import { Providers } from "./providers";
 import "./globals.css";
 
@@ -41,9 +42,10 @@ export default function RootLayout({
     >
       <body className="bg-background text-foreground min-h-full flex flex-col">
         <Providers>
-          <main className="flex-1 pb-20 pt-[env(safe-area-inset-top)]">
-            {children}
-          </main>
+          <div className="pt-[env(safe-area-inset-top)]">
+            <SyncBanner />
+          </div>
+          <main className="flex-1 pb-20">{children}</main>
           <BottomNav />
         </Providers>
       </body>
