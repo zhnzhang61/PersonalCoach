@@ -72,10 +72,13 @@ export function SnapshotCards() {
 
   const metrics = data?.metrics ?? [];
   const sleepCard = metrics.find((m) => m.key === "sleep_score");
-  const otherCards = metrics.filter((m) => m.key !== "sleep_score");
+  // RHR shows up in the Recovery chart below; Stress isn't useful in
+  // isolation — keep the snapshot row focused on the two top-level
+  // recovery signals.
+  const otherCards = metrics.filter((m) => m.key === "hrv");
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3">
       {sleepCard ? (
         <MetricCard
           {...snapshotMetricToCardProps(sleepCard)}
