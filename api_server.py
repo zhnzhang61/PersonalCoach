@@ -129,15 +129,111 @@ def index() -> FileResponse:
     return FileResponse("webapp/index.html")
 
 
+SYNC_STATE_PATH = Path("data") / "sync_state.json"
+
+
+def _latest_data_mtime() -> float | None:
+    # Most recent file across the per-day Garmin folders. Tells us how fresh the
+    # local cache is regardless of which dataset Garmin actually returned.
+    root = Path("data")
+    if not root.is_dir():
+        return None
+    latest = 0.0
+    for sub in root.iterdir():
+        if not sub.is_dir() or not sub.name.startswith("get_"):
+            continue
+        for f in sub.iterdir():
+            if f.is_file() and f.suffix == ".json":
+                latest = max(latest, f.stat().st_mtime)
+    return latest or None
+
+
+def _read_sync_state() -> dict[str, Any]:
+    if not SYNC_STATE_PATH.is_file():
+        return {}
+    try:
+        return json.loads(SYNC_STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _write_sync_state(outcome: str, detail: str = "") -> None:
+    SYNC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SYNC_STATE_PATH.write_text(
+        json.dumps(
+            {
+                "last_attempt": datetime.datetime.now(
+                    tz=datetime.timezone.utc
+                ).isoformat(),
+                "outcome": outcome,
+                "detail": detail[:500],
+            }
+        )
+    )
+
+
+@app.get("/api/sync/garmin/status")
+def sync_garmin_status() -> dict[str, Any]:
+    mtime = _latest_data_mtime()
+    state = _read_sync_state()
+    return {
+        "last_sync": (
+            datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+            if mtime
+            else None
+        ),
+        "last_attempt": state.get("last_attempt"),
+        "outcome": state.get("outcome"),
+    }
+
+
 @app.post("/api/sync/garmin")
 def sync_garmin() -> dict[str, Any]:
-    cmd = [sys.executable, "garmin_sync.py"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    cmd = [sys.executable, "garmin_sync.py", "--no-fallback"]
+    # /dev/null on stdin so any prompt-based fallback can't hang the request.
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    )
+    if result.returncode == 2 or "TOKEN_EXPIRED" in (result.stderr or ""):
+        _write_sync_state("token_expired", result.stderr or "")
+        return {
+            "ok": False,
+            "reason": "token_expired",
+            "stdout": result.stdout[-2000:],
+            "stderr": result.stderr[-2000:],
+        }
+    if result.returncode == 0:
+        _write_sync_state("ok")
+        return {"ok": True, "reason": None, "stdout": result.stdout[-4000:]}
+    _write_sync_state("error", (result.stderr or result.stdout)[-500:])
     return {
-        "ok": result.returncode == 0,
+        "ok": False,
+        "reason": "error",
         "returncode": result.returncode,
         "stdout": result.stdout[-4000:],
         "stderr": result.stderr[-4000:],
+    }
+
+
+class TicketRefresh(BaseModel):
+    ticket: str  # accepts ST-...-sso bare ticket OR full redirect URL
+
+
+@app.post("/api/sync/garmin/refresh-token")
+def refresh_garmin_token(body: TicketRefresh) -> dict[str, Any]:
+    cmd = [sys.executable, "garmin_ticket_login.py", "--ticket", body.ticket, "--compat"]
+    # No browser, no input prompts — we already have the ticket.
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    )
+    if result.returncode == 0:
+        # Clear the token-expired sticky banner; the user will Sync next.
+        _write_sync_state("ok", "token refreshed via UI")
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": result.stdout[-2000:],
+        "stderr": result.stderr[-2000:],
     }
 
 

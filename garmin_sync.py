@@ -20,7 +20,7 @@ class GarminSync:
         self.daily_methods, self.static_methods, self.activity_methods = [], [], []
         self.range_methods, self.special_methods = [], [] 
 
-    def connect(self):
+    def connect(self, no_fallback: bool = False):
         token_dir = os.path.join(os.path.expanduser("~"), ".garth")
         try:
             # 1. 尝试直接用现有的通行证免密登录
@@ -29,17 +29,25 @@ class GarminSync:
             client.login(token_dir)
             self.client = client
             print("✅ Login successful using cached token!")
-            
+
             self._introspect_api()
             return True
-            
+
         except Exception:
-            # 2. 如果现存 Token 失败或过期，触发自动浏览器登录打断点
-            print("\n⚠️ Token expired or not found. Initiating manual browser login fallback...")
-            
+            # 2. 如果现存 Token 失败或过期
+            print("\n⚠️ Token expired or not found.", flush=True)
+
+            if no_fallback:
+                # API / launchd 模式：不能弹浏览器、不能等用户输入
+                print("TOKEN_EXPIRED", file=sys.stderr, flush=True)
+                return False
+
+            # CLI 交互模式：触发手动浏览器登录打断点
+            print("Initiating manual browser login fallback...", flush=True)
+
             # 动态获取 garmin_ticket_login.py 的路径 (确保它和当前脚本在同一个文件夹)
             script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garmin_ticket_login.py")
-            
+
             if not os.path.exists(script_path):
                 print(f"❌ Error: Could not find {script_path}.")
                 print("Fallback failed. Please run the login script manually.")
@@ -48,22 +56,22 @@ class GarminSync:
             try:
                 # 调用脚本：打开浏览器并生成兼容的 oauth1 和 domain_profile 占位文件
                 result = subprocess.run([sys.executable, script_path, "--open-browser", "--compat"])
-                
+
                 # 检查子脚本是否顺利执行完毕（返回 0 代表成功）
                 if result.returncode != 0:
                     print("❌ Manual login process was aborted or failed.")
                     return False
-                    
+
                 # 3. 手动登录成功，Token 已经写好，重新尝试加载免密登录
                 print("\n🔄 Loading newly fetched token...")
                 client = Garmin()
                 client.login(token_dir)
                 self.client = client
                 print("✅ Login successful using new token!")
-                
+
                 self._introspect_api()
                 return True
-                
+
             except Exception as e:
                 print(f"❌ Failed to process manual login: {e}")
                 return False
@@ -183,7 +191,12 @@ class GarminSync:
 if __name__ == "__main__":
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASS")
+    no_fallback = "--no-fallback" in sys.argv
     # Email / Pass 可以留着做备用变量，虽然新逻辑下用不到了
     syncer = GarminSync(email, password)
-    if syncer.connect(): 
+    if syncer.connect(no_fallback=no_fallback):
         syncer.run_sync(days_back=5, activity_limit=5)
+    else:
+        # connect() 已经把原因写到 stderr，用 exit code 区分:
+        # 2 = token 过期/无效, 1 = 其他失败
+        sys.exit(2 if no_fallback else 1)
