@@ -14,6 +14,7 @@ export interface MetricCardProps {
   loading?: boolean;
   href?: string;
   className?: string;
+  footer?: React.ReactNode;
 }
 
 const toneStyles: Record<string, string> = {
@@ -32,6 +33,7 @@ export function MetricCard({
   loading,
   href,
   className,
+  footer,
 }: MetricCardProps) {
   const inner = (
     <Card
@@ -75,10 +77,11 @@ export function MetricCard({
         )}
         {hint &&
           (loading ? (
-            <Skeleton className="mt-auto h-3 w-32" />
+            <Skeleton className="h-3 w-32" />
           ) : (
-            <span className="mt-auto text-xs text-muted-foreground">{hint}</span>
+            <span className="text-xs text-muted-foreground">{hint}</span>
           ))}
+        {footer && !loading && <div className="mt-auto pt-2">{footer}</div>}
       </CardContent>
     </Card>
   );

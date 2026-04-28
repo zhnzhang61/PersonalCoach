@@ -203,6 +203,22 @@ def sync_garmin() -> dict[str, Any]:
             "stderr": result.stderr[-2000:],
         }
     if result.returncode == 0:
+        # The dashboard reads from the per-day ledger, not the raw Garmin
+        # JSON dump. Refresh it here so users don't have to call two endpoints.
+        # If the rebuild fails the user is left on stale data even though the
+        # Garmin pull succeeded — that has to surface as a failure, otherwise
+        # the Setup UI shows green and the dashboard quietly serves yesterday.
+        try:
+            processor.compile_health_ledger(days_back=120)
+        except Exception as exc:
+            detail = f"Garmin pull OK, but ledger rebuild failed: {exc}"
+            _write_sync_state("error", detail)
+            return {
+                "ok": False,
+                "reason": "error",
+                "stdout": result.stdout[-2000:],
+                "stderr": detail,
+            }
         _write_sync_state("ok")
         return {"ok": True, "reason": None, "stdout": result.stdout[-4000:]}
     _write_sync_state("error", (result.stderr or result.stdout)[-500:])
@@ -357,6 +373,14 @@ def health_sleep() -> dict[str, Any]:
     if not detail:
         raise HTTPException(404, "No recent sleep data")
     return detail
+
+
+@app.get("/api/health/snapshot")
+def health_snapshot(baseline_days: int = 14) -> dict[str, Any]:
+    snap = processor.get_health_snapshot(baseline_days=baseline_days)
+    if not snap:
+        raise HTTPException(404, "No health data")
+    return snap
 
 
 @app.post("/api/ai/run-analysis")
