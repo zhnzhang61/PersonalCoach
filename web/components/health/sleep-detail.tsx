@@ -178,22 +178,27 @@ export function SleepDetailView() {
                     ? `${data.body_battery_change > 0 ? "+" : ""}${data.body_battery_change}`
                     : "—"
                 }
-                hint={
-                  data?.avg_7d.body_battery_change != null
-                    ? `7d ${data.avg_7d.body_battery_change > 0 ? "+" : ""}${data.avg_7d.body_battery_change.toFixed(0)} · recovered`
-                    : "recovered overnight"
+                compare={
+                  data?.body_battery_change != null
+                    ? {
+                        current: data.body_battery_change,
+                        prior: data.avg_7d.body_battery_change,
+                      }
+                    : undefined
                 }
                 loading={isLoading}
               />
               <DetailCard
                 label="Avg sleep HR"
-                value={
-                  data?.avg_hr != null ? data.avg_hr.toFixed(0) : "—"
-                }
+                value={data?.avg_hr != null ? data.avg_hr.toFixed(0) : "—"}
                 unit="bpm"
-                hint={
-                  data?.avg_7d.avg_hr != null
-                    ? `7d ${data.avg_7d.avg_hr.toFixed(0)}`
+                compare={
+                  data?.avg_hr != null
+                    ? {
+                        current: data.avg_hr,
+                        prior: data.avg_7d.avg_hr,
+                        inverted: true,
+                      }
                     : undefined
                 }
                 loading={isLoading}
@@ -203,9 +208,13 @@ export function SleepDetailView() {
                 value={
                   data?.awake_count != null ? `${data.awake_count}` : "—"
                 }
-                hint={
-                  data?.avg_7d.awake_count != null
-                    ? `7d ${data.avg_7d.awake_count.toFixed(1)}`
+                compare={
+                  data?.awake_count != null
+                    ? {
+                        current: data.awake_count,
+                        prior: data.avg_7d.awake_count,
+                        inverted: true,
+                      }
                     : undefined
                 }
                 loading={isLoading}
@@ -218,9 +227,13 @@ export function SleepDetailView() {
                     : "—"
                 }
                 unit="brpm"
-                hint={
-                  data?.avg_7d.avg_respiration != null
-                    ? `7d ${data.avg_7d.avg_respiration.toFixed(1)}`
+                compare={
+                  data?.avg_respiration != null
+                    ? {
+                        current: data.avg_respiration,
+                        prior: data.avg_7d.avg_respiration,
+                        inverted: true,
+                      }
                     : undefined
                 }
                 loading={isLoading}
@@ -232,9 +245,13 @@ export function SleepDetailView() {
                     ? data.sleep_stress.toFixed(0)
                     : "—"
                 }
-                hint={
-                  data?.avg_7d.sleep_stress != null
-                    ? `7d ${data.avg_7d.sleep_stress.toFixed(0)}`
+                compare={
+                  data?.sleep_stress != null
+                    ? {
+                        current: data.sleep_stress,
+                        prior: data.avg_7d.sleep_stress,
+                        inverted: true,
+                      }
                     : undefined
                 }
                 loading={isLoading}
@@ -362,17 +379,26 @@ function DetailCard({
   value,
   unit,
   hint,
+  compare,
   loading,
 }: {
   label: string;
   value: string;
   unit?: string;
   hint?: string;
+  compare?: { current: number; prior: number | null; inverted?: boolean };
   loading?: boolean;
 }) {
+  const d = compare && compare.prior != null ? delta(compare.current, compare.prior) : null;
+  const goodTone = compare?.inverted ? "down" : "up";
+  const baseline =
+    compare && compare.prior != null
+      ? `7d ${formatPrior(compare.prior)}`
+      : null;
+
   return (
     <Card>
-      <CardContent className="space-y-2 p-5">
+      <CardContent className="space-y-1.5 p-5">
         <div className="eyebrow">{label}</div>
         {loading ? (
           <Skeleton className="h-9 w-20" />
@@ -386,10 +412,36 @@ function DetailCard({
             )}
           </div>
         )}
-        {hint && !loading && (
-          <div className="text-xs text-muted-foreground">{hint}</div>
+        {!loading && (d || baseline || hint) && (
+          <div className="flex flex-wrap items-baseline gap-x-1.5 text-xs">
+            {d && (
+              <span
+                className={cn(
+                  "font-medium",
+                  d.tone === "flat"
+                    ? "text-muted-foreground"
+                    : d.tone === goodTone
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : "text-rose-700 dark:text-rose-400",
+                )}
+              >
+                {d.label.replace(" vs 7d avg", "")}
+              </span>
+            )}
+            {(baseline || hint) && (
+              <span className="text-muted-foreground">
+                {baseline ?? hint}
+              </span>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
   );
+}
+
+function formatPrior(n: number): string {
+  // Drop the trailing .0 for whole-number 7d averages but keep one decimal
+  // for fractional ones (e.g. "1.3" awakenings, "14.9" brpm).
+  return n % 1 === 0 ? `${n}` : n.toFixed(1);
 }
