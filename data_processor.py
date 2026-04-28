@@ -701,6 +701,101 @@ class DataProcessor:
         }
         return current
 
+    # ----- Health snapshot ---------------------------------------------------
+    # Metric specs live next to the snapshot computation so callers see one
+    # place that owns "what counts as a recovery indicator". Adding a new
+    # metric (e.g. body_battery_at_wake) means appending to METRIC_SPECS plus
+    # surfacing its key in get_health_stats — no other change needed.
+    #
+    # The baseline shape is intentionally a map keyed by window-name rather
+    # than a flat field, so future windows ("season_last_year",
+    # "trailing_3mo") slot in alongside "recent" without breaking existing
+    # frontend code that only knows about one window.
+
+    METRIC_SPECS: list[dict] = [
+        {"key": "sleep_score", "label": "Sleep",       "unit": None, "direction": "higher_better"},
+        {"key": "hrv",         "label": "HRV",         "unit": "ms",  "direction": "higher_better"},
+        {"key": "rhr",         "label": "Resting HR",  "unit": "bpm", "direction": "lower_better"},
+        {"key": "stress",      "label": "Stress",      "unit": None,  "direction": "lower_better"},
+    ]
+
+    @staticmethod
+    def _baseline_avg(rows: list[dict], key: str, end_date: datetime.date, window_days: int) -> float | None:
+        """Average of `rows[key]` over `window_days` ending right before end_date.
+
+        end_date is excluded so we never compare a value to itself. Skips Nones.
+        """
+        start = (end_date - timedelta(days=window_days)).isoformat()
+        end = end_date.isoformat()
+        vals = [
+            r[key] for r in rows
+            if r.get("date") and start <= r["date"] < end and r.get(key) is not None
+        ]
+        return sum(vals) / len(vals) if vals else None
+
+    @staticmethod
+    def _delta_tone(delta_pct: float | None, direction: str, flat_band: float = 5.0) -> str:
+        if delta_pct is None:
+            return "neutral"
+        if abs(delta_pct) < flat_band:
+            return "flat"
+        improving = delta_pct > 0 if direction == "higher_better" else delta_pct < 0
+        return "good" if improving else "bad"
+
+    def get_health_snapshot(self, baseline_days: int = 14) -> dict | None:
+        """Today's recovery snapshot, anchored against a rolling baseline.
+
+        Returns the structure designed for both UI cards and downstream AI
+        consumption — every metric carries its current value, the baseline,
+        the % delta, and a tone token (good/bad/flat/neutral) computed from
+        each metric's known good direction. No interpretation happens here;
+        consumers (rule-based card text or LLM) layer that on top.
+        """
+        rows = self.get_health_stats()
+        if not rows:
+            return None
+        today = rows[-1]
+        try:
+            end_date = datetime.date.fromisoformat(today["date"])
+        except (KeyError, ValueError):
+            return None
+
+        window_label = f"recent_{baseline_days}d"
+        metrics = []
+        for spec in self.METRIC_SPECS:
+            value = today.get(spec["key"])
+            baseline = self._baseline_avg(rows, spec["key"], end_date, baseline_days)
+            delta_pct: float | None = None
+            if value is not None and baseline is not None and baseline != 0:
+                delta_pct = round((value - baseline) / baseline * 100, 1)
+            tone = self._delta_tone(delta_pct, spec["direction"])
+            metrics.append({
+                "key": spec["key"],
+                "label": spec["label"],
+                "value": value,
+                "unit": spec["unit"],
+                "direction": spec["direction"],
+                "baselines": {
+                    "recent": {
+                        "window": window_label,
+                        "days": baseline_days,
+                        "value": round(baseline, 1) if baseline is not None else None,
+                        "delta_pct": delta_pct,
+                        "tone": tone,
+                    },
+                },
+            })
+
+        return {
+            "date": today["date"],
+            "baseline_window_days": baseline_days,
+            "metrics": metrics,
+            "behavior": {
+                "run_miles": today.get("run_miles"),
+                "run_mins": today.get("run_mins"),
+            },
+        }
+
     def get_body_battery_series(self, days: int = 14) -> pd.DataFrame:
         """
         Daily Body Battery history from stats_and_body. One row per day with
