@@ -205,16 +205,19 @@ def sync_garmin() -> dict[str, Any]:
     if result.returncode == 0:
         # The dashboard reads from the per-day ledger, not the raw Garmin
         # JSON dump. Refresh it here so users don't have to call two endpoints.
+        # If the rebuild fails the user is left on stale data even though the
+        # Garmin pull succeeded — that has to surface as a failure, otherwise
+        # the Setup UI shows green and the dashboard quietly serves yesterday.
         try:
             processor.compile_health_ledger(days_back=120)
         except Exception as exc:
-            # Sync still succeeded — surface the ledger error but don't fail.
-            _write_sync_state("ok", f"sync ok, ledger refresh failed: {exc}")
+            detail = f"Garmin pull OK, but ledger rebuild failed: {exc}"
+            _write_sync_state("error", detail)
             return {
-                "ok": True,
-                "reason": None,
+                "ok": False,
+                "reason": "error",
                 "stdout": result.stdout[-2000:],
-                "ledger_error": str(exc),
+                "stderr": detail,
             }
         _write_sync_state("ok")
         return {"ok": True, "reason": None, "stdout": result.stdout[-4000:]}
