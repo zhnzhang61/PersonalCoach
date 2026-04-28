@@ -71,7 +71,7 @@ const TONE_BG: Record<string, string> = {
 };
 
 export function ReadinessCard() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["health", "snapshot", 14],
     queryFn: () => apiGet<HealthSnapshot>("/api/health/snapshot?baseline_days=14"),
   });
@@ -86,8 +86,16 @@ export function ReadinessCard() {
           <span className="eyebrow">Today&rsquo;s read</span>
         </div>
 
-        {isLoading || !interpretation ? (
+        {isLoading ? (
           <Skeleton className="h-8 w-3/4" />
+        ) : error ? (
+          <p className="text-sm text-rose-700 dark:text-rose-400">
+            Couldn&rsquo;t load today&rsquo;s read: {(error as Error).message}
+          </p>
+        ) : !interpretation ? (
+          <p className="text-sm text-muted-foreground">
+            No snapshot data yet — sync to see today&rsquo;s read.
+          </p>
         ) : (
           <h2 className="font-heading text-xl font-semibold leading-snug tracking-tight sm:text-2xl">
             {interpretation.headline}
@@ -110,9 +118,11 @@ export function ReadinessCard() {
           </ul>
         )}
 
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
-          {interpretation?.source === "ai" ? "AI summary" : "Rule-based read"}
-        </p>
+        {interpretation && (
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            {interpretation.source === "ai" ? "AI summary" : "Rule-based read"}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
