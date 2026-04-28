@@ -1,13 +1,16 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
-import type { SleepDetail as SleepDetailData } from "@/lib/types";
+import type {
+  HealthTimelineResponse,
+  SleepDetail as SleepDetailData,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STAGES = [
@@ -42,6 +45,11 @@ export function SleepDetailView() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["health", "sleep"],
     queryFn: () => apiGet<SleepDetailData>("/api/health/sleep"),
+  });
+  const timeline = useQuery({
+    queryKey: ["health", "timeline", 7],
+    queryFn: () =>
+      apiGet<HealthTimelineResponse>("/api/health/timeline?days=7"),
   });
 
   return (
@@ -82,9 +90,27 @@ export function SleepDetailView() {
                       {fmtHM(data?.total_min)}
                     </div>
                   )}
-                  {data?.avg_7d.total_min != null && !isLoading && (
-                    <div className="mt-2 text-sm text-muted-foreground">
-                      7-day average · {fmtHM(data.avg_7d.total_min)}
+                  {!isLoading && data && (
+                    <div className="mt-2 space-y-0.5 text-sm text-muted-foreground">
+                      {data.avg_7d.total_min != null && (
+                        <div>
+                          7-day average · {fmtHM(data.avg_7d.total_min)}
+                        </div>
+                      )}
+                      {data.sleep_start && data.sleep_end && (
+                        <div className="inline-flex items-center gap-1.5 tabular-nums">
+                          <span className="font-medium text-foreground/80">
+                            {data.sleep_start}
+                          </span>
+                          <ArrowRight
+                            className="size-3.5 text-muted-foreground/70"
+                            aria-hidden
+                          />
+                          <span className="font-medium text-foreground/80">
+                            {data.sleep_end}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -138,7 +164,52 @@ export function SleepDetailView() {
               </CardContent>
             </Card>
 
-            <div className="grid grid-cols-2 gap-3">
+            <SleepHistoryBars
+              timeline={timeline.data?.timeline}
+              loading={timeline.isLoading}
+              error={timeline.error as Error | null}
+            />
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <DetailCard
+                label="Body battery"
+                value={
+                  data?.body_battery_change != null
+                    ? `${data.body_battery_change > 0 ? "+" : ""}${data.body_battery_change}`
+                    : "—"
+                }
+                hint={
+                  data?.avg_7d.body_battery_change != null
+                    ? `7d ${data.avg_7d.body_battery_change > 0 ? "+" : ""}${data.avg_7d.body_battery_change.toFixed(0)} · recovered`
+                    : "recovered overnight"
+                }
+                loading={isLoading}
+              />
+              <DetailCard
+                label="Avg sleep HR"
+                value={
+                  data?.avg_hr != null ? data.avg_hr.toFixed(0) : "—"
+                }
+                unit="bpm"
+                hint={
+                  data?.avg_7d.avg_hr != null
+                    ? `7d ${data.avg_7d.avg_hr.toFixed(0)}`
+                    : undefined
+                }
+                loading={isLoading}
+              />
+              <DetailCard
+                label="Awakenings"
+                value={
+                  data?.awake_count != null ? `${data.awake_count}` : "—"
+                }
+                hint={
+                  data?.avg_7d.awake_count != null
+                    ? `7d ${data.avg_7d.awake_count.toFixed(1)}`
+                    : undefined
+                }
+                loading={isLoading}
+              />
               <DetailCard
                 label="Avg respiration"
                 value={
@@ -199,6 +270,90 @@ function StageBar({ data }: { data: SleepDetailData }) {
         );
       })}
     </div>
+  );
+}
+
+function SleepHistoryBars({
+  timeline,
+  loading,
+  error,
+}: {
+  timeline: HealthTimelineResponse["timeline"] | undefined;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const nights = (timeline ?? []).filter((d) => d.sleep_hours != null);
+  const max = nights.reduce(
+    (m, d) => Math.max(m, d.sleep_hours ?? 0),
+    8,
+  );
+  const avg =
+    nights.length > 0
+      ? nights.reduce((s, d) => s + (d.sleep_hours ?? 0), 0) / nights.length
+      : null;
+
+  return (
+    <Card>
+      <CardContent className="space-y-4 p-5 sm:p-6">
+        <div className="flex items-baseline justify-between">
+          <div>
+            <div className="eyebrow">Last 7 nights</div>
+            <div className="font-heading mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
+              Total sleep
+            </div>
+          </div>
+          {avg != null && (
+            <div className="text-xs text-muted-foreground tabular-nums">
+              avg {avg.toFixed(1)}h
+            </div>
+          )}
+        </div>
+
+        {loading ? (
+          <Skeleton className="h-32 w-full" />
+        ) : error ? (
+          <div className="text-sm text-rose-600 dark:text-rose-400">
+            Failed to load history.
+          </div>
+        ) : nights.length === 0 ? (
+          <div className="text-sm text-muted-foreground">
+            No recent sleep data.
+          </div>
+        ) : (
+          <div
+            className="grid items-end gap-1.5"
+            style={{ gridTemplateColumns: `repeat(${nights.length}, 1fr)` }}
+            role="img"
+            aria-label="Sleep hours per night, last 7 nights"
+          >
+            {nights.map((d) => {
+              const hrs = d.sleep_hours ?? 0;
+              const heightPct = max > 0 ? Math.max((hrs / max) * 100, 6) : 6;
+              return (
+                <div
+                  key={d.date}
+                  className="flex flex-col items-center gap-1.5"
+                >
+                  <div className="flex h-24 w-full items-end">
+                    <div
+                      className="w-full rounded-t-md bg-warm-accent/70"
+                      style={{ height: `${heightPct}%` }}
+                      title={`${fmtDate(d.date, "EEE, MMM d")}: ${hrs.toFixed(1)}h`}
+                    />
+                  </div>
+                  <span className="text-[10px] font-medium tabular-nums text-foreground/80">
+                    {hrs.toFixed(1)}
+                  </span>
+                  <span className="eyebrow text-[9px]">
+                    {fmtDate(d.date, "EEE")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

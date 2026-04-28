@@ -28,6 +28,11 @@ export interface SleepDetail {
   total_min: number;
   avg_respiration: number | null;
   sleep_stress: number | null;
+  sleep_start: string | null;
+  sleep_end: string | null;
+  body_battery_change: number | null;
+  avg_hr: number | null;
+  awake_count: number | null;
   avg_7d: {
     deep_min: number | null;
     rem_min: number | null;
@@ -36,5 +41,8 @@ export interface SleepDetail {
     total_min: number | null;
     avg_respiration: number | null;
     sleep_stress: number | null;
+    body_battery_change: number | null;
+    avg_hr: number | null;
+    awake_count: number | null;
   };
 }
