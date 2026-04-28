@@ -5,6 +5,8 @@ import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
@@ -101,6 +103,7 @@ export function SleepChart({ days = 30 }: Props) {
                 strokeWidth={2}
                 dot={false}
               />
+              <ChartLegend content={<ChartLegendContent />} />
             </LineChart>
           </ChartContainer>
         )}

@@ -30,6 +30,20 @@ export interface BaselineSummary {
   tone: Tone;
 }
 
+// Discriminated union of metric-specific extras. Each `type` introduces its
+// own set of keys; consumers narrow by `type` and ignore anything they don't
+// recognize. Future entries (e.g. training-readiness target zones) slot in
+// here without affecting existing call sites.
+export type MetricContext = HrvBandContext;
+
+export interface HrvBandContext {
+  type: "hrv_band";
+  low_upper: number | null;
+  balanced_low: number | null;
+  balanced_upper: number | null;
+  status: string | null;
+}
+
 export interface MetricSnapshot {
   key: string;
   label: string;
@@ -40,6 +54,7 @@ export interface MetricSnapshot {
   // "season_last_year", "trailing_3mo", etc. Keys we don't recognize on the
   // client are ignored, so adding new windows is non-breaking.
   baselines: Record<string, BaselineSummary>;
+  context?: MetricContext;
 }
 
 export interface HealthSnapshot {

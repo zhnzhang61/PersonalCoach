@@ -2,7 +2,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "@/lib/api";
-import { fmtNum } from "@/lib/format";
 import type {
   BaselineSummary,
   HealthSnapshot,
@@ -10,6 +9,7 @@ import type {
   Tone,
 } from "@/lib/types";
 import { MetricCard } from "@/components/metric-card";
+import { HrvBand } from "@/components/health/hrv-band";
 
 const TONE_TEXT: Record<Tone, string> = {
   good: "good",
@@ -73,7 +73,6 @@ export function SnapshotCards() {
   const metrics = data?.metrics ?? [];
   const sleepCard = metrics.find((m) => m.key === "sleep_score");
   const otherCards = metrics.filter((m) => m.key !== "sleep_score");
-  const run = data?.behavior;
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -94,26 +93,20 @@ export function SnapshotCards() {
         <MetricCard label="Sleep" value="—" loading={isLoading} href="/health/sleep" />
       )}
 
-      {otherCards.map((m) => (
-        <MetricCard
-          key={m.key}
-          {...snapshotMetricToCardProps(m)}
-          loading={isLoading}
-        />
-      ))}
-
-      <MetricCard
-        label="Run today"
-        value={run?.run_miles != null ? fmtNum(run.run_miles, 1) : "—"}
-        unit="mi"
-        hint={
-          run?.run_mins != null && run.run_mins > 0
-            ? `${fmtNum(run.run_mins, 0)} min`
-            : "no run today"
-        }
-        loading={isLoading}
-        className="col-span-2 sm:col-span-1"
-      />
+      {otherCards.map((m) => {
+        const footer =
+          m.context?.type === "hrv_band" ? (
+            <HrvBand value={m.value} context={m.context} />
+          ) : undefined;
+        return (
+          <MetricCard
+            key={m.key}
+            {...snapshotMetricToCardProps(m)}
+            footer={footer}
+            loading={isLoading}
+          />
+        );
+      })}
     </div>
   );
 }

@@ -742,6 +742,29 @@ class DataProcessor:
         improving = delta_pct > 0 if direction == "higher_better" else delta_pct < 0
         return "good" if improving else "bad"
 
+    def _latest_hrv_baseline(self) -> dict | None:
+        """Pull Garmin's HRV band from the most recent hrv json.
+
+        hrvSummary.baseline gives Garmin's calibrated normal range
+        (lowUpper / balancedLow / balancedUpper) plus a status string.
+        Returns None if no recent file or the keys are absent.
+        """
+        latest = self._latest_available_date('hrv')
+        if not latest:
+            return None
+        payload = self.load_json_safe(self.paths['hrv'], f"{latest}.json")
+        summary = payload.get('hrvSummary') or {}
+        baseline = summary.get('baseline') or {}
+        if not baseline:
+            return None
+        return {
+            "type": "hrv_band",
+            "low_upper": baseline.get("lowUpper"),
+            "balanced_low": baseline.get("balancedLow"),
+            "balanced_upper": baseline.get("balancedUpper"),
+            "status": summary.get("status"),
+        }
+
     def get_health_snapshot(self, baseline_days: int = 14) -> dict | None:
         """Today's recovery snapshot, anchored against a rolling baseline.
 
@@ -761,6 +784,7 @@ class DataProcessor:
             return None
 
         window_label = f"recent_{baseline_days}d"
+        hrv_band = self._latest_hrv_baseline()
         metrics = []
         for spec in self.METRIC_SPECS:
             value = today.get(spec["key"])
@@ -769,7 +793,7 @@ class DataProcessor:
             if value is not None and baseline is not None and baseline != 0:
                 delta_pct = round((value - baseline) / baseline * 100, 1)
             tone = self._delta_tone(delta_pct, spec["direction"])
-            metrics.append({
+            entry = {
                 "key": spec["key"],
                 "label": spec["label"],
                 "value": value,
@@ -784,7 +808,13 @@ class DataProcessor:
                         "tone": tone,
                     },
                 },
-            })
+            }
+            # Per-metric extras (calibrated bands, target zones, etc.). Future
+            # metrics can drop new context types in here without changing the
+            # outer shape; frontend ignores types it doesn't recognize.
+            if spec["key"] == "hrv" and hrv_band:
+                entry["context"] = hrv_band
+            metrics.append(entry)
 
         return {
             "date": today["date"],

@@ -24,7 +24,7 @@ import type { HealthTimelineResponse } from "@/lib/types";
 // be looking for.
 const config = {
   hrv: { label: "HRV (ms)", color: "var(--chart-1)" },
-  rhr: { label: "Resting HR (bpm, inverted)", color: "var(--chart-2)" },
+  rhr: { label: "Resting HR (lower = better)", color: "var(--chart-2)" },
 } satisfies ChartConfig;
 
 interface Props {
