@@ -18,3 +18,31 @@ export interface HealthTimelineResponse {
   days: number;
   timeline: HealthDay[];
 }
+
+export interface SleepDetail {
+  date: string;
+  deep_min: number;
+  rem_min: number;
+  light_min: number;
+  awake_min: number;
+  total_min: number;
+  avg_respiration: number | null;
+  sleep_stress: number | null;
+  sleep_start: string | null;
+  sleep_end: string | null;
+  body_battery_change: number | null;
+  avg_hr: number | null;
+  awake_count: number | null;
+  avg_7d: {
+    deep_min: number | null;
+    rem_min: number | null;
+    light_min: number | null;
+    awake_min: number | null;
+    total_min: number | null;
+    avg_respiration: number | null;
+    sleep_stress: number | null;
+    body_battery_change: number | null;
+    avg_hr: number | null;
+    awake_count: number | null;
+  };
+}

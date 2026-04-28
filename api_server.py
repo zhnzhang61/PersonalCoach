@@ -255,6 +255,14 @@ def health_timeline(days: int = 30) -> dict[str, Any]:
     return {"days": days, "timeline": clipped}
 
 
+@app.get("/api/health/sleep")
+def health_sleep() -> dict[str, Any]:
+    detail = processor.get_last_night_sleep()
+    if not detail:
+        raise HTTPException(404, "No recent sleep data")
+    return detail
+
+
 @app.post("/api/ai/run-analysis")
 def ai_run_analysis(body: RunAnalysisInput) -> dict[str, Any]:
     ctx = processor.build_ai_context(body.activity_id, body.block_id)

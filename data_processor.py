@@ -645,6 +645,13 @@ class DataProcessor:
             val = dto.get(key)
             return round(val / 60) if val else 0
 
+        def _hhmm(ms):
+            # Garmin's *Local timestamps are encoded as if the watch's local
+            # wall-clock were UTC, so decoding as UTC yields the bedside HH:MM.
+            if not ms:
+                return None
+            return datetime.datetime.utcfromtimestamp(ms / 1000).strftime('%H:%M')
+
         current = {
             'date': latest,
             'deep_min': _mins('deepSleepSeconds'),
@@ -654,11 +661,19 @@ class DataProcessor:
             'total_min': _mins('sleepTimeSeconds'),
             'avg_respiration': dto.get('averageRespirationValue'),
             'sleep_stress': dto.get('avgSleepStress'),  # nested under DTO, not top-level
+            'sleep_start': _hhmm(dto.get('sleepStartTimestampLocal')),
+            'sleep_end': _hhmm(dto.get('sleepEndTimestampLocal')),
+            'body_battery_change': sleep.get('bodyBatteryChange'),  # top-level, not in DTO
+            'avg_hr': dto.get('avgHeartRate'),
+            'awake_count': dto.get('awakeCount'),
         }
 
         # 7-day averages (excluding today) for delta comparisons
         today = datetime.date.fromisoformat(latest)
-        samples = {k: [] for k in ['deep_min','rem_min','light_min','awake_min','total_min','avg_respiration','sleep_stress']}
+        avg_keys = ['deep_min','rem_min','light_min','awake_min','total_min',
+                    'avg_respiration','sleep_stress',
+                    'body_battery_change','avg_hr','awake_count']
+        samples = {k: [] for k in avg_keys}
         for i in range(1, 8):
             d = (today - timedelta(days=i)).isoformat()
             s = self.load_json_safe(self.paths['sleep'], f"{d}.json")
@@ -674,6 +689,12 @@ class DataProcessor:
                 samples['avg_respiration'].append(sdto['averageRespirationValue'])
             if sdto.get('avgSleepStress') is not None:
                 samples['sleep_stress'].append(sdto['avgSleepStress'])
+            if s.get('bodyBatteryChange') is not None:
+                samples['body_battery_change'].append(s['bodyBatteryChange'])
+            if sdto.get('avgHeartRate') is not None:
+                samples['avg_hr'].append(sdto['avgHeartRate'])
+            if sdto.get('awakeCount') is not None:
+                samples['awake_count'].append(sdto['awakeCount'])
 
         current['avg_7d'] = {
             k: (round(sum(v) / len(v), 1) if v else None) for k, v in samples.items()

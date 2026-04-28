@@ -13,6 +13,9 @@ const nextConfig: NextConfig = {
     "*.ts.net",
     "100.110.119.107",
   ],
+  // Hide the floating "N" route-info badge in dev — we view this on the
+  // iPhone where the badge crowds the bottom-left corner.
+  devIndicators: false,
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${API_TARGET}/api/:path*` },

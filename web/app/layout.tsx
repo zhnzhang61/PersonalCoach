@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Lora } from "next/font/google";
 import { BottomNav } from "@/components/bottom-nav";
 import { Providers } from "./providers";
 import "./globals.css";
@@ -7,6 +7,10 @@ import "./globals.css";
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+const lora = Lora({
+  variable: "--font-heading-serif",
   subsets: ["latin"],
 });
 
@@ -33,11 +37,11 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${lora.variable} h-full antialiased`}
     >
       <body className="bg-background text-foreground min-h-full flex flex-col">
         <Providers>
-          <main className="flex-1 pb-24 pt-[env(safe-area-inset-top)]">
+          <main className="flex-1 pb-20 pt-[env(safe-area-inset-top)]">
             {children}
           </main>
           <BottomNav />

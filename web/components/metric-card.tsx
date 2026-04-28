@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { ChevronRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,14 +12,15 @@ export interface MetricCardProps {
   hint?: string;
   badge?: { text: string; tone?: "neutral" | "good" | "warn" | "bad" };
   loading?: boolean;
+  href?: string;
   className?: string;
 }
 
 const toneStyles: Record<string, string> = {
-  neutral: "",
-  good: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20",
-  warn: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20",
-  bad: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/20",
+  neutral: "border-border/60 bg-muted/40 text-foreground/70",
+  good: "border-emerald-600/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  warn: "border-amber-600/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  bad: "border-rose-600/30 bg-rose-500/10 text-rose-700 dark:text-rose-300",
 };
 
 export function MetricCard({
@@ -27,15 +30,20 @@ export function MetricCard({
   hint,
   badge,
   loading,
+  href,
   className,
 }: MetricCardProps) {
-  return (
-    <Card className={cn("h-full", className)}>
-      <CardContent className="flex h-full flex-col gap-2 p-5">
+  const inner = (
+    <Card
+      className={cn(
+        "h-full transition-colors",
+        href && "hover:border-warm-accent/40 hover:bg-warm-accent-soft/30",
+        className,
+      )}
+    >
+      <CardContent className="flex h-full flex-col gap-3 p-5">
         <div className="flex items-start justify-between gap-2">
-          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            {label}
-          </span>
+          <span className="eyebrow">{label}</span>
           {badge && !loading && (
             <Badge
               variant="outline"
@@ -47,12 +55,15 @@ export function MetricCard({
               {badge.text}
             </Badge>
           )}
+          {href && !badge && (
+            <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
+          )}
         </div>
         {loading ? (
-          <Skeleton className="h-9 w-24" />
+          <Skeleton className="h-10 w-24" />
         ) : (
-          <div className="flex items-baseline gap-1">
-            <span className="text-3xl font-semibold tabular-nums leading-none">
+          <div className="flex items-baseline gap-1.5">
+            <span className="font-heading text-4xl font-semibold tabular-nums leading-none sm:text-[2.75rem]">
               {value}
             </span>
             {unit && (
@@ -64,11 +75,23 @@ export function MetricCard({
         )}
         {hint &&
           (loading ? (
-            <Skeleton className="mt-1 h-3 w-32" />
+            <Skeleton className="mt-auto h-3 w-32" />
           ) : (
-            <span className="text-xs text-muted-foreground">{hint}</span>
+            <span className="mt-auto text-xs text-muted-foreground">{hint}</span>
           ))}
       </CardContent>
     </Card>
   );
+
+  if (href) {
+    return (
+      <Link
+        href={href}
+        className={cn("block focus-visible:outline-none", className)}
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return inner;
 }
