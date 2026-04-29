@@ -269,10 +269,10 @@ class DataProcessor:
         # 3. Fetch Daily Health Readiness for THAT specific day
         readiness = self.get_daily_readiness(run_date)
 
-        # 4. Fetch Aux Activities (Last 7 days)
+        # 4. Fetch Manual Activities (Last 7 days) — non-Garmin runs/swims/gym
         date_obj = datetime.date.fromisoformat(run_date)
         start_7 = (date_obj - timedelta(days=7)).isoformat()
-        aux_events = self.get_aux_in_range(start_7, run_date)
+        aux_events = self.get_manual_activities_in_range(start_7, run_date)
 
         # 5. Assemble The Ultimate Context Payload
         context = {
@@ -441,15 +441,182 @@ class DataProcessor:
         return sorted(found, key=lambda x: x['startTimeLocal'], reverse=True)
     # -------------------------------
 
-    def get_aux_in_range(self, start_str, end_str):
-        current = self.load_json_safe(self.paths['aux'])
-        if isinstance(current, dict): current = [] # Fallback
-        return [x for x in current if start_str <= x['date'] <= end_str]
+    # ==========================================
+    # Manual activities (non-Garmin: swim/gym/other, plus free-form runs)
+    # ==========================================
+    VALID_MANUAL_ACTIVITY_TYPES = ("run", "swim", "gym", "other")
 
-    def add_aux_activity(self, date_str, event_type, desc):
-        with open(self.paths['aux'], 'r') as f: current = json.load(f)
-        current.append({"id": f"aux_{int(datetime.datetime.now().timestamp())}", "date": date_str, "type": event_type, "desc": desc})
-        with open(self.paths['aux'], 'w') as f: json.dump(current, f, indent=4)
+    def get_manual_activities_in_range(self, start_str, end_str):
+        current = self.load_json_safe(self.paths['aux'])
+        if isinstance(current, dict): current = []
+        return sorted(
+            [x for x in current if start_str <= x.get('date', '') <= end_str],
+            key=lambda x: x.get('date', ''),
+            reverse=True,
+        )
+
+    def add_manual_activity(self, date_str, activity_type, description, duration_min=None, distance_mi=None):
+        activity_type = activity_type if activity_type in self.VALID_MANUAL_ACTIVITY_TYPES else "other"
+        with open(self.paths['aux'], 'r') as f:
+            current = json.load(f)
+        entry = {
+            "id": f"manual_{int(datetime.datetime.now().timestamp())}",
+            "date": date_str,
+            "type": activity_type,
+            "desc": description,
+        }
+        if duration_min is not None:
+            entry["duration_min"] = duration_min
+        if distance_mi is not None:
+            entry["distance_mi"] = distance_mi
+        current.append(entry)
+        with open(self.paths['aux'], 'w') as f:
+            json.dump(current, f, indent=4)
+        return entry
+
+    def compute_cycle_and_week_stats(self, block_id, week_start, week_end):
+        """
+        Aggregate cycle-level stats and the selected-week summary for the
+        Training Cycle Overview card and Activity-tab weekly banner. Returns
+        a dict ready to render — no further shaping in the dashboard or web UI.
+        """
+        from collections import defaultdict
+
+        blocks = self.get_blocks()
+        block = next((b for b in blocks if b['id'] == block_id), None)
+        if not block:
+            return None
+
+        block_start = block['start_date']
+        block_end = block['end_date']
+        weeks = self.get_weeks_for_block(block_id)
+
+        current_week = next(
+            (w for w in weeks if w['start'] == week_start and w['end'] == week_end),
+            None,
+        )
+        current_week_num = current_week['week_num'] if current_week else 0
+
+        all_runs_raw = self.get_activities_in_range(block_start, block_end)
+        all_runs = [r for r in all_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+
+        cycle_miles = 0
+        cycle_time_sec = 0
+        cycle_elevation_m = 0
+        cycle_calories = 0
+        cycle_hrs = []
+        cat_totals = defaultdict(lambda: {'dist_m': 0, 'time_s': 0, 'hr_weighted': 0, 'pace_weighted': 0, 'elev_m': 0})
+        longest_run_mi = 0
+
+        for r in all_runs:
+            dist_m = r.get('distance', 0)
+            dur_s = r.get('movingDuration', 0) or r.get('duration', 0)
+            hr = r.get('averageHR', 0) or 0
+            elev = r.get('elevationGain', 0) or 0
+            cal = r.get('calories', 0) or 0
+
+            mi = dist_m / 1609.34
+            cycle_miles += mi
+            cycle_time_sec += dur_s
+            cycle_elevation_m += elev
+            cycle_calories += cal
+            if hr > 0:
+                cycle_hrs.append(hr)
+            if mi > longest_run_mi:
+                longest_run_mi = mi
+
+            meta = r.get('manual_meta', {})
+            cs = meta.get('category_stats')
+            if cs:
+                for cat in cs:
+                    c = cat['category']
+                    cat_totals[c]['dist_m'] += cat['distance_mi'] * 1609.34
+                    cat_totals[c]['hr_weighted'] += cat.get('avg_hr', 0) * cat['distance_mi']
+                    pace_str = cat.get('pace', '')
+                    if pace_str and ':' in pace_str:
+                        parts = pace_str.split(':')
+                        pace_dec = int(parts[0]) + int(parts[1]) / 60
+                        cat_totals[c]['pace_weighted'] += pace_dec * cat['distance_mi']
+
+                lap_cats = meta.get('lap_categories', [])
+                if lap_cats:
+                    laps = self.get_run_laps(r['activityId'])
+                    for i, lap in enumerate(laps):
+                        if i < len(lap_cats):
+                            c = lap_cats[i]
+                            cat_totals[c]['elev_m'] += lap.get('elevationGain', 0) or 0
+
+        cycle_avg_hr = sum(cycle_hrs) / len(cycle_hrs) if cycle_hrs else 0
+        cycle_pace_dec = (cycle_time_sec / (cycle_miles * 60)) if cycle_miles > 0 else 0
+        cycle_pace_str = f"{int(cycle_pace_dec)}:{int((cycle_pace_dec % 1) * 60):02d}" if cycle_miles > 0 else "N/A"
+
+        cat_rows = []
+        for cat, v in sorted(cat_totals.items(), key=lambda x: -x[1]['dist_m']):
+            cat_mi = v['dist_m'] / 1609.34
+            cat_hr = int(v['hr_weighted'] / cat_mi) if cat_mi > 0 else 0
+            pct = (cat_mi / cycle_miles * 100) if cycle_miles > 0 else 0
+            if cat_mi > 0 and v['pace_weighted'] > 0:
+                avg_pace_dec = v['pace_weighted'] / cat_mi
+                pace_str = f"{int(avg_pace_dec)}:{int((avg_pace_dec % 1) * 60):02d}"
+            else:
+                pace_str = "—"
+            elev_ft = int(v['elev_m'] * 3.281)
+            cat_rows.append({
+                "effort": cat,
+                "miles": round(cat_mi, 1),
+                "pct_of_total": round(pct, 0),
+                "avg_pace": pace_str,
+                "avg_hr": cat_hr if cat_hr > 0 else None,
+                "elevation_ft": elev_ft if elev_ft > 0 else None,
+            })
+
+        weekly_miles = []
+        for w in weeks:
+            w_runs_raw = self.get_activities_in_range(w['start'], w['end'])
+            w_runs = [r for r in w_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+            wm = sum(r.get('distance', 0) for r in w_runs) / 1609.34
+            weekly_miles.append({"week_num": w['week_num'], "label": f"W{w['week_num']}", "miles": round(wm, 1)})
+
+        wk_runs_raw = self.get_activities_in_range(week_start, week_end)
+        wk_runs = [r for r in wk_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+        wk_miles = sum(r.get('distance', 0) for r in wk_runs) / 1609.34
+        wk_time_sec = sum(r.get('movingDuration', 0) or r.get('duration', 0) for r in wk_runs)
+        wk_hrs = [r.get('averageHR', 0) for r in wk_runs if r.get('averageHR')]
+        wk_elev = sum(r.get('elevationGain', 0) or 0 for r in wk_runs)
+        wk_avg_hr = sum(wk_hrs) / len(wk_hrs) if wk_hrs else 0
+        wk_pace_dec = (wk_time_sec / (wk_miles * 60)) if wk_miles > 0 else 0
+        wk_pace_str = f"{int(wk_pace_dec)}:{int((wk_pace_dec % 1) * 60):02d}" if wk_miles > 0 else "N/A"
+
+        elapsed_weeks = max(1, current_week_num)
+        avg_weekly_miles = cycle_miles / elapsed_weeks if elapsed_weeks > 0 else 0
+
+        return {
+            'block_id': block_id,
+            'block_name': block.get('name'),
+            'cycle': {
+                'total_runs': len(all_runs),
+                'total_miles': round(cycle_miles, 1),
+                'total_hours': round(cycle_time_sec / 3600, 1),
+                'avg_pace': cycle_pace_str,
+                'avg_hr': int(cycle_avg_hr),
+                'elevation_ft': int(cycle_elevation_m * 3.281),
+                'calories': int(cycle_calories),
+                'longest_run': round(longest_run_mi, 1),
+                'avg_weekly_miles': round(avg_weekly_miles, 1),
+                'category_breakdown': cat_rows,
+            },
+            'week': {
+                'week_num': current_week_num,
+                'runs': len(wk_runs),
+                'miles': round(wk_miles, 1),
+                'hours': round(wk_time_sec / 3600, 1),
+                'avg_pace': wk_pace_str,
+                'avg_hr': int(wk_avg_hr),
+                'elevation_ft': int(wk_elev * 3.281),
+                'vs_avg': round(wk_miles - avg_weekly_miles, 1),
+            },
+            'weekly_miles': weekly_miles,
+        }
 
     def calculate_category_stats(self, labeled_laps):
         groups = {}

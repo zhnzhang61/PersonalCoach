@@ -2,15 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Heart, Settings } from "lucide-react";
+import { Activity, BarChart3, Heart, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const items = [
   { href: "/", label: "Health", icon: Heart, match: (p: string) => p === "/" },
   {
+    href: "/activity",
+    label: "Activity",
+    icon: Activity,
+    match: (p: string) => p.startsWith("/activity"),
+  },
+  {
     href: "/training",
     label: "Training",
-    icon: Activity,
+    icon: BarChart3,
     match: (p: string) => p.startsWith("/training"),
   },
   {

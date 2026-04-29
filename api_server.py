@@ -124,6 +124,14 @@ class HealthAnalysisInput(BaseModel):
     thread_id: str = "unified_copilot_thread"
 
 
+class ManualActivityCreate(BaseModel):
+    date: str
+    type: Literal["run", "swim", "gym", "other"]
+    description: str = ""
+    duration_min: float | None = None
+    distance_mi: float | None = None
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse("webapp/index.html")
@@ -259,6 +267,17 @@ def sync_health_ledger(days_back: int = 120) -> dict[str, Any]:
     return {"ok": True, "rows": len(rows)}
 
 
+@app.get("/api/training/blocks")
+def training_blocks() -> dict[str, Any]:
+    blocks = processor.get_blocks()
+    today_iso = datetime.date.today().isoformat()
+    active_id = next(
+        (b["id"] for b in blocks if b["start_date"] <= today_iso <= b["end_date"]),
+        blocks[0]["id"] if blocks else None,
+    )
+    return {"blocks": blocks, "active_block_id": active_id}
+
+
 @app.get("/api/training/weeks")
 def training_weeks(block_id: str | None = None) -> dict[str, Any]:
     blocks = processor.get_blocks()
@@ -267,6 +286,38 @@ def training_weeks(block_id: str | None = None) -> dict[str, Any]:
     selected = block_id or blocks[0]["id"]
     weeks = processor.get_weeks_for_block(selected)
     return {"block_id": selected, "weeks": weeks}
+
+
+@app.get("/api/training/cycle-stats")
+def training_cycle_stats(
+    block_id: str = Query(...),
+    week_start: str = Query(...),
+    week_end: str = Query(...),
+) -> dict[str, Any]:
+    stats = processor.compute_cycle_and_week_stats(block_id, week_start, week_end)
+    if stats is None:
+        raise HTTPException(404, f"Block {block_id} not found")
+    return stats
+
+
+@app.get("/api/manual-activities")
+def list_manual_activities(
+    start: str = Query(...),
+    end: str = Query(...),
+) -> dict[str, Any]:
+    return {"start": start, "end": end, "activities": processor.get_manual_activities_in_range(start, end)}
+
+
+@app.post("/api/manual-activities")
+def create_manual_activity(body: ManualActivityCreate) -> dict[str, Any]:
+    entry = processor.add_manual_activity(
+        date_str=body.date,
+        activity_type=body.type,
+        description=body.description,
+        duration_min=body.duration_min,
+        distance_mi=body.distance_mi,
+    )
+    return {"ok": True, "activity": entry}
 
 
 @app.get("/api/runs")

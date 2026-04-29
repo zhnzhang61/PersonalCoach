@@ -87,6 +87,138 @@ export interface RefreshTokenResult {
   stderr?: string;
 }
 
+// ==========================================
+// Training blocks / weeks / cycle stats
+// ==========================================
+export interface TrainingBlock {
+  id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  primary_event?: string;
+}
+
+export interface BlocksResponse {
+  blocks: TrainingBlock[];
+  active_block_id: string | null;
+}
+
+export interface TrainingWeek {
+  week_num: number;
+  start: string;
+  end: string;
+  label: string;
+}
+
+export interface WeeksResponse {
+  block_id: string;
+  weeks: TrainingWeek[];
+}
+
+export interface CategoryBreakdownRow {
+  effort: string;
+  miles: number;
+  pct_of_total: number;
+  avg_pace: string;
+  avg_hr: number | null;
+  elevation_ft: number | null;
+}
+
+export interface WeeklyMileBar {
+  week_num: number;
+  label: string;
+  miles: number;
+}
+
+export interface CycleSummary {
+  total_runs: number;
+  total_miles: number;
+  total_hours: number;
+  avg_pace: string;
+  avg_hr: number;
+  elevation_ft: number;
+  calories: number;
+  longest_run: number;
+  avg_weekly_miles: number;
+  category_breakdown: CategoryBreakdownRow[];
+}
+
+export interface WeekSummary {
+  week_num: number;
+  runs: number;
+  miles: number;
+  hours: number;
+  avg_pace: string;
+  avg_hr: number;
+  elevation_ft: number;
+  vs_avg: number;
+}
+
+export interface CycleStatsResponse {
+  block_id: string;
+  block_name: string;
+  cycle: CycleSummary;
+  week: WeekSummary;
+  weekly_miles: WeeklyMileBar[];
+}
+
+// ==========================================
+// Run activities (Garmin). Extra Garmin keys may be present and are ignored.
+// ==========================================
+export interface RunCategoryStat {
+  category: string;
+  distance_mi: number;
+  pace: string;
+  avg_hr: number;
+}
+
+export interface RunManualMeta {
+  name?: string;
+  notes?: string;
+  week_num?: number;
+  category_stats?: RunCategoryStat[];
+  lap_categories?: string[];
+}
+
+export interface RunActivity {
+  activityId: number;
+  activityName?: string;
+  activityType?: { typeKey?: string };
+  startTimeLocal?: string;
+  distance?: number;
+  movingDuration?: number;
+  duration?: number;
+  averageHR?: number;
+  elevationGain?: number;
+  manual_meta?: RunManualMeta;
+}
+
+export interface RunsResponse {
+  start: string;
+  end: string;
+  runs: RunActivity[];
+}
+
+// ==========================================
+// Manual activities (non-Garmin: swim/gym/free-form runs)
+// ==========================================
+export type ManualActivityType = "run" | "swim" | "gym" | "other";
+
+export interface ManualActivity {
+  id: string;
+  date: string;
+  type: ManualActivityType | string;
+  desc: string;
+  duration_min?: number;
+  distance_mi?: number;
+}
+
+export interface ManualActivitiesResponse {
+  start: string;
+  end: string;
+  activities: ManualActivity[];
+}
+
 export interface SleepDetail {
   date: string;
   deep_min: number;
