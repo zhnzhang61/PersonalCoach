@@ -434,11 +434,11 @@ def _render_training_log_body():
                 a_type = st.text_input("Type")
                 a_desc = st.text_area("Description")
                 if st.form_submit_button("Save"):
-                    processor.add_aux_activity(a_date.isoformat(), a_type, a_desc)
+                    processor.add_manual_activity(a_date.isoformat(), a_type, a_desc)
                     st.rerun()
         
         st.divider()
-        auxs = processor.get_aux_in_range(current_week['start'], current_week['end'])
+        auxs = processor.get_manual_activities_in_range(current_week['start'], current_week['end'])
         for a in auxs:
             st.info(f"**{a['date']}** | {a['type']}\n\n{a['desc']}")
 
