@@ -411,6 +411,17 @@ def run_telemetry(activity_id: int, downsample_sec: int = 10) -> dict[str, Any]:
     }
 
 
+@app.get("/api/runs/{activity_id}/weather")
+def run_weather(activity_id: int) -> dict[str, Any]:
+    w = processor.get_run_weather(activity_id)
+    if w is None:
+        raise HTTPException(
+            404,
+            "Weather unavailable (run has no GPS, missing details, or fetch failed)",
+        )
+    return w
+
+
 @app.get("/api/runs/{activity_id}/laps")
 def get_laps(activity_id: int) -> dict[str, Any]:
     laps = processor.get_run_laps(activity_id)

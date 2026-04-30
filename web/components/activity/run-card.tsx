@@ -1,12 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { Pencil } from "lucide-react";
+import { ChevronDown, ChevronUp, LineChart, Pencil } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 import { fmtDate } from "@/lib/format";
 import type { RunActivity } from "@/lib/types";
 import { EditRunForm } from "@/components/activity/edit-run-form";
+import { TelemetryCharts } from "@/components/activity/telemetry-charts";
+import { WeatherStrip } from "@/components/activity/weather-strip";
 
 function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
@@ -30,6 +33,7 @@ export function RunCard({ run }: { run: RunActivity }) {
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
   const [editing, setEditing] = useState(false);
+  const [chartsOpen, setChartsOpen] = useState(false);
 
   if (editing) {
     return <EditRunForm run={run} onClose={() => setEditing(false)} />;
@@ -86,6 +90,29 @@ export function RunCard({ run }: { run: RunActivity }) {
             ↑ {elevFt.toLocaleString()} ft
           </p>
         ) : null}
+
+        <button
+          type="button"
+          onClick={() => setChartsOpen((v) => !v)}
+          className="-mb-1 flex items-center justify-center gap-1.5 rounded-md border border-border bg-background py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          aria-expanded={chartsOpen}
+        >
+          <LineChart className="size-3.5" />
+          {chartsOpen ? "Hide details" : "View charts & weather"}
+          {chartsOpen ? (
+            <ChevronUp className="size-3.5" />
+          ) : (
+            <ChevronDown className="size-3.5" />
+          )}
+        </button>
+
+        {chartsOpen && (
+          <div className="space-y-3">
+            <Separator />
+            <WeatherStrip activityId={run.activityId} />
+            <TelemetryCharts activityId={run.activityId} />
+          </div>
+        )}
       </CardContent>
     </Card>
   );

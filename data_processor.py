@@ -170,6 +170,7 @@ class DataProcessor:
             'blocks': os.path.join(data_dir, 'blocks', 'training_blocks.json'),
             'aux': os.path.join(data_dir, 'blocks', 'auxiliary_log.json'),
             'ledger': os.path.join(data_dir, 'derived', 'daily_health_metrics.csv'),
+            'weather': os.path.join(data_dir, 'weather'),
             
             # 3. AI Memory Paths (NEW)
             'semantic_memory': os.path.join(data_dir, 'memory', 'user_profile.json'),
@@ -892,15 +893,27 @@ class DataProcessor:
                 prev_dist, prev_time = sum_dist, sum_time
                 
             cadence = get_val(metrics, 'directRunCadence') or get_val(metrics, 'directDoubleCadence')
-            if cadence and get_val(metrics, 'directRunCadence') is None: cadence /= 2 
+            if cadence and get_val(metrics, 'directRunCadence') is None: cadence /= 2
             if cadence and cadence < 120: cadence *= 2
-                
+
             elevation = get_val(metrics, 'directElevation')
+            stride_cm = get_val(metrics, 'directStrideLength')
+            respiration = get_val(metrics, 'directRespirationRate')
+            vert_osc = get_val(metrics, 'directVerticalOscillation')
+            gct = get_val(metrics, 'directGroundContactTime')
+            power = get_val(metrics, 'directPower')
+            air_temp = get_val(metrics, 'directAirTemperature')
 
             parsed_data.append({
-                "Lap": get_lap(current_sec), "Second": current_sec, 
-                "HeartRate": hr, "Speed_mps": speed_mps, 
-                "Cadence": cadence, "Elevation": elevation
+                "Lap": get_lap(current_sec), "Second": current_sec,
+                "HeartRate": hr, "Speed_mps": speed_mps,
+                "Cadence": cadence, "Elevation": elevation,
+                "StrideLength": stride_cm,
+                "RespirationRate": respiration,
+                "VerticalOscillation": vert_osc,
+                "GroundContactTime": gct,
+                "Power": power,
+                "AirTemperature": air_temp,
             })
 
         df_raw = pd.DataFrame(parsed_data).ffill()
@@ -927,6 +940,129 @@ class DataProcessor:
 
     def get_run_chat_history(self, activity_id):
         return self.load_json_safe(self.paths['manual'], f"run_{activity_id}_chat.json") or []
+
+    def get_run_weather(self, activity_id) -> dict | None:
+        """
+        Look up temperature + humidity at the run's start, via Open-Meteo's
+        free historical archive (no API key, attribution-friendly).
+
+        Hits the network once per run, then caches at data/weather/{id}.json
+        — weather doesn't change after the run, so the cache is permanent.
+        Returns None if the run has no GPS (treadmill / indoor) or no
+        details file, so callers can degrade gracefully.
+
+        We rely on Garmin's startTimeLocal + the polyline's startPoint
+        lat/lon. Open-Meteo gets `timezone=auto` so the hourly array is
+        already in the run's local time; we just match the run's local
+        hour string to the array.
+        """
+        import urllib.parse
+        import urllib.request
+
+        cache_path = os.path.join(self.paths['weather'], f"{activity_id}.json")
+        os.makedirs(self.paths['weather'], exist_ok=True)
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+
+        # Activity summary → startTimeLocal ("YYYY-MM-DD HH:MM:SS")
+        summary_path = os.path.join(self.paths['activities'], f"{activity_id}_summary.json")
+        if not os.path.exists(summary_path):
+            return None
+        try:
+            with open(summary_path) as f:
+                summary = json.load(f)
+            if isinstance(summary, list):
+                summary = summary[0] if summary else {}
+        except Exception:
+            return None
+        local_str = summary.get('startTimeLocal') or ''
+        if not local_str:
+            return None
+
+        # Details → geoPolylineDTO.startPoint.{lat,lon}
+        details_path = os.path.join(self.paths['details'], f"{activity_id}.json")
+        if not os.path.exists(details_path):
+            return None
+        try:
+            with open(details_path) as f:
+                details = json.load(f)
+        except Exception:
+            return None
+        start_pt = (details.get('geoPolylineDTO') or {}).get('startPoint') or {}
+        lat = start_pt.get('lat')
+        lon = start_pt.get('lon')
+        if lat is None or lon is None:
+            return None
+
+        # "2026-04-28 18:28:16" → date "2026-04-28", target hour "2026-04-28T18:00"
+        try:
+            local_dt = datetime.datetime.strptime(local_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+        date_iso = local_dt.date().isoformat()
+        target_hour = local_dt.replace(minute=0, second=0).strftime("%Y-%m-%dT%H:%M")
+
+        params = urllib.parse.urlencode({
+            'latitude': f"{lat:.4f}",
+            'longitude': f"{lon:.4f}",
+            'start_date': date_iso,
+            'end_date': date_iso,
+            'hourly': 'temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature',
+            'timezone': 'auto',
+            'temperature_unit': 'celsius',
+        })
+        url = f"https://archive-api.open-meteo.com/v1/archive?{params}"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                payload = json.loads(resp.read())
+        except Exception as e:
+            print(f"⚠️ Open-Meteo fetch failed for {activity_id}: {e}")
+            return None
+
+        hourly = payload.get('hourly') or {}
+        times = hourly.get('time') or []
+        if not times:
+            return None
+
+        idx = times.index(target_hour) if target_hour in times else 0
+
+        def at(key):
+            arr = hourly.get(key) or []
+            return arr[idx] if idx < len(arr) else None
+
+        temp_c = at('temperature_2m')
+        apparent_c = at('apparent_temperature')
+
+        def c_to_f(c):
+            return round(c * 9 / 5 + 32, 1) if c is not None else None
+
+        weather = {
+            'activity_id': activity_id,
+            'lat': lat,
+            'lon': lon,
+            'hour_local': target_hour,
+            'temperature_c': temp_c,
+            'temperature_f': c_to_f(temp_c),
+            'apparent_temperature_c': apparent_c,
+            'apparent_temperature_f': c_to_f(apparent_c),
+            'humidity_pct': at('relative_humidity_2m'),
+            'dew_point_c': at('dew_point_2m'),
+            'dew_point_f': c_to_f(at('dew_point_2m')),
+            'source': 'open-meteo',
+            'fetched_at': datetime.datetime.now().isoformat(),
+        }
+
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(weather, f, indent=2)
+        except Exception:
+            pass
+
+        return weather
 
     def save_run_chat_message(self, activity_id, role, content):
         path = os.path.join(self.paths['manual'], f"run_{activity_id}_chat.json")
