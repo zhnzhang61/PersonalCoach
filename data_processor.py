@@ -480,13 +480,22 @@ class DataProcessor:
         """
         Patch an existing block. Silently drops the deprecated
         baseline_snapshot field on write. Returns False if the id is unknown.
+
+        When the patch touches start_date or end_date, the merged result
+        (patch overlaid on the stored block) is validated — otherwise a
+        request that only updates end_date could persist a date earlier
+        than the stored start_date and break week generation downstream.
+        Pure renames / event changes skip date validation so a block with
+        already-corrupt dates can still be relabeled.
         """
         blocks = self.get_blocks()
         for b in blocks:
             if b.get('id') != block_id:
                 continue
-            if 'end_date' in fields and 'start_date' in fields:
-                if fields['end_date'] < fields['start_date']:
+            if 'start_date' in fields or 'end_date' in fields:
+                merged_start = fields.get('start_date', b.get('start_date'))
+                merged_end = fields.get('end_date', b.get('end_date'))
+                if merged_start and merged_end and merged_end < merged_start:
                     raise ValueError("end_date must be on or after start_date")
             for k, v in fields.items():
                 if k == 'id':
