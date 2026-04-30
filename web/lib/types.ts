@@ -199,6 +199,41 @@ export interface RunsResponse {
   runs: RunActivity[];
 }
 
+// Effort categories — must match data_processor.calculate_category_stats /
+// dashboard's lap-categorize dropdown. Keep in lockstep.
+export const EFFORT_CATEGORIES = [
+  "Hold Back Easy",
+  "Steady Effort",
+  "Increasing Effort",
+  "Marathon",
+  "LT Effort",
+  "VO2Max",
+  "Sprint",
+  "Rest",
+] as const;
+export type EffortCategory = (typeof EFFORT_CATEGORIES)[number];
+
+export interface Lap {
+  distance: number; // meters
+  duration: number; // seconds
+  averageHR?: number;
+  elevationGain?: number; // meters
+  category: string; // EffortCategory or legacy free-form
+}
+
+export interface LapsResponse {
+  activity_id: number;
+  laps: Lap[];
+  meta: RunManualMeta;
+}
+
+export interface LapsUpdateBody {
+  week_num: number;
+  run_name: string;
+  categories: string[];
+  notes: string;
+}
+
 // ==========================================
 // Manual activities (non-Garmin: swim/gym/free-form runs)
 // ==========================================

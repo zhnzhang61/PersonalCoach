@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
+import { Pencil } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { fmtDate } from "@/lib/format";
 import type { RunActivity } from "@/lib/types";
+import { EditRunForm } from "@/components/activity/edit-run-form";
 
 function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
@@ -26,6 +29,11 @@ export function RunCard({ run }: { run: RunActivity }) {
   const pace = secToPace(durSec, distMi);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
+  const [editing, setEditing] = useState(false);
+
+  if (editing) {
+    return <EditRunForm run={run} onClose={() => setEditing(false)} />;
+  }
 
   return (
     <Card>
@@ -38,11 +46,21 @@ export function RunCard({ run }: { run: RunActivity }) {
               {distMi.toFixed(2)} mi · {pace} /mi
             </p>
           </div>
-          {run.averageHR ? (
-            <Badge variant="outline" className="shrink-0 text-[10px]">
-              {run.averageHR} bpm
-            </Badge>
-          ) : null}
+          <div className="flex shrink-0 items-center gap-2">
+            {run.averageHR ? (
+              <Badge variant="outline" className="text-[10px]">
+                {run.averageHR} bpm
+              </Badge>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="rounded-md border border-border bg-background p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+              aria-label="Edit run"
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          </div>
         </div>
 
         {breakdown.length > 0 ? (
