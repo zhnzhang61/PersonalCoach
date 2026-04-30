@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Brush, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import {
   ChartContainer,
   ChartTooltip,
@@ -83,7 +83,7 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
 
   if (spec.area) {
     return (
-      <ChartContainer config={config} className="h-44 w-full">
+      <ChartContainer config={config} className="h-56 w-full">
         <AreaChart data={cleaned}>
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
           <XAxis
@@ -114,13 +114,20 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
             strokeWidth={1.5}
             isAnimationActive={false}
           />
+          <Brush
+            dataKey="Second"
+            height={20}
+            stroke="var(--muted-foreground)"
+            travellerWidth={8}
+            tickFormatter={xTickFormatter}
+          />
         </AreaChart>
       </ChartContainer>
     );
   }
 
   return (
-    <ChartContainer config={config} className="h-44 w-full">
+    <ChartContainer config={config} className="h-56 w-full">
       <LineChart data={cleaned}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis
@@ -151,6 +158,13 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
           dot={false}
           isAnimationActive={false}
           connectNulls
+        />
+        <Brush
+          dataKey="Second"
+          height={20}
+          stroke="var(--muted-foreground)"
+          travellerWidth={8}
+          tickFormatter={xTickFormatter}
         />
       </LineChart>
     </ChartContainer>
