@@ -73,9 +73,11 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
     );
   }
 
-  const xTickFormatter = (v: number) => {
-    const m = Math.floor(v / 60);
-    const s = v % 60;
+  const xTickFormatter = (v: number | string | undefined) => {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n)) return "";
+    const m = Math.floor(n / 60);
+    const s = Math.round(n % 60);
     return s === 0 ? `${m}m` : `${m}:${String(s).padStart(2, "0")}`;
   };
 
@@ -102,7 +104,7 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
             domain={["auto", "auto"]}
             tickFormatter={(v) => Math.round(v).toString()}
           />
-          <ChartTooltip content={<ChartTooltipContent labelFormatter={(v) => xTickFormatter(Number(v))} />} />
+          <ChartTooltip content={<ChartTooltipContent labelFormatter={(_v, payload) => xTickFormatter(payload?.[0]?.payload?.Second)} />} />
           <Area
             type="monotone"
             dataKey={spec.key}
@@ -140,7 +142,7 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
           reversed={!!spec.invertY}
           tickFormatter={(v) => Math.round(v).toString()}
         />
-        <ChartTooltip content={<ChartTooltipContent labelFormatter={(v) => xTickFormatter(Number(v))} />} />
+        <ChartTooltip content={<ChartTooltipContent labelFormatter={(_v, payload) => xTickFormatter(payload?.[0]?.payload?.Second)} />} />
         <Line
           type="monotone"
           dataKey={spec.key}
