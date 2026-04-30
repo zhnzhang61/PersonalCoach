@@ -73,12 +73,22 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
     );
   }
 
+  // Stable, locale-free time format. Always colon-delimited so labels can't
+  // be confused with distance ("75m" used to read as 75 metres).
+  //   < 1h:  MM:SS   (e.g. "25:00", "99:10")
+  //   ≥ 1h:  H:MM    (e.g. "1:15"; appends ":SS" only when seconds non-zero)
   const xTickFormatter = (v: number | string | undefined) => {
     const n = typeof v === "number" ? v : Number(v);
     if (!Number.isFinite(n)) return "";
-    const m = Math.floor(n / 60);
-    const s = Math.round(n % 60);
-    return s === 0 ? `${m}m` : `${m}:${String(s).padStart(2, "0")}`;
+    const total = Math.round(n);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) {
+      const base = `${h}:${String(m).padStart(2, "0")}`;
+      return s === 0 ? base : `${base}:${String(s).padStart(2, "0")}`;
+    }
+    return `${m}:${String(s).padStart(2, "0")}`;
   };
 
   if (spec.area) {
