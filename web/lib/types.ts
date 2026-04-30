@@ -103,6 +103,30 @@ export interface BlocksResponse {
   active_block_id: string | null;
 }
 
+// Primary event options — kept in lockstep with dashboard's setup form.
+export const BLOCK_PRIMARY_EVENTS = [
+  "running",
+  "cycling",
+  "triathlon",
+  "strength",
+  "other",
+] as const;
+export type BlockPrimaryEvent = (typeof BLOCK_PRIMARY_EVENTS)[number];
+
+export interface BlockCreateBody {
+  name: string;
+  start_date: string;
+  end_date: string;
+  primary_event: BlockPrimaryEvent;
+}
+
+export interface BlockUpdateBody {
+  name?: string;
+  start_date?: string;
+  end_date?: string;
+  primary_event?: BlockPrimaryEvent;
+}
+
 export interface TrainingWeek {
   week_num: number;
   start: string;
