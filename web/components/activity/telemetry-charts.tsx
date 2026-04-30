@@ -23,17 +23,67 @@ interface MetricSpec {
   invertY?: boolean;       // pace: lower = faster, so invert
   area?: boolean;          // elevation rendered as area for terrain feel
   clip?: [number, number]; // pace clipping to drop walks/standing
+  formatAvg: (avg: number) => string;
+  formatRange?: (min: number, max: number) => string;
 }
+
+const fmtPace = (decMinPerMi: number): string => {
+  if (!Number.isFinite(decMinPerMi) || decMinPerMi <= 0) return "—";
+  return `${Math.floor(decMinPerMi)}:${Math.round((decMinPerMi % 1) * 60)
+    .toString()
+    .padStart(2, "0")}`;
+};
 
 // Six tabs the user asked for. Pace gets clipped to a sensible run range so a
 // few seconds of standing around at a stoplight don't blow up the y-axis.
 const METRICS: MetricSpec[] = [
-  { key: "HeartRate", label: "HR", unit: "bpm", color: "var(--chart-1)" },
-  { key: "Pace", label: "Pace", unit: "min/mi", color: "var(--chart-2)", invertY: true, clip: [4, 14] },
-  { key: "StrideLength", label: "Stride", unit: "cm", color: "var(--chart-3)" },
-  { key: "Cadence", label: "Cadence", unit: "spm", color: "var(--chart-4)" },
-  { key: "RespirationRate", label: "Resp", unit: "br/min", color: "var(--chart-5)" },
-  { key: "Elevation", label: "Elev", unit: "m", color: "var(--chart-1)", area: true },
+  {
+    key: "HeartRate",
+    label: "HR",
+    unit: "bpm",
+    color: "var(--chart-1)",
+    formatAvg: (a) => `${Math.round(a)} bpm`,
+    formatRange: (mn, mx) => `${Math.round(mn)}–${Math.round(mx)}`,
+  },
+  {
+    key: "Pace",
+    label: "Pace",
+    unit: "min/mi",
+    color: "var(--chart-2)",
+    invertY: true,
+    clip: [4, 14],
+    formatAvg: (a) => `${fmtPace(a)} /mi`,
+  },
+  {
+    key: "StrideLength",
+    label: "Stride",
+    unit: "cm",
+    color: "var(--chart-3)",
+    formatAvg: (a) => `${Math.round(a)} cm`,
+  },
+  {
+    key: "Cadence",
+    label: "Cadence",
+    unit: "spm",
+    color: "var(--chart-4)",
+    formatAvg: (a) => `${Math.round(a)} spm`,
+  },
+  {
+    key: "RespirationRate",
+    label: "Resp",
+    unit: "br/min",
+    color: "var(--chart-5)",
+    formatAvg: (a) => `${Math.round(a)} br/min`,
+  },
+  {
+    key: "Elevation",
+    label: "Elev",
+    unit: "m",
+    color: "var(--chart-1)",
+    area: true,
+    formatAvg: (a) => `${Math.round(a)} m`,
+    formatRange: (mn, mx) => `gain ${Math.round(mx - mn)} m`,
+  },
 ];
 
 function downsampleEvery(rows: TelemetryRow[], step: number): TelemetryRow[] {
@@ -209,6 +259,33 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   const rows = downsampleEvery(data.raw ?? [], 2);
   const spec = METRICS.find((m) => m.key === active) ?? METRICS[0];
 
+  // Tab-aware caption: avg (and range when meaningful) computed from the
+  // same data the chart is plotting, so a brushed sub-window's stats stay
+  // honest with what's on screen. Pace clip is applied so a stoplight
+  // stop doesn't drag the average up.
+  const summaryFor = (key: MetricKey): { avg: number; min: number; max: number } | null => {
+    const range = METRICS.find((m) => m.key === key)?.clip;
+    const vals: number[] = [];
+    for (const r of rows) {
+      const v = r[key];
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      if (range && (v < range[0] || v > range[1])) continue;
+      vals.push(v);
+    }
+    if (vals.length === 0) return null;
+    return {
+      avg: vals.reduce((a, b) => a + b, 0) / vals.length,
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+    };
+  };
+  const summary = summaryFor(active);
+  const subtitle = summary
+    ? spec.formatRange
+      ? `avg ${spec.formatAvg(summary.avg)} · ${spec.formatRange(summary.min, summary.max)}`
+      : `avg ${spec.formatAvg(summary.avg)}`
+    : null;
+
   return (
     <div className="space-y-2">
       <div className="-mx-1 flex gap-1 overflow-x-auto pb-1">
@@ -231,6 +308,9 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
           );
         })}
       </div>
+      {subtitle && (
+        <p className="text-xs text-muted-foreground tabular-nums">{subtitle}</p>
+      )}
       <ChartPane rows={rows} spec={spec} />
     </div>
   );

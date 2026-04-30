@@ -15,44 +15,28 @@ function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
 }
 
-function secToPace(seconds: number, miles: number): string {
-  if (seconds <= 0 || miles <= 0) return "—";
-  const dec = seconds / 60 / miles;
-  const min = Math.floor(dec);
-  const sec = Math.floor((dec - min) * 60);
-  return `${min}:${sec.toString().padStart(2, "0")}`;
-}
-
 export function RunCard({ run }: { run: RunActivity }) {
   const meta = run.manual_meta ?? {};
   const name = meta.name || run.activityName || "Run";
   const dateStr = run.startTimeLocal?.slice(0, 10);
   const distMi = metersToMi(run.distance);
-  const durSec = run.movingDuration || run.duration || 0;
-  const pace = secToPace(durSec, distMi);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
   // Charts + weather are basic info — always shown. Notes / lap-effort
   // editing lives one click away under "Efforts & Coaching" so the card
-  // doesn't feel like a form on first glance.
+  // doesn't feel like a form on first glance. Avg metrics live as a
+  // tab-aware subtitle inside TelemetryCharts, not in this header.
   const [editorOpen, setEditorOpen] = useState(false);
 
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold">{name}</h3>
-            <p className="text-sm text-muted-foreground">
-              {dateStr ? fmtDate(dateStr, "EEE MMM d") : "—"} ·{" "}
-              {distMi.toFixed(2)} mi · {pace} /mi
-            </p>
-          </div>
-          {run.averageHR ? (
-            <Badge variant="outline" className="shrink-0 text-xs">
-              {run.averageHR} bpm
-            </Badge>
-          ) : null}
+        <div className="min-w-0">
+          <h3 className="truncate text-base font-semibold">{name}</h3>
+          <p className="text-sm text-muted-foreground">
+            {dateStr ? fmtDate(dateStr, "EEE MMM d") : "—"} ·{" "}
+            {distMi.toFixed(2)} mi
+          </p>
         </div>
 
         {breakdown.length > 0 ? (
@@ -67,10 +51,6 @@ export function RunCard({ run }: { run: RunActivity }) {
               </Badge>
             ))}
           </div>
-        ) : null}
-
-        {meta.notes ? (
-          <p className="text-sm text-muted-foreground">{meta.notes}</p>
         ) : null}
 
         {elevFt > 0 ? (
