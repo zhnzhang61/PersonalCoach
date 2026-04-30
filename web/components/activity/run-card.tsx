@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, LineChart, Pencil } from "lucide-react";
+import { ChevronDown, ChevronUp, ClipboardEdit } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -32,39 +32,27 @@ export function RunCard({ run }: { run: RunActivity }) {
   const pace = secToPace(durSec, distMi);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
-  const [editing, setEditing] = useState(false);
-  const [chartsOpen, setChartsOpen] = useState(false);
-
-  if (editing) {
-    return <EditRunForm run={run} onClose={() => setEditing(false)} />;
-  }
+  // Charts + weather are basic info — always shown. Notes / lap-effort
+  // editing lives one click away under "Efforts & Coaching" so the card
+  // doesn't feel like a form on first glance.
+  const [editorOpen, setEditorOpen] = useState(false);
 
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold">{name}</h3>
-            <p className="text-xs text-muted-foreground">
+            <h3 className="truncate text-base font-semibold">{name}</h3>
+            <p className="text-sm text-muted-foreground">
               {dateStr ? fmtDate(dateStr, "EEE MMM d") : "—"} ·{" "}
               {distMi.toFixed(2)} mi · {pace} /mi
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {run.averageHR ? (
-              <Badge variant="outline" className="text-[10px]">
-                {run.averageHR} bpm
-              </Badge>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="rounded-md border border-border bg-background p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-              aria-label="Edit run"
-            >
-              <Pencil className="size-3.5" />
-            </button>
-          </div>
+          {run.averageHR ? (
+            <Badge variant="outline" className="shrink-0 text-xs">
+              {run.averageHR} bpm
+            </Badge>
+          ) : null}
         </div>
 
         {breakdown.length > 0 ? (
@@ -73,7 +61,7 @@ export function RunCard({ run }: { run: RunActivity }) {
               <Badge
                 key={c.category}
                 variant="outline"
-                className="text-[10px] font-normal"
+                className="text-xs font-normal"
               >
                 {c.category} · {c.distance_mi.toFixed(1)}mi · {c.pace}
               </Badge>
@@ -82,36 +70,37 @@ export function RunCard({ run }: { run: RunActivity }) {
         ) : null}
 
         {meta.notes ? (
-          <p className="text-xs text-muted-foreground">{meta.notes}</p>
+          <p className="text-sm text-muted-foreground">{meta.notes}</p>
         ) : null}
 
         {elevFt > 0 ? (
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          <p className="text-xs uppercase tracking-wide text-muted-foreground">
             ↑ {elevFt.toLocaleString()} ft
           </p>
         ) : null}
 
+        <Separator />
+        <WeatherStrip activityId={run.activityId} />
+        <TelemetryCharts activityId={run.activityId} />
+
+        <Separator />
         <button
           type="button"
-          onClick={() => setChartsOpen((v) => !v)}
-          className="-mb-1 flex items-center justify-center gap-1.5 rounded-md border border-border bg-background py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-          aria-expanded={chartsOpen}
+          onClick={() => setEditorOpen((v) => !v)}
+          className="flex items-center justify-center gap-1.5 rounded-md border border-border bg-background py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+          aria-expanded={editorOpen}
         >
-          <LineChart className="size-3.5" />
-          {chartsOpen ? "Hide details" : "View charts & weather"}
-          {chartsOpen ? (
-            <ChevronUp className="size-3.5" />
+          <ClipboardEdit className="size-4" />
+          Efforts & Coaching
+          {editorOpen ? (
+            <ChevronUp className="size-4" />
           ) : (
-            <ChevronDown className="size-3.5" />
+            <ChevronDown className="size-4" />
           )}
         </button>
 
-        {chartsOpen && (
-          <div className="space-y-3">
-            <Separator />
-            <WeatherStrip activityId={run.activityId} />
-            <TelemetryCharts activityId={run.activityId} />
-          </div>
+        {editorOpen && (
+          <EditRunForm run={run} onClose={() => setEditorOpen(false)} />
         )}
       </CardContent>
     </Card>
