@@ -2,9 +2,146 @@ import os
 import json
 import csv
 import datetime
+from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any, ClassVar, Literal, Optional
+
 import pandas as pd
 import numpy as np
+
+
+# ==========================================================================
+# Domain models — thin wrappers around the JSON we already store on disk.
+# Behavior (pace, distance conversions, surface bucketing) lives on the class
+# so callers stop reaching into raw Garmin dicts. Storage stays JSON for now;
+# `from_garmin` / `from_dict` hydrate, `to_dict` serializes back out.
+# ==========================================================================
+
+# Garmin's subTypeKey strings collapse into a few buckets for our purposes.
+def _bucket_run_surface(sub_type_key: str | None) -> str:
+    s = (sub_type_key or "").lower()
+    if "track" in s:
+        return "track"
+    if "treadmill" in s or "indoor" in s:
+        return "treadmill"
+    if "trail" in s:
+        return "trail"
+    return "road"
+
+
+@dataclass
+class RunActivity:
+    """A Garmin-synced run, plus any manual_meta we layered on top.
+
+    Use `RunActivity.from_garmin(d)` to wrap the raw dict that
+    `get_activities_in_range` returns. `raw` keeps the full Garmin payload
+    around for fields we haven't promoted to first-class attributes yet.
+    """
+    activity_id: int
+    date: str  # ISO YYYY-MM-DD, taken from startTimeLocal
+    name: str
+    distance_m: float
+    moving_duration_s: float
+    duration_s: float
+    avg_hr: Optional[int]
+    elevation_gain_m: float
+    calories: int
+    surface: Literal["track", "treadmill", "trail", "road"]
+    notes: str
+    category_stats: list[dict] = field(default_factory=list)
+    lap_categories: list[str] = field(default_factory=list)
+    raw: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_garmin(cls, d: dict) -> "RunActivity":
+        meta = d.get("manual_meta", {}) or {}
+        type_info = d.get("activityType", {}) or {}
+        return cls(
+            activity_id=d["activityId"],
+            date=(d.get("startTimeLocal") or "")[:10],
+            name=meta.get("name") or d.get("activityName") or "Run",
+            distance_m=d.get("distance") or 0,
+            moving_duration_s=d.get("movingDuration") or 0,
+            duration_s=d.get("duration") or 0,
+            avg_hr=d.get("averageHR") or None,
+            elevation_gain_m=d.get("elevationGain") or 0,
+            calories=int(d.get("calories") or 0),
+            surface=_bucket_run_surface(type_info.get("subTypeKey")),
+            notes=meta.get("notes") or "",
+            category_stats=meta.get("category_stats") or [],
+            lap_categories=meta.get("lap_categories") or [],
+            raw=d,
+        )
+
+    @staticmethod
+    def is_run_dict(d: dict) -> bool:
+        return "running" in (d.get("activityType", {}) or {}).get("typeKey", "")
+
+    @property
+    def distance_mi(self) -> float:
+        return self.distance_m / 1609.34
+
+    @property
+    def elevation_ft(self) -> int:
+        return int(self.elevation_gain_m * 3.281)
+
+    @property
+    def effective_duration_s(self) -> float:
+        # Garmin sometimes reports 0 for movingDuration on track/treadmill;
+        # fall back to total duration so pace math doesn't divide by zero.
+        return self.moving_duration_s or self.duration_s
+
+    def pace_str(self) -> str:
+        if self.distance_mi <= 0 or self.effective_duration_s <= 0:
+            return "N/A"
+        dec = self.effective_duration_s / 60 / self.distance_mi
+        return f"{int(dec)}:{int((dec % 1) * 60):02d}"
+
+
+@dataclass
+class ManualActivity:
+    """A user-entered activity that didn't come from Garmin (swim/gym/manual run).
+
+    Persisted as a flat JSON record in `data/blocks/auxiliary_log.json`. The
+    legacy entries there only had {id, date, type, desc}; new entries can also
+    carry duration_min and distance_mi when meaningful (run/swim).
+    """
+    VALID_TYPES: ClassVar[tuple[str, ...]] = ("run", "swim", "gym", "other")
+
+    id: str
+    date: str
+    type: Literal["run", "swim", "gym", "other"]
+    description: str
+    duration_min: Optional[float] = None
+    distance_mi: Optional[float] = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ManualActivity":
+        t = d.get("type", "other")
+        if t not in cls.VALID_TYPES:
+            t = "other"
+        return cls(
+            id=d.get("id", ""),
+            date=d.get("date", ""),
+            type=t,  # type: ignore[arg-type]
+            description=d.get("desc", "") or "",
+            duration_min=d.get("duration_min"),
+            distance_mi=d.get("distance_mi"),
+        )
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {
+            "id": self.id,
+            "date": self.date,
+            "type": self.type,
+            "desc": self.description,
+        }
+        if self.duration_min is not None:
+            out["duration_min"] = self.duration_min
+        if self.distance_mi is not None:
+            out["distance_mi"] = self.distance_mi
+        return out
+
 
 class DataProcessor:
     def __init__(self, data_dir='data'):
@@ -439,12 +576,21 @@ class DataProcessor:
                             found.append({**data, "manual_meta": meta})
             except Exception: continue
         return sorted(found, key=lambda x: x['startTimeLocal'], reverse=True)
+
+    def list_runs(self, start_str: str, end_str: str) -> list[RunActivity]:
+        """Typed view of runs in a date range — wraps get_activities_in_range
+        and filters to running-type activities. Prefer this over the raw
+        dict-returning method for new code."""
+        return [
+            RunActivity.from_garmin(d)
+            for d in self.get_activities_in_range(start_str, end_str)
+            if RunActivity.is_run_dict(d)
+        ]
     # -------------------------------
 
     # ==========================================
     # Manual activities (non-Garmin: swim/gym/other, plus free-form runs)
     # ==========================================
-    VALID_MANUAL_ACTIVITY_TYPES = ("run", "swim", "gym", "other")
 
     def get_manual_activities_in_range(self, start_str, end_str):
         current = self.load_json_safe(self.paths['aux'])
@@ -455,8 +601,16 @@ class DataProcessor:
             reverse=True,
         )
 
+    def list_manual_activities(self, start_str: str, end_str: str) -> list[ManualActivity]:
+        """Typed view of manual activities in range. Prefer this over the
+        raw dict-returning method for new code."""
+        return [
+            ManualActivity.from_dict(d)
+            for d in self.get_manual_activities_in_range(start_str, end_str)
+        ]
+
     def add_manual_activity(self, date_str, activity_type, description, duration_min=None, distance_mi=None):
-        activity_type = activity_type if activity_type in self.VALID_MANUAL_ACTIVITY_TYPES else "other"
+        activity_type = activity_type if activity_type in ManualActivity.VALID_TYPES else "other"
         with open(self.paths['aux'], 'r') as f:
             current = json.load(f)
         entry = {
@@ -497,95 +651,76 @@ class DataProcessor:
         )
         current_week_num = current_week['week_num'] if current_week else 0
 
-        all_runs_raw = self.get_activities_in_range(block_start, block_end)
-        all_runs = [r for r in all_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
+        def pace_str(decimal_min_per_mi: float) -> str:
+            if decimal_min_per_mi <= 0:
+                return "N/A"
+            return f"{int(decimal_min_per_mi)}:{int((decimal_min_per_mi % 1) * 60):02d}"
 
-        cycle_miles = 0
-        cycle_time_sec = 0
-        cycle_elevation_m = 0
-        cycle_calories = 0
-        cycle_hrs = []
+        all_runs = self.list_runs(block_start, block_end)
+
+        cycle_miles = sum(r.distance_mi for r in all_runs)
+        cycle_time_sec = sum(r.effective_duration_s for r in all_runs)
+        cycle_elevation_m = sum(r.elevation_gain_m for r in all_runs)
+        cycle_calories = sum(r.calories for r in all_runs)
+        cycle_hrs = [r.avg_hr for r in all_runs if r.avg_hr]
+        longest_run_mi = max((r.distance_mi for r in all_runs), default=0)
+
         cat_totals = defaultdict(lambda: {'dist_m': 0, 'time_s': 0, 'hr_weighted': 0, 'pace_weighted': 0, 'elev_m': 0})
-        longest_run_mi = 0
-
         for r in all_runs:
-            dist_m = r.get('distance', 0)
-            dur_s = r.get('movingDuration', 0) or r.get('duration', 0)
-            hr = r.get('averageHR', 0) or 0
-            elev = r.get('elevationGain', 0) or 0
-            cal = r.get('calories', 0) or 0
+            for cat in r.category_stats:
+                c = cat['category']
+                cat_totals[c]['dist_m'] += cat['distance_mi'] * 1609.34
+                cat_totals[c]['hr_weighted'] += cat.get('avg_hr', 0) * cat['distance_mi']
+                cat_pace = cat.get('pace', '')
+                if cat_pace and ':' in cat_pace:
+                    parts = cat_pace.split(':')
+                    pace_dec = int(parts[0]) + int(parts[1]) / 60
+                    cat_totals[c]['pace_weighted'] += pace_dec * cat['distance_mi']
 
-            mi = dist_m / 1609.34
-            cycle_miles += mi
-            cycle_time_sec += dur_s
-            cycle_elevation_m += elev
-            cycle_calories += cal
-            if hr > 0:
-                cycle_hrs.append(hr)
-            if mi > longest_run_mi:
-                longest_run_mi = mi
-
-            meta = r.get('manual_meta', {})
-            cs = meta.get('category_stats')
-            if cs:
-                for cat in cs:
-                    c = cat['category']
-                    cat_totals[c]['dist_m'] += cat['distance_mi'] * 1609.34
-                    cat_totals[c]['hr_weighted'] += cat.get('avg_hr', 0) * cat['distance_mi']
-                    pace_str = cat.get('pace', '')
-                    if pace_str and ':' in pace_str:
-                        parts = pace_str.split(':')
-                        pace_dec = int(parts[0]) + int(parts[1]) / 60
-                        cat_totals[c]['pace_weighted'] += pace_dec * cat['distance_mi']
-
-                lap_cats = meta.get('lap_categories', [])
-                if lap_cats:
-                    laps = self.get_run_laps(r['activityId'])
-                    for i, lap in enumerate(laps):
-                        if i < len(lap_cats):
-                            c = lap_cats[i]
-                            cat_totals[c]['elev_m'] += lap.get('elevationGain', 0) or 0
+            if r.lap_categories:
+                # Per-effort elevation needs lap-level elevation, which lives in
+                # the splits payload not the activity summary — so we still
+                # have to read laps off disk for runs that have categorized them.
+                laps = self.get_run_laps(r.activity_id)
+                for i, lap in enumerate(laps):
+                    if i < len(r.lap_categories):
+                        cat_totals[r.lap_categories[i]]['elev_m'] += lap.get('elevationGain', 0) or 0
 
         cycle_avg_hr = sum(cycle_hrs) / len(cycle_hrs) if cycle_hrs else 0
         cycle_pace_dec = (cycle_time_sec / (cycle_miles * 60)) if cycle_miles > 0 else 0
-        cycle_pace_str = f"{int(cycle_pace_dec)}:{int((cycle_pace_dec % 1) * 60):02d}" if cycle_miles > 0 else "N/A"
 
         cat_rows = []
         for cat, v in sorted(cat_totals.items(), key=lambda x: -x[1]['dist_m']):
             cat_mi = v['dist_m'] / 1609.34
             cat_hr = int(v['hr_weighted'] / cat_mi) if cat_mi > 0 else 0
             pct = (cat_mi / cycle_miles * 100) if cycle_miles > 0 else 0
-            if cat_mi > 0 and v['pace_weighted'] > 0:
-                avg_pace_dec = v['pace_weighted'] / cat_mi
-                pace_str = f"{int(avg_pace_dec)}:{int((avg_pace_dec % 1) * 60):02d}"
-            else:
-                pace_str = "—"
+            avg_pace_dec = (v['pace_weighted'] / cat_mi) if cat_mi > 0 and v['pace_weighted'] > 0 else 0
             elev_ft = int(v['elev_m'] * 3.281)
             cat_rows.append({
                 "effort": cat,
                 "miles": round(cat_mi, 1),
                 "pct_of_total": round(pct, 0),
-                "avg_pace": pace_str,
+                "avg_pace": pace_str(avg_pace_dec) if avg_pace_dec else "—",
                 "avg_hr": cat_hr if cat_hr > 0 else None,
                 "elevation_ft": elev_ft if elev_ft > 0 else None,
             })
 
-        weekly_miles = []
-        for w in weeks:
-            w_runs_raw = self.get_activities_in_range(w['start'], w['end'])
-            w_runs = [r for r in w_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
-            wm = sum(r.get('distance', 0) for r in w_runs) / 1609.34
-            weekly_miles.append({"week_num": w['week_num'], "label": f"W{w['week_num']}", "miles": round(wm, 1)})
+        weekly_miles = [
+            {
+                "week_num": w['week_num'],
+                "label": f"W{w['week_num']}",
+                "miles": round(sum(r.distance_mi for r in self.list_runs(w['start'], w['end'])), 1),
+            }
+            for w in weeks
+        ]
 
-        wk_runs_raw = self.get_activities_in_range(week_start, week_end)
-        wk_runs = [r for r in wk_runs_raw if 'running' in r.get('activityType', {}).get('typeKey', '')]
-        wk_miles = sum(r.get('distance', 0) for r in wk_runs) / 1609.34
-        wk_time_sec = sum(r.get('movingDuration', 0) or r.get('duration', 0) for r in wk_runs)
-        wk_hrs = [r.get('averageHR', 0) for r in wk_runs if r.get('averageHR')]
-        wk_elev = sum(r.get('elevationGain', 0) or 0 for r in wk_runs)
+        wk_runs = self.list_runs(week_start, week_end)
+        wk_miles = sum(r.distance_mi for r in wk_runs)
+        wk_time_sec = sum(r.effective_duration_s for r in wk_runs)
+        wk_hrs = [r.avg_hr for r in wk_runs if r.avg_hr]
+        wk_elev_m = sum(r.elevation_gain_m for r in wk_runs)
         wk_avg_hr = sum(wk_hrs) / len(wk_hrs) if wk_hrs else 0
         wk_pace_dec = (wk_time_sec / (wk_miles * 60)) if wk_miles > 0 else 0
-        wk_pace_str = f"{int(wk_pace_dec)}:{int((wk_pace_dec % 1) * 60):02d}" if wk_miles > 0 else "N/A"
 
         elapsed_weeks = max(1, current_week_num)
         avg_weekly_miles = cycle_miles / elapsed_weeks if elapsed_weeks > 0 else 0
@@ -597,7 +732,7 @@ class DataProcessor:
                 'total_runs': len(all_runs),
                 'total_miles': round(cycle_miles, 1),
                 'total_hours': round(cycle_time_sec / 3600, 1),
-                'avg_pace': cycle_pace_str,
+                'avg_pace': pace_str(cycle_pace_dec),
                 'avg_hr': int(cycle_avg_hr),
                 'elevation_ft': int(cycle_elevation_m * 3.281),
                 'calories': int(cycle_calories),
@@ -610,9 +745,9 @@ class DataProcessor:
                 'runs': len(wk_runs),
                 'miles': round(wk_miles, 1),
                 'hours': round(wk_time_sec / 3600, 1),
-                'avg_pace': wk_pace_str,
+                'avg_pace': pace_str(wk_pace_dec),
                 'avg_hr': int(wk_avg_hr),
-                'elevation_ft': int(wk_elev * 3.281),
+                'elevation_ft': int(wk_elev_m * 3.281),
                 'vs_avg': round(wk_miles - avg_weekly_miles, 1),
             },
             'weekly_miles': weekly_miles,
