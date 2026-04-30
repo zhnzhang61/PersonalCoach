@@ -37,3 +37,11 @@ export async function apiPut<T>(
   }
   return res.json() as Promise<T>;
 }
+
+export async function apiDelete<T>(path: string): Promise<T> {
+  const res = await fetch(path, { method: "DELETE", cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText} on ${path}`);
+  }
+  return res.json() as Promise<T>;
+}

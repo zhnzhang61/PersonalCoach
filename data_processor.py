@@ -546,6 +546,24 @@ class DataProcessor:
             })
             curr += timedelta(days=7)
             week_num += 1
+
+        # Tail cleanup: a block_end on Mon/Tue produces a 1- or 2-day stub
+        # week that's almost never what the user means (off-by-one in their
+        # block boundary). Absorb stubs into the previous week so cycle stats
+        # and the week selector don't show a "Week 20 (Dec 15)" with one day.
+        # Week 0 (intentional warm-up runway) is left alone — only collapse
+        # when there's a previous full week to merge into.
+        if len(weeks) >= 2:
+            last_start = datetime.date.fromisoformat(weeks[-1]["start"])
+            last_end = datetime.date.fromisoformat(weeks[-1]["end"])
+            if (last_end - last_start).days < 2:  # 1- or 2-day stub
+                prev = weeks[-2]
+                prev["end"] = weeks[-1]["end"]
+                prev_end_date = datetime.date.fromisoformat(prev["end"])
+                prev["label"] = (
+                    f"Week {prev['week_num']} ({prev_end_date.strftime('%b %d')})"
+                )
+                weeks.pop()
         return weeks
 
     def get_activities_in_range(self, start_str, end_str):

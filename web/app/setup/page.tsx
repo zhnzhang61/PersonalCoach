@@ -1,4 +1,5 @@
 import { PageHeader } from "@/components/page-header";
+import { BlocksSection } from "@/components/setup/blocks-section";
 import { SyncSection } from "@/components/setup/sync-section";
 
 export default function SetupPage() {
@@ -7,6 +8,7 @@ export default function SetupPage() {
       <PageHeader title="Setup" />
       <div className="space-y-6 px-5 pb-8 sm:px-8">
         <SyncSection />
+        <BlocksSection />
       </div>
     </div>
   );

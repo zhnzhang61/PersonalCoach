@@ -132,6 +132,20 @@ class ManualActivityCreate(BaseModel):
     distance_mi: float | None = None
 
 
+class BlockCreate(BaseModel):
+    name: str
+    start_date: str
+    end_date: str
+    primary_event: str = "running"
+
+
+class BlockUpdate(BaseModel):
+    name: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    primary_event: str | None = None
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse("webapp/index.html")
@@ -276,6 +290,42 @@ def training_blocks() -> dict[str, Any]:
         blocks[0]["id"] if blocks else None,
     )
     return {"blocks": blocks, "active_block_id": active_id}
+
+
+@app.post("/api/training/blocks")
+def create_block(body: BlockCreate) -> dict[str, Any]:
+    try:
+        new_id = processor.create_block(
+            name=body.name,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            primary_event=body.primary_event,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "id": new_id}
+
+
+@app.put("/api/training/blocks/{block_id}")
+def update_block(block_id: str, body: BlockUpdate) -> dict[str, Any]:
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(400, "No fields to update")
+    try:
+        ok = processor.update_block(block_id, **fields)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not ok:
+        raise HTTPException(404, f"Block {block_id} not found")
+    return {"ok": True, "id": block_id}
+
+
+@app.delete("/api/training/blocks/{block_id}")
+def delete_block(block_id: str) -> dict[str, Any]:
+    ok = processor.delete_block(block_id)
+    if not ok:
+        raise HTTPException(404, f"Block {block_id} not found")
+    return {"ok": True, "id": block_id}
 
 
 @app.get("/api/training/weeks")
