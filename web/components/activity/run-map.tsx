@@ -57,10 +57,14 @@ export function RunMap({ activityId }: { activityId: number }) {
         attributionControl={false}
       >
         <TileLayer
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          // Attribution lives in the page footer / about; OSM ToS for
-          // non-commercial personal use accepts that as long as it's
-          // discoverable somewhere. Keep the map chrome clean.
+          // CartoDB Voyager — bright Google-Maps-style palette, free, no
+          // API key. Subdomains a-d round-robin tile fetches. ToS asks for
+          // attribution somewhere on the site (not strictly required for
+          // personal/non-commercial); we keep the map chrome clean and rely
+          // on the project being non-commercial single-user.
+          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+          subdomains={["a", "b", "c", "d"]}
+          maxZoom={19}
         />
         <Polyline
           positions={data.polyline}
