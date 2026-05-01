@@ -66,12 +66,6 @@ export function RunCard({ run }: { run: RunActivity }) {
             {distMi.toFixed(2)} mi
             {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
           </p>
-          {(w?.dew_point_f != null || w) && (
-            <p className="text-[11px] text-muted-foreground/70">
-              {w?.dew_point_f != null ? `dew ${Math.round(w.dew_point_f)}°F · ` : ""}
-              Open-Meteo
-            </p>
-          )}
         </div>
 
         {breakdown.length > 0 ? (
