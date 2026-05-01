@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import Map, { Layer, Marker, Source } from "react-map-gl/mapbox";
+import Map, { Layer, Marker, Source, type MapRef } from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { Maximize2, X } from "lucide-react";
 
 import { apiGet } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -32,6 +33,33 @@ const END_COLOR = "#dc2626";
 
 export function RunMap({ activityId }: { activityId: number }) {
   const [styleId, setStyleId] = useState<StyleId>("outdoors-v12");
+  const [fullscreen, setFullscreen] = useState(false);
+  const mapRef = useRef<MapRef>(null);
+
+  // While fullscreen, kill page scroll and let Escape close it. react-map-gl's
+  // built-in ResizeObserver doesn't always catch a parent class change on the
+  // same frame (especially on iOS Safari, where the visible viewport changes
+  // around the URL bar), so we explicitly poke map.resize() across two frames
+  // to make sure the canvas fills the new container.
+  useEffect(() => {
+    const id1 = requestAnimationFrame(() =>
+      requestAnimationFrame(() => mapRef.current?.resize()),
+    );
+    if (!fullscreen) {
+      return () => cancelAnimationFrame(id1);
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      cancelAnimationFrame(id1);
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [fullscreen]);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["runs", activityId, "route"],
@@ -101,9 +129,15 @@ export function RunMap({ activityId }: { activityId: number }) {
   // shows topology); other styles get a gentle 3D push for trail context.
   const useTerrain = styleId !== "satellite-streets-v12";
 
+  const wrapperClass = fullscreen
+    ? "fixed inset-0 z-50 bg-background"
+    : "relative overflow-hidden rounded-md border border-border";
+  const wrapperStyle = fullscreen ? undefined : { height: "16rem" };
+
   return (
-    <div className="relative overflow-hidden rounded-md border border-border" style={{ height: "16rem" }}>
+    <div className={wrapperClass} style={wrapperStyle}>
       <Map
+        ref={mapRef}
         mapboxAccessToken={MAPBOX_TOKEN}
         initialViewState={initialViewState}
         mapStyle={`mapbox://styles/mapbox/${styleId}`}
@@ -156,7 +190,19 @@ export function RunMap({ activityId }: { activityId: number }) {
         </Marker>
       </Map>
 
-      <div className="absolute right-2 top-2 flex gap-1 rounded-md bg-background/90 p-1 shadow-sm backdrop-blur">
+      {/*
+        Fullscreen pushes overlay buttons below the iPhone Dynamic Island /
+        status bar via safe-area-inset-top. Inline mode sits inside the run
+        card's normal padding, so 0.5rem is fine there.
+      */}
+      <div
+        className="absolute right-2 flex gap-1 rounded-md bg-background/90 p-1 shadow-sm backdrop-blur"
+        style={{
+          top: fullscreen
+            ? "calc(env(safe-area-inset-top) + 0.5rem)"
+            : "0.5rem",
+        }}
+      >
         {STYLES.map((s) => (
           <button
             key={s.id}
@@ -173,6 +219,20 @@ export function RunMap({ activityId }: { activityId: number }) {
           </button>
         ))}
       </div>
+
+      <button
+        type="button"
+        onClick={() => setFullscreen((v) => !v)}
+        className="absolute left-2 rounded-md bg-background/90 p-1.5 text-foreground shadow-sm backdrop-blur transition-colors hover:bg-background"
+        style={{
+          top: fullscreen
+            ? "calc(env(safe-area-inset-top) + 0.5rem)"
+            : "0.5rem",
+        }}
+        aria-label={fullscreen ? "Exit fullscreen" : "Open fullscreen map"}
+      >
+        {fullscreen ? <X className="size-5" /> : <Maximize2 className="size-4" />}
+      </button>
     </div>
   );
 }
