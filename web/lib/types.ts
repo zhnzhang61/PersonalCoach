@@ -272,13 +272,33 @@ export interface TelemetryRow {
   RespirationRate?: number | null; // breaths/min
   VerticalOscillation?: number | null; // cm
   GroundContactTime?: number | null; // ms
+  GroundContactBalanceLeft?: number | null; // % left foot, e.g. 49.3 → 49.3 / 50.7
   Power?: number | null; // watts
   AirTemperature?: number | null; // celsius — Garmin's wrist sensor (unreliable)
 }
 
+export interface MetricSummary {
+  avg: number;
+  min: number;
+  max: number;
+}
+
+// Server computes per-metric stats once so the client doesn't have to
+// re-derive them (and re-implement filtering rules like the pace clip).
+export type TelemetrySummaryKey =
+  | "HeartRate"
+  | "Pace"
+  | "StrideLength"
+  | "Cadence"
+  | "RespirationRate"
+  | "GroundContactBalanceLeft"
+  | "Elevation";
+
 export interface TelemetryResponse {
   raw: TelemetryRow[];
   ai: Record<string, unknown>[];
+  summary: Partial<Record<TelemetrySummaryKey, MetricSummary | null>>;
+  pace_clip: [number, number]; // min/mi bounds applied when computing pace stats
 }
 
 export interface WeatherSnapshot {

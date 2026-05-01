@@ -901,6 +901,9 @@ class DataProcessor:
             respiration = get_val(metrics, 'directRespirationRate')
             vert_osc = get_val(metrics, 'directVerticalOscillation')
             gct = get_val(metrics, 'directGroundContactTime')
+            # Left-foot ground contact balance (HRM-Pro / HRM-Run only).
+            # Reported as a 0–100 percentage; right side = 100 − left.
+            gct_balance_left = get_val(metrics, 'directGroundContactBalanceLeft')
             power = get_val(metrics, 'directPower')
             air_temp = get_val(metrics, 'directAirTemperature')
 
@@ -912,6 +915,7 @@ class DataProcessor:
                 "RespirationRate": respiration,
                 "VerticalOscillation": vert_osc,
                 "GroundContactTime": gct,
+                "GroundContactBalanceLeft": gct_balance_left,
                 "Power": power,
                 "AirTemperature": air_temp,
             })
@@ -937,6 +941,50 @@ class DataProcessor:
             
         df_ai['Pace'] = df_ai['Speed_mps'].apply(speed_to_pace_str)
         return df_raw, df_ai[['Lap', 'Second', 'Pace', 'HeartRate', 'Cadence', 'ElevationChange']]
+
+    # Pace bounds (min/mi). Anything outside is a stoplight, GPS glitch, or
+    # cool-down walk — exclude from the average so a 30s standstill doesn't
+    # drag the cycle's "avg pace" up by 30 seconds. Used by both telemetry
+    # summary computation and the chart's Y-axis clipping on the frontend.
+    PACE_CLIP_MIN_PER_MI = (4.0, 14.0)
+
+    def compute_telemetry_summary(self, df_raw) -> dict[str, dict | None]:
+        """
+        Per-metric avg / min / max from a raw telemetry DataFrame. Returns
+        a dict keyed by metric name; entries are None when the watch didn't
+        report that metric (e.g., no chest strap → no GroundContactBalance).
+
+        Pace is filtered through PACE_CLIP_MIN_PER_MI before averaging so
+        idle seconds don't bias the result.
+        """
+        if df_raw is None or len(df_raw) == 0:
+            return {}
+
+        def stats(series):
+            s = series.dropna()
+            if len(s) == 0:
+                return None
+            return {
+                "avg": float(s.mean()),
+                "min": float(s.min()),
+                "max": float(s.max()),
+            }
+
+        pace_lo, pace_hi = self.PACE_CLIP_MIN_PER_MI
+        pace_filtered = df_raw['Pace'].where(
+            (df_raw['Pace'] >= pace_lo) & (df_raw['Pace'] <= pace_hi)
+        )
+
+        out: dict[str, dict | None] = {
+            "HeartRate": stats(df_raw.get('HeartRate', pd.Series(dtype=float))),
+            "Pace": stats(pace_filtered),
+            "StrideLength": stats(df_raw.get('StrideLength', pd.Series(dtype=float))),
+            "Cadence": stats(df_raw.get('Cadence', pd.Series(dtype=float))),
+            "RespirationRate": stats(df_raw.get('RespirationRate', pd.Series(dtype=float))),
+            "GroundContactBalanceLeft": stats(df_raw.get('GroundContactBalanceLeft', pd.Series(dtype=float))),
+            "Elevation": stats(df_raw.get('Elevation', pd.Series(dtype=float))),
+        }
+        return out
 
     def get_run_chat_history(self, activity_id):
         return self.load_json_safe(self.paths['manual'], f"run_{activity_id}_chat.json") or []
