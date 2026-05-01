@@ -2,15 +2,27 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import { ChevronDown, ChevronUp, ClipboardEdit } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate } from "@/lib/format";
 import type { RunActivity, WeatherSnapshot } from "@/lib/types";
 import { EditRunForm } from "@/components/activity/edit-run-form";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
+
+// react-leaflet imports leaflet at module load, and leaflet touches `window`
+// during init — so we hold it back from SSR. Skeleton during hydration.
+const RunMap = dynamic(
+  () => import("@/components/activity/run-map").then((m) => m.RunMap),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-64 w-full" />,
+  },
+);
 
 function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
@@ -83,6 +95,7 @@ export function RunCard({ run }: { run: RunActivity }) {
         ) : null}
 
         <Separator />
+        <RunMap activityId={run.activityId} />
         <TelemetryCharts activityId={run.activityId} />
 
         <Separator />

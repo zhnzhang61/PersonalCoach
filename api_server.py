@@ -430,6 +430,16 @@ def run_weather(activity_id: int) -> dict[str, Any]:
     return w
 
 
+@app.get("/api/runs/{activity_id}/route")
+def run_route(activity_id: int, max_points: int = 500) -> dict[str, Any]:
+    route = processor.get_run_route(activity_id, max_points=max_points)
+    if route is None:
+        raise HTTPException(
+            404, "Route unavailable (treadmill / no GPS recorded)"
+        )
+    return route
+
+
 @app.get("/api/runs/{activity_id}/laps")
 def get_laps(activity_id: int) -> dict[str, Any]:
     laps = processor.get_run_laps(activity_id)
