@@ -1,15 +1,16 @@
 "use client";
 
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, ClipboardEdit } from "lucide-react";
+import { apiGet } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { fmtDate } from "@/lib/format";
-import type { RunActivity } from "@/lib/types";
+import type { RunActivity, WeatherSnapshot } from "@/lib/types";
 import { EditRunForm } from "@/components/activity/edit-run-form";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
-import { WeatherStrip } from "@/components/activity/weather-strip";
 
 function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
@@ -22,21 +23,55 @@ export function RunCard({ run }: { run: RunActivity }) {
   const distMi = metersToMi(run.distance);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
-  // Charts + weather are basic info — always shown. Notes / lap-effort
-  // editing lives one click away under "Efforts & Coaching" so the card
-  // doesn't feel like a form on first glance. Avg metrics live as a
-  // tab-aware subtitle inside TelemetryCharts, not in this header.
+  // Date + weather (date-level context) are merged into one line; distance
+  // and elevation (run-level facts) get the next line. Notes & per-lap
+  // effort editing stay folded inside Efforts & Coaching.
   const [editorOpen, setEditorOpen] = useState(false);
+
+  const weatherQuery = useQuery({
+    queryKey: ["runs", run.activityId, "weather"],
+    queryFn: () => apiGet<WeatherSnapshot>(`/api/runs/${run.activityId}/weather`),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const w = weatherQuery.data;
+
+  // Drop "feels like" if it's within ~2°F of the dry temp — same threshold
+  // as the old WeatherStrip used.
+  const showFeels =
+    w?.apparent_temperature_f != null &&
+    w.temperature_f != null &&
+    Math.abs(w.apparent_temperature_f - w.temperature_f) >= 2;
+
+  const datePart = dateStr ? fmtDate(dateStr, "EEE MMM d") : "—";
+  const weatherSegments: string[] = [];
+  if (w?.temperature_f != null) {
+    weatherSegments.push(
+      showFeels
+        ? `${Math.round(w.temperature_f)}°F (feels ${Math.round(w.apparent_temperature_f!)}°F)`
+        : `${Math.round(w.temperature_f)}°F`,
+    );
+  }
+  if (w?.humidity_pct != null) weatherSegments.push(`${w.humidity_pct}% humidity`);
 
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
-        <div className="min-w-0">
+        <div className="min-w-0 space-y-0.5">
           <h3 className="truncate text-base font-semibold">{name}</h3>
           <p className="text-sm text-muted-foreground">
-            {dateStr ? fmtDate(dateStr, "EEE MMM d") : "—"} ·{" "}
-            {distMi.toFixed(2)} mi
+            {[datePart, ...weatherSegments].join(" · ")}
           </p>
+          <p className="text-sm text-muted-foreground">
+            {distMi.toFixed(2)} mi
+            {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
+          </p>
+          {(w?.dew_point_f != null || w) && (
+            <p className="text-[11px] text-muted-foreground/70">
+              {w?.dew_point_f != null ? `dew ${Math.round(w.dew_point_f)}°F · ` : ""}
+              Open-Meteo
+            </p>
+          )}
         </div>
 
         {breakdown.length > 0 ? (
@@ -53,14 +88,7 @@ export function RunCard({ run }: { run: RunActivity }) {
           </div>
         ) : null}
 
-        {elevFt > 0 ? (
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">
-            ↑ {elevFt.toLocaleString()} ft
-          </p>
-        ) : null}
-
         <Separator />
-        <WeatherStrip activityId={run.activityId} />
         <TelemetryCharts activityId={run.activityId} />
 
         <Separator />
