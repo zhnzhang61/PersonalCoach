@@ -223,10 +223,13 @@ export function RunMap({ activityId }: { activityId: number }) {
       <button
         type="button"
         onClick={() => setFullscreen((v) => !v)}
-        className="absolute left-2 rounded-md bg-background/90 p-1.5 text-foreground shadow-sm backdrop-blur transition-colors hover:bg-background"
+        className="absolute rounded-md bg-background/90 p-1.5 text-foreground shadow-sm backdrop-blur transition-colors hover:bg-background"
         style={{
           top: fullscreen
             ? "calc(env(safe-area-inset-top) + 0.5rem)"
+            : "0.5rem",
+          left: fullscreen
+            ? "calc(env(safe-area-inset-left) + 0.875rem)"
             : "0.5rem",
         }}
         aria-label={fullscreen ? "Exit fullscreen" : "Open fullscreen map"}
