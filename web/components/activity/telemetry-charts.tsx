@@ -102,47 +102,58 @@ function downsampleEvery(rows: TelemetryRow[], step: number): TelemetryRow[] {
   return rows.filter((_, i) => i % step === 0);
 }
 
+// Stable, locale-free time format. Always colon-delimited so labels can't
+// be confused with distance ("75m" used to read as 75 metres).
+//   < 1h:  MM:SS   (e.g. "25:00", "99:10")
+//   ≥ 1h:  H:MM    (e.g. "1:15"; appends ":SS" only when seconds non-zero)
+const xTickFormatter = (v: number | string | undefined) => {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return "";
+  const total = Math.round(n);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    const base = `${h}:${String(m).padStart(2, "0")}`;
+    return s === 0 ? base : `${base}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
+
 interface ChartPaneProps {
   rows: TelemetryRow[];
-  spec: MetricSpec;
+  // 1 spec → single-axis chart (area allowed for elevation).
+  // 2 specs → dual-axis line chart; first goes on the left, second on the right.
+  specs: MetricSpec[];
 }
 
-function ChartPane({ rows, spec }: ChartPaneProps) {
+function ChartPane({ rows, specs }: ChartPaneProps) {
+  const primary = specs[0];
+  const secondary = specs[1] ?? null;
   const config: ChartConfig = {
-    [spec.key]: { label: spec.label, color: spec.color },
+    [primary.key]: { label: primary.label, color: primary.color },
   };
+  if (secondary) {
+    config[secondary.key] = { label: secondary.label, color: secondary.color };
+  }
 
-  const haveData = rows.some((r) => r[spec.key] != null);
+  const haveData = rows.some((r) => specs.some((s) => r[s.key] != null));
   if (!haveData) {
     return (
       <div className="flex h-44 items-center justify-center text-xs text-muted-foreground">
-        No {spec.label.toLowerCase()} data for this run.
+        No data for this run.
       </div>
     );
   }
 
-  // Stable, locale-free time format. Always colon-delimited so labels can't
-  // be confused with distance ("75m" used to read as 75 metres).
-  //   < 1h:  MM:SS   (e.g. "25:00", "99:10")
-  //   ≥ 1h:  H:MM    (e.g. "1:15"; appends ":SS" only when seconds non-zero)
-  const xTickFormatter = (v: number | string | undefined) => {
-    const n = typeof v === "number" ? v : Number(v);
-    if (!Number.isFinite(n)) return "";
-    const total = Math.round(n);
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = total % 60;
-    if (h > 0) {
-      const base = `${h}:${String(m).padStart(2, "0")}`;
-      return s === 0 ? base : `${base}:${String(s).padStart(2, "0")}`;
-    }
-    return `${m}:${String(s).padStart(2, "0")}`;
-  };
+  const yTickFormatter = (s: MetricSpec) => (v: number) =>
+    `${Math.round(v)}${s.key === "GroundContactBalanceLeft" ? "%" : ""}`;
 
-  const yDomain: [number | string, number | string] = spec.yDomain ?? ["auto", "auto"];
-  const isBalance = spec.key === "GroundContactBalanceLeft";
-
-  if (spec.area) {
+  // Single-spec mode keeps the elevation area shading. Dual-spec collapses
+  // to a flat dual-axis line chart — overlaying area fills with another
+  // line gets visually noisy.
+  if (!secondary && primary.area) {
+    const yDomain: [number | string, number | string] = primary.yDomain ?? ["auto", "auto"];
     return (
       <ChartContainer config={config} className="h-56 w-full">
         <AreaChart data={rows}>
@@ -163,7 +174,7 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
             tickMargin={6}
             fontSize={10}
             domain={yDomain}
-            tickFormatter={(v) => Math.round(v).toString()}
+            tickFormatter={yTickFormatter(primary)}
           />
           <ChartTooltip
             content={
@@ -176,9 +187,9 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
           />
           <Area
             type="monotone"
-            dataKey={spec.key}
-            stroke={spec.color}
-            fill={spec.color}
+            dataKey={primary.key}
+            stroke={primary.color}
+            fill={primary.color}
             fillOpacity={0.18}
             strokeWidth={1.5}
             isAnimationActive={false}
@@ -195,6 +206,27 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
     );
   }
 
+  const renderAxis = (s: MetricSpec, side: "left" | "right") => {
+    const domain: [number | string, number | string] = s.yDomain ?? ["auto", "auto"];
+    return (
+      <YAxis
+        key={side}
+        yAxisId={side}
+        orientation={side}
+        tickLine={false}
+        axisLine={false}
+        tickMargin={6}
+        fontSize={10}
+        domain={domain}
+        allowDataOverflow={!!s.yDomain}
+        reversed={!!s.invertY}
+        tickFormatter={yTickFormatter(s)}
+        // Tick text in the metric's color so users can read which axis is which.
+        tick={{ fill: s.color }}
+      />
+    );
+  };
+
   return (
     <ChartContainer config={config} className="h-56 w-full">
       <LineChart data={rows}>
@@ -209,16 +241,8 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
           type="number"
           domain={["dataMin", "dataMax"]}
         />
-        <YAxis
-          tickLine={false}
-          axisLine={false}
-          tickMargin={6}
-          fontSize={10}
-          domain={yDomain}
-          allowDataOverflow={!!spec.yDomain}
-          reversed={!!spec.invertY}
-          tickFormatter={(v) => `${Math.round(v)}${isBalance ? "%" : ""}`}
-        />
+        {renderAxis(primary, "left")}
+        {secondary && renderAxis(secondary, "right")}
         <ChartTooltip
           content={
             <ChartTooltipContent
@@ -228,8 +252,18 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
             />
           }
         />
-        {isBalance && (
+        {primary.key === "GroundContactBalanceLeft" && (
           <ReferenceLine
+            yAxisId="left"
+            y={50}
+            stroke="var(--muted-foreground)"
+            strokeDasharray="3 3"
+            strokeOpacity={0.5}
+          />
+        )}
+        {secondary?.key === "GroundContactBalanceLeft" && (
+          <ReferenceLine
+            yAxisId="right"
             y={50}
             stroke="var(--muted-foreground)"
             strokeDasharray="3 3"
@@ -237,14 +271,27 @@ function ChartPane({ rows, spec }: ChartPaneProps) {
           />
         )}
         <Line
+          yAxisId="left"
           type="monotone"
-          dataKey={spec.key}
-          stroke={spec.color}
+          dataKey={primary.key}
+          stroke={primary.color}
           strokeWidth={1.5}
           dot={false}
           isAnimationActive={false}
           connectNulls
         />
+        {secondary && (
+          <Line
+            yAxisId="right"
+            type="monotone"
+            dataKey={secondary.key}
+            stroke={secondary.color}
+            strokeWidth={1.5}
+            dot={false}
+            isAnimationActive={false}
+            connectNulls
+          />
+        )}
         <Brush
           dataKey="Second"
           height={20}
@@ -269,7 +316,22 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
     staleTime: Infinity,
   });
 
-  const [active, setActive] = useState<TelemetrySummaryKey>("HeartRate");
+  // Up to two metrics overlay on the chart. active[0] owns the left Y axis,
+  // active[1] (when present) the right. Click rules:
+  //   • click active[0]               → no-op (must always have ≥1)
+  //   • click active[1]               → drop it (back to single)
+  //   • click anything else, len 1    → add as secondary
+  //   • click anything else, len 2    → swap into the secondary slot
+  const [active, setActive] = useState<TelemetrySummaryKey[]>(["HeartRate"]);
+
+  const onTabClick = (key: TelemetrySummaryKey) => {
+    setActive((prev) => {
+      if (prev[0] === key) return prev;
+      if (prev[1] === key) return [prev[0]];
+      if (prev.length === 1) return [prev[0], key];
+      return [prev[0], key];
+    });
+  };
 
   if (isLoading) {
     return <Skeleton className="h-56 w-full" />;
@@ -294,23 +356,34 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   );
 
   const rows = downsampleEvery(data.raw ?? [], 2);
-  const spec =
-    metrics.find((m) => m.key === active) ??
-    metrics[0] ??
-    METRICS_BASE[0];
-  const summary = data.summary[spec.key] ?? null;
-  const subtitle = summary ? spec.formatSubtitle(summary) : null;
+  const activeSpecs: MetricSpec[] = active
+    .map((k) => metrics.find((m) => m.key === k))
+    .filter((m): m is MetricSpec => m != null);
+  // Defensive fallback if the saved selection no longer maps to a visible metric.
+  const renderSpecs = activeSpecs.length > 0 ? activeSpecs : [metrics[0] ?? METRICS_BASE[0]];
+
+  const subtitleParts = renderSpecs.map((s) => {
+    const sum = data.summary[s.key];
+    if (!sum) return null;
+    return renderSpecs.length === 1
+      ? s.formatSubtitle(sum)
+      : `${s.label}: ${s.formatSubtitle(sum)}`;
+  }).filter((x): x is string => !!x);
+  const subtitle = subtitleParts.join("  ·  ");
 
   return (
     <div className="space-y-2">
       <div className="-mx-1 flex gap-1 overflow-x-auto pb-1">
         {metrics.map((m) => {
-          const isActive = m.key === active;
+          const idx = active.indexOf(m.key);
+          const isActive = idx >= 0;
+          // Tag the secondary tab with its axis side so the dual-axis
+          // mapping is obvious without legend chrome.
           return (
             <button
               key={m.key}
               type="button"
-              onClick={() => setActive(m.key)}
+              onClick={() => onTabClick(m.key)}
               className={
                 "shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors " +
                 (isActive
@@ -319,6 +392,9 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
               }
             >
               {m.label}
+              {idx === 1 && (
+                <span className="ml-1 opacity-70">▶</span>
+              )}
             </button>
           );
         })}
@@ -326,7 +402,7 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
       {subtitle && (
         <p className="text-xs text-muted-foreground tabular-nums">{subtitle}</p>
       )}
-      <ChartPane rows={rows} spec={spec} />
+      <ChartPane rows={rows} specs={renderSpecs} />
     </div>
   );
 }
