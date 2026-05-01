@@ -258,6 +258,65 @@ export interface LapsUpdateBody {
   notes: string;
 }
 
+// Per-second telemetry from Garmin's activity-detail metrics. Older runs may
+// not have every field — `null` means the metric wasn't reported that second.
+export interface TelemetryRow {
+  Lap: number;
+  Second: number;
+  HeartRate?: number | null;
+  Speed_mps?: number | null;
+  Pace?: number | null; // min/mi
+  Cadence?: number | null;
+  Elevation?: number | null;
+  StrideLength?: number | null; // cm
+  RespirationRate?: number | null; // breaths/min
+  VerticalOscillation?: number | null; // cm
+  GroundContactTime?: number | null; // ms
+  GroundContactBalanceLeft?: number | null; // % left foot, e.g. 49.3 → 49.3 / 50.7
+  Power?: number | null; // watts
+  AirTemperature?: number | null; // celsius — Garmin's wrist sensor (unreliable)
+}
+
+export interface MetricSummary {
+  avg: number;
+  min: number;
+  max: number;
+}
+
+// Server computes per-metric stats once so the client doesn't have to
+// re-derive them (and re-implement filtering rules like the pace clip).
+export type TelemetrySummaryKey =
+  | "HeartRate"
+  | "Pace"
+  | "StrideLength"
+  | "Cadence"
+  | "RespirationRate"
+  | "GroundContactBalanceLeft"
+  | "Elevation";
+
+export interface TelemetryResponse {
+  raw: TelemetryRow[];
+  ai: Record<string, unknown>[];
+  summary: Partial<Record<TelemetrySummaryKey, MetricSummary | null>>;
+  pace_clip: [number, number]; // min/mi bounds applied when computing pace stats
+}
+
+export interface WeatherSnapshot {
+  activity_id: number;
+  lat: number;
+  lon: number;
+  hour_local: string; // "YYYY-MM-DDTHH:00"
+  temperature_c: number | null;
+  temperature_f: number | null;
+  apparent_temperature_c: number | null;
+  apparent_temperature_f: number | null;
+  humidity_pct: number | null;
+  dew_point_c: number | null;
+  dew_point_f: number | null;
+  source: "open-meteo";
+  fetched_at: string;
+}
+
 // ==========================================
 // Manual activities (non-Garmin: swim/gym/free-form runs)
 // ==========================================

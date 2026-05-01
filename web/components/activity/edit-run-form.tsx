@@ -2,11 +2,10 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, X } from "lucide-react";
+import { Check } from "lucide-react";
 import { apiGet, apiPut } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   EFFORT_CATEGORIES,
@@ -21,8 +20,9 @@ interface Props {
   onClose: () => void;
 }
 
+// Bumped from text-xs / py-1 to feel tappable on a phone.
 const SELECT_CLASS =
-  "rounded-md border border-border bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-warm-accent/40";
+  "rounded-md border border-border bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40";
 
 function metersToMi(m: number): number {
   return m / 1609.34;
@@ -115,168 +115,161 @@ export function EditRunForm({ run, onClose }: Props) {
     [laps.length, selected.size],
   );
 
+  // Embedded inside RunCard now (no outer Card wrapper). Caller is
+  // responsible for visual chrome / Separator above this block.
   return (
-    <Card>
-      <CardContent className="space-y-4 p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Edit run</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground"
-            aria-label="Close"
-          >
-            <X className="size-4" />
-          </button>
+    <div className="space-y-4">
+      <label className="flex flex-col gap-1">
+        <span className="eyebrow text-xs">Name</span>
+        <Input
+          className="text-base"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="eyebrow text-xs">Notes</span>
+        <textarea
+          className="min-h-[80px] w-full rounded-md border border-border bg-background px-3 py-2 text-base shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Subjective notes — how it felt, aches, pacing thoughts."
+        />
+      </label>
+
+      {lapsQuery.isLoading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
         </div>
-
-        <label className="flex flex-col gap-1">
-          <span className="eyebrow text-[10px]">Name</span>
-          <Input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="eyebrow text-[10px]">Notes</span>
-          <textarea
-            className="min-h-[64px] w-full rounded-md border border-border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Subjective notes — how it felt, aches, pacing thoughts."
-          />
-        </label>
-
-        {lapsQuery.isLoading ? (
-          <div className="space-y-2">
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-          </div>
-        ) : laps.length === 0 ? (
-          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-            No lap data found for this run. (Try syncing splits in Setup.)
-          </div>
-        ) : (
-          <>
-            <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
-              <p className="eyebrow text-[10px]">Bulk edit</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  className={SELECT_CLASS}
-                  value={bulkCat}
-                  onChange={(e) => setBulkCat(e.target.value)}
-                  aria-label="Bulk category"
-                >
-                  {EFFORT_CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={applyBulk}
-                  disabled={selected.size === 0}
-                >
-                  Apply to {selected.size || "selected"}
-                </Button>
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground underline"
-                  onClick={() =>
-                    setSelected(
-                      allChecked ? new Set() : new Set(laps.map((_, i) => i)),
-                    )
-                  }
-                >
-                  {allChecked ? "Clear" : "Select all"}
-                </button>
-              </div>
+      ) : laps.length === 0 ? (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          No lap data found for this run. (Try syncing splits in Setup.)
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
+            <p className="eyebrow text-xs">Bulk edit</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                className={SELECT_CLASS}
+                value={bulkCat}
+                onChange={(e) => setBulkCat(e.target.value)}
+                aria-label="Bulk category"
+              >
+                {EFFORT_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={applyBulk}
+                disabled={selected.size === 0}
+              >
+                Apply to {selected.size || "selected"}
+              </Button>
+              <button
+                type="button"
+                className="text-sm text-muted-foreground underline"
+                onClick={() =>
+                  setSelected(
+                    allChecked ? new Set() : new Set(laps.map((_, i) => i)),
+                  )
+                }
+              >
+                {allChecked ? "Clear" : "Select all"}
+              </button>
             </div>
+          </div>
 
-            <div className="overflow-hidden rounded-md border border-border">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-muted/40 text-muted-foreground">
-                  <tr>
-                    <th className="w-8 py-1.5 pl-2"></th>
-                    <th className="py-1.5 pr-2 font-medium">Lap</th>
-                    <th className="py-1.5 pr-2 text-right font-medium">Mi</th>
-                    <th className="py-1.5 pr-2 text-right font-medium">Pace</th>
-                    <th className="py-1.5 pr-2 text-right font-medium">HR</th>
-                    <th className="py-1.5 pr-2 font-medium">Effort</th>
+          <div className="overflow-hidden rounded-md border border-border">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-muted/40 text-muted-foreground">
+                <tr>
+                  <th className="w-8 py-2 pl-2"></th>
+                  <th className="py-2 pr-2 font-medium">Lap</th>
+                  <th className="py-2 pr-2 text-right font-medium">Mi</th>
+                  <th className="py-2 pr-2 text-right font-medium">Pace</th>
+                  <th className="py-2 pr-2 text-right font-medium">HR</th>
+                  <th className="py-2 pr-2 font-medium">Effort</th>
+                </tr>
+              </thead>
+              <tbody>
+                {laps.map((lap, i) => (
+                  <tr key={i} className="border-t border-border/50">
+                    <td className="py-2 pl-2">
+                      <input
+                        type="checkbox"
+                        className="size-4"
+                        checked={selected.has(i)}
+                        onChange={() => toggleSelected(i)}
+                        aria-label={`Select lap ${i + 1}`}
+                      />
+                    </td>
+                    <td className="py-2 pr-2 tabular-nums">{i + 1}</td>
+                    <td className="py-2 pr-2 text-right tabular-nums">
+                      {metersToMi(lap.distance).toFixed(2)}
+                    </td>
+                    <td className="py-2 pr-2 text-right tabular-nums">
+                      {paceForLap(lap)}
+                    </td>
+                    <td className="py-2 pr-2 text-right tabular-nums">
+                      {lap.averageHR ?? "—"}
+                    </td>
+                    <td className="py-2 pr-2">
+                      <select
+                        className={SELECT_CLASS}
+                        value={categoryAt(i)}
+                        onChange={(e) =>
+                          updateLapCategory(i, e.target.value)
+                        }
+                        aria-label={`Lap ${i + 1} effort`}
+                      >
+                        {EFFORT_CATEGORIES.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {laps.map((lap, i) => (
-                    <tr key={i} className="border-t border-border/50">
-                      <td className="py-1 pl-2">
-                        <input
-                          type="checkbox"
-                          checked={selected.has(i)}
-                          onChange={() => toggleSelected(i)}
-                          aria-label={`Select lap ${i + 1}`}
-                        />
-                      </td>
-                      <td className="py-1 pr-2 tabular-nums">{i + 1}</td>
-                      <td className="py-1 pr-2 text-right tabular-nums">
-                        {metersToMi(lap.distance).toFixed(2)}
-                      </td>
-                      <td className="py-1 pr-2 text-right tabular-nums">
-                        {paceForLap(lap)}
-                      </td>
-                      <td className="py-1 pr-2 text-right tabular-nums">
-                        {lap.averageHR ?? "—"}
-                      </td>
-                      <td className="py-1 pr-2">
-                        <select
-                          className={SELECT_CLASS}
-                          value={categoryAt(i)}
-                          onChange={(e) =>
-                            updateLapCategory(i, e.target.value)
-                          }
-                          aria-label={`Lap ${i + 1} effort`}
-                        >
-                          {EFFORT_CATEGORIES.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
-        {mutation.isError && (
-          <p className="text-xs text-rose-700 dark:text-rose-300">
-            Save failed: {(mutation.error as Error).message}
-          </p>
-        )}
+      {mutation.isError && (
+        <p className="text-sm text-rose-700 dark:text-rose-300">
+          Save failed: {(mutation.error as Error).message}
+        </p>
+      )}
 
-        <div className="flex gap-2">
-          <Button
-            className="flex-1 gap-1.5"
-            onClick={onSave}
-            disabled={
-              mutation.isPending || lapsQuery.isLoading || laps.length === 0
-            }
-          >
-            <Check className="size-4" />
-            {mutation.isPending ? "Saving…" : "Save"}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={onClose}
-            disabled={mutation.isPending}
-          >
-            Cancel
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+      <div className="flex gap-2">
+        <Button
+          className="flex-1 gap-1.5"
+          onClick={onSave}
+          disabled={
+            mutation.isPending || lapsQuery.isLoading || laps.length === 0
+          }
+        >
+          <Check className="size-4" />
+          {mutation.isPending ? "Saving…" : "Save"}
+        </Button>
+        <Button
+          variant="outline"
+          onClick={onClose}
+          disabled={mutation.isPending}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }

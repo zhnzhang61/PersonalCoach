@@ -1,23 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { Pencil } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp, ClipboardEdit } from "lucide-react";
+import { apiGet } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 import { fmtDate } from "@/lib/format";
-import type { RunActivity } from "@/lib/types";
+import type { RunActivity, WeatherSnapshot } from "@/lib/types";
 import { EditRunForm } from "@/components/activity/edit-run-form";
+import { TelemetryCharts } from "@/components/activity/telemetry-charts";
 
 function metersToMi(m?: number): number {
   return (m ?? 0) / 1609.34;
-}
-
-function secToPace(seconds: number, miles: number): string {
-  if (seconds <= 0 || miles <= 0) return "—";
-  const dec = seconds / 60 / miles;
-  const min = Math.floor(dec);
-  const sec = Math.floor((dec - min) * 60);
-  return `${min}:${sec.toString().padStart(2, "0")}`;
 }
 
 export function RunCard({ run }: { run: RunActivity }) {
@@ -25,42 +21,51 @@ export function RunCard({ run }: { run: RunActivity }) {
   const name = meta.name || run.activityName || "Run";
   const dateStr = run.startTimeLocal?.slice(0, 10);
   const distMi = metersToMi(run.distance);
-  const durSec = run.movingDuration || run.duration || 0;
-  const pace = secToPace(durSec, distMi);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
-  const [editing, setEditing] = useState(false);
+  // Date + weather (date-level context) are merged into one line; distance
+  // and elevation (run-level facts) get the next line. Notes & per-lap
+  // effort editing stay folded inside Efforts & Coaching.
+  const [editorOpen, setEditorOpen] = useState(false);
 
-  if (editing) {
-    return <EditRunForm run={run} onClose={() => setEditing(false)} />;
+  const weatherQuery = useQuery({
+    queryKey: ["runs", run.activityId, "weather"],
+    queryFn: () => apiGet<WeatherSnapshot>(`/api/runs/${run.activityId}/weather`),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const w = weatherQuery.data;
+
+  // Drop "feels like" if it's within ~2°F of the dry temp — same threshold
+  // as the old WeatherStrip used.
+  const showFeels =
+    w?.apparent_temperature_f != null &&
+    w.temperature_f != null &&
+    Math.abs(w.apparent_temperature_f - w.temperature_f) >= 2;
+
+  const datePart = dateStr ? fmtDate(dateStr, "EEE MMM d") : "—";
+  const weatherSegments: string[] = [];
+  if (w?.temperature_f != null) {
+    weatherSegments.push(
+      showFeels
+        ? `${Math.round(w.temperature_f)}°F (feels ${Math.round(w.apparent_temperature_f!)}°F)`
+        : `${Math.round(w.temperature_f)}°F`,
+    );
   }
+  if (w?.humidity_pct != null) weatherSegments.push(`${w.humidity_pct}% humidity`);
 
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold">{name}</h3>
-            <p className="text-xs text-muted-foreground">
-              {dateStr ? fmtDate(dateStr, "EEE MMM d") : "—"} ·{" "}
-              {distMi.toFixed(2)} mi · {pace} /mi
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {run.averageHR ? (
-              <Badge variant="outline" className="text-[10px]">
-                {run.averageHR} bpm
-              </Badge>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="rounded-md border border-border bg-background p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-              aria-label="Edit run"
-            >
-              <Pencil className="size-3.5" />
-            </button>
-          </div>
+        <div className="min-w-0 space-y-0.5">
+          <h3 className="truncate text-base font-semibold">{name}</h3>
+          <p className="text-sm text-muted-foreground">
+            {[datePart, ...weatherSegments].join(" · ")}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {distMi.toFixed(2)} mi
+            {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
+          </p>
         </div>
 
         {breakdown.length > 0 ? (
@@ -69,7 +74,7 @@ export function RunCard({ run }: { run: RunActivity }) {
               <Badge
                 key={c.category}
                 variant="outline"
-                className="text-[10px] font-normal"
+                className="text-xs font-normal"
               >
                 {c.category} · {c.distance_mi.toFixed(1)}mi · {c.pace}
               </Badge>
@@ -77,15 +82,28 @@ export function RunCard({ run }: { run: RunActivity }) {
           </div>
         ) : null}
 
-        {meta.notes ? (
-          <p className="text-xs text-muted-foreground">{meta.notes}</p>
-        ) : null}
+        <Separator />
+        <TelemetryCharts activityId={run.activityId} />
 
-        {elevFt > 0 ? (
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            ↑ {elevFt.toLocaleString()} ft
-          </p>
-        ) : null}
+        <Separator />
+        <button
+          type="button"
+          onClick={() => setEditorOpen((v) => !v)}
+          className="flex items-center justify-center gap-1.5 rounded-md border border-border bg-background py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+          aria-expanded={editorOpen}
+        >
+          <ClipboardEdit className="size-4" />
+          Efforts & Coaching
+          {editorOpen ? (
+            <ChevronUp className="size-4" />
+          ) : (
+            <ChevronDown className="size-4" />
+          )}
+        </button>
+
+        {editorOpen && (
+          <EditRunForm run={run} onClose={() => setEditorOpen(false)} />
+        )}
       </CardContent>
     </Card>
   );

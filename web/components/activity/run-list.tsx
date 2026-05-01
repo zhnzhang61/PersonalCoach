@@ -12,10 +12,6 @@ import { RunCard } from "@/components/activity/run-card";
 import { ManualActivityCard } from "@/components/activity/manual-activity-card";
 import { useCurrentWeek } from "@/lib/hooks/use-current-week";
 
-function isRun(r: RunActivity): boolean {
-  return Boolean(r.activityType?.typeKey?.includes("running"));
-}
-
 type RunItem = { kind: "run"; date: string; payload: RunActivity };
 type ManualItem = {
   kind: "manual";
@@ -50,7 +46,7 @@ export function RunList() {
     );
   }
 
-  const runs = (runsQuery.data?.runs ?? []).filter(isRun);
+  const runs = runsQuery.data?.runs ?? [];
   const manuals = manualQuery.data?.activities ?? [];
 
   const items: FeedItem[] = [

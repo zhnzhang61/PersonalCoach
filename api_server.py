@@ -378,6 +378,12 @@ def runs(
     if not start or not end:
         start, end = _default_window()
     rows = processor.get_activities_in_range(start, end)
+    # The endpoint is /api/runs so filter to running here — keeps the
+    # frontend out of Garmin's typeKey schema.
+    rows = [
+        r for r in rows
+        if "running" in ((r.get("activityType") or {}).get("typeKey") or "")
+    ]
     return {"start": start, "end": end, "runs": rows}
 
 
@@ -408,7 +414,20 @@ def run_telemetry(activity_id: int, downsample_sec: int = 10) -> dict[str, Any]:
     return {
         "raw": raw.to_dict(orient="records"),
         "ai": ai.to_dict(orient="records") if ai is not None else [],
+        "summary": processor.compute_telemetry_summary(raw),
+        "pace_clip": list(processor.PACE_CLIP_MIN_PER_MI),
     }
+
+
+@app.get("/api/runs/{activity_id}/weather")
+def run_weather(activity_id: int) -> dict[str, Any]:
+    w = processor.get_run_weather(activity_id)
+    if w is None:
+        raise HTTPException(
+            404,
+            "Weather unavailable (run has no GPS, missing details, or fetch failed)",
+        )
+    return w
 
 
 @app.get("/api/runs/{activity_id}/laps")
