@@ -377,7 +377,7 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
 
   return (
     <div className="space-y-2">
-      <div className="-mx-1 flex gap-1 overflow-x-auto pb-1">
+      <div className="-mx-1 flex gap-1 overflow-x-auto pb-1 [&::-webkit-scrollbar]:hidden [scrollbar-width:none]">
         {metrics.map((m) => {
           const idx = active.indexOf(m.key);
           const isActive = idx >= 0;

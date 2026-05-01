@@ -989,6 +989,62 @@ class DataProcessor:
     def get_run_chat_history(self, activity_id):
         return self.load_json_safe(self.paths['manual'], f"run_{activity_id}_chat.json") or []
 
+    def get_run_route(self, activity_id, max_points: int = 500) -> dict | None:
+        """
+        Extract a downsampled GPS path for the run, ready to render on a map.
+
+        Garmin gives us a per-second polyline (often 2-3k points for a long
+        run); we downsample to roughly max_points by stride-sampling so the
+        wire payload stays small and the canvas stays snappy on phone. Start
+        and end coordinates are always preserved exactly.
+
+        Returns None for runs without GPS (treadmill / indoor / details file
+        missing) so the UI can degrade to "no map" gracefully.
+        """
+        details_path = os.path.join(self.paths['details'], f"{activity_id}.json")
+        if not os.path.exists(details_path):
+            return None
+        try:
+            with open(details_path) as f:
+                details = json.load(f)
+        except Exception:
+            return None
+
+        geo = details.get('geoPolylineDTO') or {}
+        polyline = geo.get('polyline') or []
+        if not polyline:
+            return None
+
+        pts: list[list[float]] = []
+        for p in polyline:
+            lat = p.get('lat')
+            lon = p.get('lon')
+            if lat is None or lon is None:
+                continue
+            pts.append([float(lat), float(lon)])
+        if len(pts) < 2:
+            return None
+
+        if len(pts) > max_points:
+            stride = len(pts) / max_points
+            sampled = [pts[int(i * stride)] for i in range(max_points)]
+            # Pin the literal end point so the rendered path doesn't stop short.
+            sampled[-1] = pts[-1]
+            pts = sampled
+
+        return {
+            "activity_id": activity_id,
+            "polyline": pts,
+            "start": pts[0],
+            "end": pts[-1],
+            "bounds": {
+                "min_lat": geo.get('minLat'),
+                "max_lat": geo.get('maxLat'),
+                "min_lon": geo.get('minLon'),
+                "max_lon": geo.get('maxLon'),
+            },
+        }
+
     def get_run_weather(self, activity_id) -> dict | None:
         """
         Look up temperature + humidity at the run's start, via Open-Meteo's

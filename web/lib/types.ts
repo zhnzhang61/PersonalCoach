@@ -301,6 +301,21 @@ export interface TelemetryResponse {
   pace_clip: [number, number]; // min/mi bounds applied when computing pace stats
 }
 
+export type LatLng = [number, number]; // [lat, lon]
+
+export interface RouteResponse {
+  activity_id: number;
+  polyline: LatLng[];
+  start: LatLng;
+  end: LatLng;
+  bounds: {
+    min_lat: number | null;
+    max_lat: number | null;
+    min_lon: number | null;
+    max_lon: number | null;
+  };
+}
+
 export interface WeatherSnapshot {
   activity_id: number;
   lat: number;
