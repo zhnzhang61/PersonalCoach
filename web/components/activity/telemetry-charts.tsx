@@ -318,16 +318,20 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
 
   // Up to two metrics overlay on the chart. active[0] owns the left Y axis,
   // active[1] (when present) the right. Click rules:
-  //   • click active[0]               → no-op (must always have ≥1)
-  //   • click active[1]               → drop it (back to single)
-  //   • click anything else, len 1    → add as secondary
-  //   • click anything else, len 2    → swap into the secondary slot
+  //   • already-selected, len 2  → drop it (whichever slot it was in)
+  //   • already-selected, len 1  → no-op (must always keep ≥1)
+  //   • not selected,    len 1   → add as secondary
+  //   • not selected,    len 2   → swap into the secondary slot
+  // When the primary is dropped from a 2-up view, the surviving metric
+  // takes over the left axis on the next render.
   const [active, setActive] = useState<TelemetrySummaryKey[]>(["HeartRate"]);
 
   const onTabClick = (key: TelemetrySummaryKey) => {
     setActive((prev) => {
-      if (prev[0] === key) return prev;
-      if (prev[1] === key) return [prev[0]];
+      const isSelected = prev.includes(key);
+      if (isSelected) {
+        return prev.length === 1 ? prev : prev.filter((k) => k !== key);
+      }
       if (prev.length === 1) return [prev[0], key];
       return [prev[0], key];
     });
