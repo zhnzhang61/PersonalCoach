@@ -431,7 +431,12 @@ def run_weather(activity_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/runs/{activity_id}/route")
-def run_route(activity_id: int, max_points: int = 500) -> dict[str, Any]:
+def run_route(
+    activity_id: int,
+    # Need ≥2 to render a line; cap at 5000 to keep payloads sane on phone.
+    # FastAPI returns 422 outside the range, so bad input doesn't 500 the API.
+    max_points: int = Query(default=500, ge=2, le=5000),
+) -> dict[str, Any]:
     route = processor.get_run_route(activity_id, max_points=max_points)
     if route is None:
         raise HTTPException(
