@@ -2,6 +2,12 @@
 data/
 *.fit
 
+# 运行时日志
+logs/
+
+# Claude worktrees 和会话产物
+.claude/worktrees/
+
 # 环境变量和秘钥
 .env
 
