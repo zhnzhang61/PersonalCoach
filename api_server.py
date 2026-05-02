@@ -369,6 +369,17 @@ def list_manual_activities(
     return {"start": start, "end": end, "activities": processor.get_manual_activities_in_range(start, end)}
 
 
+@app.get("/api/manual-activities/{activity_id}")
+def get_manual_activity(activity_id: str) -> dict[str, Any]:
+    rows = processor.load_json_safe(processor.paths["aux"])
+    if isinstance(rows, dict):
+        rows = []
+    for r in rows:
+        if r.get("id") == activity_id:
+            return r
+    raise HTTPException(404, f"Manual activity {activity_id} not found")
+
+
 @app.post("/api/manual-activities")
 def create_manual_activity(body: ManualActivityCreate) -> dict[str, Any]:
     entry = processor.add_manual_activity(
