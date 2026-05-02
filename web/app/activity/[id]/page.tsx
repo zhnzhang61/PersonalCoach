@@ -37,8 +37,11 @@ export default function ActivityDetailPage({
   const { id } = use(params);
   const activityId = Number(id);
 
+  // Key shape mirrors the other run sub-resources (weather/route/laps/
+  // telemetry) so EditRunForm's `invalidateQueries({ queryKey: ["runs"] })`
+  // refetches this after a save without needing its own explicit entry.
   const detailQuery = useQuery({
-    queryKey: ["run-detail", activityId],
+    queryKey: ["runs", activityId, "detail"],
     queryFn: () => apiGet<RunDetailResponse>(`/api/runs/${activityId}`),
     enabled: Number.isFinite(activityId),
   });
