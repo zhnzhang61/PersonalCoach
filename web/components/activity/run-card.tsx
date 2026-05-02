@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
-import { ChevronDown, ChevronUp, ClipboardEdit } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -11,8 +10,6 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate } from "@/lib/format";
 import type { RunActivity, WeatherSnapshot } from "@/lib/types";
-import { EditRunForm } from "@/components/activity/edit-run-form";
-import { TelemetryCharts } from "@/components/activity/telemetry-charts";
 
 // react-leaflet imports leaflet at module load, and leaflet touches `window`
 // during init — so we hold it back from SSR. Skeleton during hydration.
@@ -35,10 +32,6 @@ export function RunCard({ run }: { run: RunActivity }) {
   const distMi = metersToMi(run.distance);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const breakdown = meta.category_stats ?? [];
-  // Date + weather (date-level context) are merged into one line; distance
-  // and elevation (run-level facts) get the next line. Notes & per-lap
-  // effort editing stay folded inside Efforts & Coaching.
-  const [editorOpen, setEditorOpen] = useState(false);
 
   const weatherQuery = useQuery({
     queryKey: ["runs", run.activityId, "weather"],
@@ -67,57 +60,41 @@ export function RunCard({ run }: { run: RunActivity }) {
   if (w?.humidity_pct != null) weatherSegments.push(`${w.humidity_pct}% humidity`);
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 p-4">
-        <div className="min-w-0 space-y-0.5">
-          <h3 className="truncate text-base font-semibold">{name}</h3>
-          <p className="text-sm text-muted-foreground">
-            {[datePart, ...weatherSegments].join(" · ")}
-          </p>
-          <p className="text-sm text-muted-foreground">
-            {distMi.toFixed(2)} mi
-            {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
-          </p>
-        </div>
-
-        {breakdown.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5">
-            {breakdown.map((c) => (
-              <Badge
-                key={c.category}
-                variant="outline"
-                className="text-xs font-normal"
-              >
-                {c.category} · {c.distance_mi.toFixed(1)}mi · {c.pace}
-              </Badge>
-            ))}
+    <Link
+      href={`/activity/${run.activityId}`}
+      className="block rounded-xl transition-colors hover:bg-muted/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-warm-accent/40"
+    >
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-4">
+          <div className="min-w-0 space-y-0.5">
+            <h3 className="truncate text-base font-semibold">{name}</h3>
+            <p className="text-sm text-muted-foreground">
+              {[datePart, ...weatherSegments].join(" · ")}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {distMi.toFixed(2)} mi
+              {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
+            </p>
           </div>
-        ) : null}
 
-        <Separator />
-        <RunMap activityId={run.activityId} />
-        <TelemetryCharts activityId={run.activityId} />
+          {breakdown.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {breakdown.map((c) => (
+                <Badge
+                  key={c.category}
+                  variant="outline"
+                  className="text-xs font-normal"
+                >
+                  {c.category} · {c.distance_mi.toFixed(1)}mi · {c.pace}
+                </Badge>
+              ))}
+            </div>
+          ) : null}
 
-        <Separator />
-        <button
-          type="button"
-          onClick={() => setEditorOpen((v) => !v)}
-          className="flex items-center justify-center gap-1.5 rounded-md border border-border bg-background py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
-          aria-expanded={editorOpen}
-        >
-          <ClipboardEdit className="size-4" />
-          Efforts & Coaching
-          {editorOpen ? (
-            <ChevronUp className="size-4" />
-          ) : (
-            <ChevronDown className="size-4" />
-          )}
-        </button>
-
-        {editorOpen && (
-          <EditRunForm run={run} onClose={() => setEditorOpen(false)} />
-        )}
-      </CardContent>
-    </Card>
+          <Separator />
+          <RunMap activityId={run.activityId} interactive={false} />
+        </CardContent>
+      </Card>
+    </Link>
   );
 }
