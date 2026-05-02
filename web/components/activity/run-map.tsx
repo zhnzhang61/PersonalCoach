@@ -31,7 +31,13 @@ const ROUTE_COLOR = "#fc4c02";
 const START_COLOR = "#16a34a";
 const END_COLOR = "#dc2626";
 
-export function RunMap({ activityId }: { activityId: number }) {
+export function RunMap({
+  activityId,
+  interactive = true,
+}: {
+  activityId: number;
+  interactive?: boolean;
+}) {
   const [styleId, setStyleId] = useState<StyleId>("outdoors-v12");
   const [fullscreen, setFullscreen] = useState(false);
   const mapRef = useRef<MapRef>(null);
@@ -143,6 +149,7 @@ export function RunMap({ activityId }: { activityId: number }) {
         mapStyle={`mapbox://styles/mapbox/${styleId}`}
         style={{ width: "100%", height: "100%" }}
         attributionControl={false}
+        interactive={interactive}
         terrain={useTerrain ? { source: "mapbox-dem", exaggeration: 1.2 } : undefined}
       >
         <Source
@@ -194,7 +201,11 @@ export function RunMap({ activityId }: { activityId: number }) {
         Fullscreen pushes overlay buttons below the iPhone Dynamic Island /
         status bar via safe-area-inset-top. Inline mode sits inside the run
         card's normal padding, so 0.5rem is fine there.
+
+        Preview-card map renders non-interactive (no style/fullscreen chrome)
+        so the wrapping Link captures all taps cleanly.
       */}
+      {interactive && (
       <div
         className="absolute right-2 flex gap-1 rounded-md bg-background/90 p-1 shadow-sm backdrop-blur"
         style={{
@@ -219,7 +230,9 @@ export function RunMap({ activityId }: { activityId: number }) {
           </button>
         ))}
       </div>
+      )}
 
+      {interactive && (
       <button
         type="button"
         onClick={() => setFullscreen((v) => !v)}
@@ -236,6 +249,7 @@ export function RunMap({ activityId }: { activityId: number }) {
       >
         {fullscreen ? <X className="size-5" /> : <Maximize2 className="size-4" />}
       </button>
+      )}
     </div>
   );
 }

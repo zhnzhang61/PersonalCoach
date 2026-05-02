@@ -223,6 +223,12 @@ export interface RunsResponse {
   runs: RunActivity[];
 }
 
+export interface RunDetailResponse {
+  run: RunActivity;
+  laps: unknown[];
+  chat_history: unknown;
+}
+
 // Effort categories — must match data_processor.calculate_category_stats /
 // dashboard's lap-categorize dropdown. Keep in lockstep.
 export const EFFORT_CATEGORIES = [

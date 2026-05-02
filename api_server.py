@@ -435,8 +435,7 @@ def run_detail(activity_id: int) -> dict[str, Any]:
 
     laps = processor.get_run_laps(activity_id)
     return {
-        "summary": summary,
-        "meta": meta,
+        "run": {**summary, "manual_meta": meta},
         "laps": laps,
         "chat_history": processor.get_run_chat_history(activity_id),
     }
