@@ -656,14 +656,23 @@ class DataProcessor:
             json.dump(current, f, indent=4)
         return entry
 
+    # Fields that are allowed to be cleared by passing None. Everything else
+    # is structurally required — letting a caller null them would leave a
+    # malformed record that breaks date-range filters and renders blank.
+    _MANUAL_NULLABLE_FIELDS = {"duration_min", "distance_mi"}
+
     def update_manual_activity(self, activity_id, **fields) -> dict | None:
         """
         Patch a manual activity in place. `fields` may include date,
         type (canonicalised against VALID_TYPES), description (saved as
-        `desc` in the file for legacy compatibility), duration_min,
-        distance_mi. A field set to None is removed from the entry
-        (i.e. user cleared it). Returns the updated entry, or None if
-        no record matched activity_id.
+        `desc` on disk for legacy compatibility), duration_min, distance_mi.
+
+        Passing None clears optional fields (duration_min / distance_mi).
+        Passing None for a required field (date / type / desc) raises
+        ValueError instead of removing it — the API layer turns that into
+        a 400 so a malformed body can't corrupt the record.
+
+        Returns the updated entry, or None if no record matched activity_id.
         """
         with open(self.paths['aux'], 'r') as f:
             current = json.load(f)
@@ -680,6 +689,8 @@ class DataProcessor:
                 if k == 'id':
                     continue
                 if v is None:
+                    if k not in self._MANUAL_NULLABLE_FIELDS:
+                        raise ValueError(f"Cannot clear required field '{k}'")
                     entry.pop(k, None)
                 else:
                     entry[k] = v
