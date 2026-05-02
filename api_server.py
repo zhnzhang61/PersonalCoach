@@ -132,6 +132,17 @@ class ManualActivityCreate(BaseModel):
     distance_mi: float | None = None
 
 
+class ManualActivityUpdate(BaseModel):
+    # All optional — user might rename without touching duration etc.
+    # Pydantic's exclude_unset preserves the difference between "not in
+    # body" (no change) and "explicit null" (clear the field).
+    date: str | None = None
+    type: Literal["run", "swim", "gym", "other"] | None = None
+    description: str | None = None
+    duration_min: float | None = None
+    distance_mi: float | None = None
+
+
 class BlockCreate(BaseModel):
     name: str
     start_date: str
@@ -368,6 +379,27 @@ def create_manual_activity(body: ManualActivityCreate) -> dict[str, Any]:
         distance_mi=body.distance_mi,
     )
     return {"ok": True, "activity": entry}
+
+
+@app.put("/api/manual-activities/{activity_id}")
+def update_manual_activity_endpoint(
+    activity_id: str, body: ManualActivityUpdate
+) -> dict[str, Any]:
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(400, "No fields to update")
+    entry = processor.update_manual_activity(activity_id, **fields)
+    if entry is None:
+        raise HTTPException(404, f"Manual activity {activity_id} not found")
+    return {"ok": True, "activity": entry}
+
+
+@app.delete("/api/manual-activities/{activity_id}")
+def delete_manual_activity_endpoint(activity_id: str) -> dict[str, Any]:
+    ok = processor.delete_manual_activity(activity_id)
+    if not ok:
+        raise HTTPException(404, f"Manual activity {activity_id} not found")
+    return {"ok": True, "id": activity_id}
 
 
 @app.get("/api/runs")

@@ -656,6 +656,48 @@ class DataProcessor:
             json.dump(current, f, indent=4)
         return entry
 
+    def update_manual_activity(self, activity_id, **fields) -> dict | None:
+        """
+        Patch a manual activity in place. `fields` may include date,
+        type (canonicalised against VALID_TYPES), description (saved as
+        `desc` in the file for legacy compatibility), duration_min,
+        distance_mi. A field set to None is removed from the entry
+        (i.e. user cleared it). Returns the updated entry, or None if
+        no record matched activity_id.
+        """
+        with open(self.paths['aux'], 'r') as f:
+            current = json.load(f)
+        for entry in current:
+            if entry.get('id') != activity_id:
+                continue
+            if 'type' in fields and fields['type'] is not None:
+                t = fields['type']
+                fields['type'] = t if t in ManualActivity.VALID_TYPES else "other"
+            # Frontend sends `description`; on disk we use `desc` for legacy reasons.
+            if 'description' in fields:
+                fields['desc'] = fields.pop('description')
+            for k, v in fields.items():
+                if k == 'id':
+                    continue
+                if v is None:
+                    entry.pop(k, None)
+                else:
+                    entry[k] = v
+            with open(self.paths['aux'], 'w') as f:
+                json.dump(current, f, indent=4)
+            return entry
+        return None
+
+    def delete_manual_activity(self, activity_id) -> bool:
+        with open(self.paths['aux'], 'r') as f:
+            current = json.load(f)
+        remaining = [e for e in current if e.get('id') != activity_id]
+        if len(remaining) == len(current):
+            return False
+        with open(self.paths['aux'], 'w') as f:
+            json.dump(remaining, f, indent=4)
+        return True
+
     def compute_cycle_and_week_stats(self, block_id, week_start, week_end):
         """
         Aggregate cycle-level stats and the selected-week summary for the
