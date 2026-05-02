@@ -114,12 +114,15 @@ class GarminSync:
               f"{len(self.activity_methods)} Activity, {len(self.range_methods)} Range, {len(self.special_methods)} Special.")
 
     def _save(self, data, method_name, filename):
+        # Whether to (re-)fetch is decided by the caller; once data is in
+        # hand, always write it. The legacy "skip if file exists" guard here
+        # silently dropped re-syncs of today's sleep/HRV when an earlier sync
+        # had landed an empty husk before Garmin's cloud caught up.
         if not data: return
         folder_path = os.path.join(self.data_dir, method_name)
         os.makedirs(folder_path, exist_ok=True)
-        if not os.path.exists(os.path.join(folder_path, filename)):
-            with open(os.path.join(folder_path, filename), 'w') as f:
-                json.dump(data, f, indent=4, default=str)
+        with open(os.path.join(folder_path, filename), 'w') as f:
+            json.dump(data, f, indent=4, default=str)
 
     def run_sync(self, days_back=7, activity_limit=20):
         today = datetime.date.today().isoformat()
@@ -155,12 +158,21 @@ class GarminSync:
             except: pass
 
         # Group 2: Daily
+        # Today's and yesterday's data is fluid — the watch can take hours to
+        # finish uploading last night's sleep, HRV, readiness etc. Always
+        # re-fetch those two days so we pick up data that wasn't ready when
+        # an earlier sync ran. Files older than that are stable; existence
+        # check is fine and saves API calls.
         print(f"⬇️ Syncing Daily Data ({days_back} days)...")
+        today_iso = datetime.date.today().isoformat()
+        yesterday_iso = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        always_refetch = {today_iso, yesterday_iso}
         for i in range(days_back):
             d = (datetime.date.today() - datetime.timedelta(days=i)).isoformat()
             for method, arg_name in self.daily_methods:
                 try:
-                    if not os.path.exists(os.path.join(self.data_dir, method, f"{d}.json")):
+                    file_path = os.path.join(self.data_dir, method, f"{d}.json")
+                    if d in always_refetch or not os.path.exists(file_path):
                         print(f"   > Calling: {method}({d})...")
                         self._save(getattr(self.client, method)(**{arg_name: d}), method, f"{d}.json")
                         time.sleep(0.05)
