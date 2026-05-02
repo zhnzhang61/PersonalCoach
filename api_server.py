@@ -388,7 +388,12 @@ def update_manual_activity_endpoint(
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(400, "No fields to update")
-    entry = processor.update_manual_activity(activity_id, **fields)
+    try:
+        entry = processor.update_manual_activity(activity_id, **fields)
+    except ValueError as e:
+        # Trying to null out a required field (date/type/desc) — caught here
+        # rather than letting a malformed record land on disk.
+        raise HTTPException(400, str(e))
     if entry is None:
         raise HTTPException(404, f"Manual activity {activity_id} not found")
     return {"ok": True, "activity": entry}
