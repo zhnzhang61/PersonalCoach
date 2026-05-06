@@ -348,9 +348,14 @@ def _render_training_log_body():
                 for cat in cs:
                     wk_cat_totals[cat['category']] += cat['distance_mi']
 
-        # Compare to cycle average per week
-        elapsed_weeks = max(1, current_week['week_num'])
-        avg_weekly_miles = cycle_miles / elapsed_weeks if elapsed_weeks > 0 else 0
+        # Compare to cycle average per week. Count weeks already started by
+        # today, not the selected week's number — otherwise AVG/WEEK shifts
+        # whenever the user clicks a different week in the dropdown.
+        today_iso = datetime.date.today().isoformat()
+        elapsed_weeks = max(
+            1, sum(1 for w in all_week_labels if w["start"] <= today_iso)
+        )
+        avg_weekly_miles = cycle_miles / elapsed_weeks
 
         return {
             'cycle': {
