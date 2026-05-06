@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, Brush, CartesianGrid, XAxis, YAxis } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ChartContainer,
@@ -159,7 +159,7 @@ export function MonthlyChart() {
           </p>
         ) : (
           <ChartContainer config={chartConfig} className="h-64 w-full">
-            <BarChart data={months}>
+            <BarChart key={`${activity}-${months.length}`} data={months}>
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis
                 dataKey="month"
@@ -208,6 +208,28 @@ export function MonthlyChart() {
                 radius={[3, 3, 0, 0]}
                 fill="var(--chart-1)"
               />
+              {/*
+                Default to the most recent 12 months — older history stays
+                accessible by dragging the brush back. Past 12 bars on a
+                phone gets too cramped to read individual months.
+
+                Brush only honours startIndex/endIndex on its first mount,
+                so we key the chart on (activity, months.length) to force
+                a remount when the underlying data range changes (e.g.
+                switching Run → Swim collapses 23 months → 9, and we want
+                the new default window, not the old indices).
+              */}
+              {months.length > 12 && (
+                <Brush
+                  dataKey="month"
+                  height={20}
+                  stroke="var(--muted-foreground)"
+                  travellerWidth={8}
+                  tickFormatter={fmtMonth}
+                  startIndex={Math.max(0, months.length - 12)}
+                  endIndex={months.length - 1}
+                />
+              )}
             </BarChart>
           </ChartContainer>
         )}
