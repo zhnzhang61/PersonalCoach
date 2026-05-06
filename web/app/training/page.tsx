@@ -1,7 +1,8 @@
-import { Calendar, History, Sparkles, Target } from "lucide-react";
+import { Calendar, Sparkles, Target } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { TrainingSelector } from "@/components/training-selector";
 import { CycleOverview } from "@/components/training/cycle-overview";
+import { MonthlyChart } from "@/components/training/monthly-chart";
 import { PlaceholderCard } from "@/components/training/placeholder-card";
 
 export default function TrainingPage() {
@@ -11,11 +12,7 @@ export default function TrainingPage() {
       <div className="space-y-4 px-5 pb-8 sm:px-8">
         <TrainingSelector />
         <CycleOverview />
-        <PlaceholderCard
-          Icon={History}
-          title="Historical stats"
-          description="Compare cycles side by side — total mileage, peak weeks, effort mix."
-        />
+        <MonthlyChart />
         <PlaceholderCard
           Icon={Calendar}
           title="Plan calendar"

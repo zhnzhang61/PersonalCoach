@@ -709,6 +709,112 @@ class DataProcessor:
             json.dump(remaining, f, indent=4)
         return True
 
+    def get_monthly_activity_stats(self, activity_type: str = "all") -> list[dict]:
+        """Monthly aggregates across data/get_activities/ for the historical
+        chart on the Training tab.
+
+        activity_type:
+          - "all"      → every activity
+          - "running"  → any typeKey containing "running" — matches what
+                         RunActivity.is_run_dict and /api/runs use, so
+                         trail_running / virtual_running / future Garmin
+                         run-flavored types stay in agreement with the
+                         rest of the app instead of vanishing from this
+                         chart only.
+          - other      → exact Garmin typeKey match (e.g. "lap_swimming")
+
+        Returns a list sorted by month ascending. Designed to feed both the
+        chart and future AI prompts — numeric fields (miles / hours /
+        elevation_ft / avg_pace_dec / avg_hr) for plotting, plus a
+        pre-formatted avg_pace string ("9:25") so prompt-builders can drop
+        the row into a sentence without re-implementing pace formatting.
+        """
+        from collections import defaultdict
+
+        path = self.paths["activities"]
+        if not os.path.exists(path):
+            return []
+
+        bucket = lambda: {
+            "miles": 0.0,
+            "duration_s": 0.0,
+            "elev_m": 0.0,
+            "hr_weighted_sum": 0.0,
+            "hr_weight": 0.0,
+            "count": 0,
+        }
+        by_month: dict[str, dict] = defaultdict(bucket)
+
+        for fname in os.listdir(path):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(path, fname)) as jf:
+                    content = json.load(jf)
+            except Exception:
+                continue
+            rows = content if isinstance(content, list) else [content]
+            for r in rows:
+                type_key = (r.get("activityType") or {}).get("typeKey") or ""
+                if activity_type == "running":
+                    if not RunActivity.is_run_dict(r):
+                        continue
+                elif activity_type != "all" and type_key != activity_type:
+                    continue
+
+                date_str = r.get("startTimeLocal") or ""
+                if len(date_str) < 7:
+                    continue
+                month = date_str[:7]
+
+                dist_m = r.get("distance") or 0
+                # movingDuration is rest-stripped; duration is wall clock —
+                # match what cycle stats uses so monthly + cycle agree on
+                # totals when they overlap.
+                dur_s = r.get("movingDuration") or r.get("duration") or 0
+                elev_m = r.get("elevationGain") or 0
+                hr = r.get("averageHR") or 0
+
+                b = by_month[month]
+                b["miles"] += dist_m / 1609.34
+                b["duration_s"] += dur_s
+                b["elev_m"] += elev_m
+                # Avg HR is weighted by duration so a long easy run doesn't
+                # get washed out by a 10-min stride workout in the same month.
+                if hr > 0 and dur_s > 0:
+                    b["hr_weighted_sum"] += hr * dur_s
+                    b["hr_weight"] += dur_s
+                b["count"] += 1
+
+        out: list[dict] = []
+        for month in sorted(by_month):
+            b = by_month[month]
+            miles = b["miles"]
+            # Pace is total time / total distance, in min/mi. Only meaningful
+            # when there's distance — leave it None for stair-climbing etc.
+            avg_pace_dec = (b["duration_s"] / 60 / miles) if miles > 0 else None
+            avg_hr = (
+                round(b["hr_weighted_sum"] / b["hr_weight"])
+                if b["hr_weight"] > 0
+                else None
+            )
+            avg_pace_str = (
+                f"{int(avg_pace_dec)}:{int((avg_pace_dec % 1) * 60):02d}"
+                if avg_pace_dec
+                else None
+            )
+            out.append({
+                "month": month,
+                "count": b["count"],
+                "miles": round(miles, 1),
+                "hours": round(b["duration_s"] / 3600, 1),
+                "elevation_ft": int(b["elev_m"] * 3.281),
+                "avg_pace_dec": round(avg_pace_dec, 2) if avg_pace_dec else None,
+                "avg_pace": avg_pace_str,
+                "avg_hr": avg_hr,
+            })
+        return out
+
     def compute_cycle_and_week_stats(self, block_id, week_start, week_end):
         """
         Aggregate cycle-level stats and the selected-week summary for the
