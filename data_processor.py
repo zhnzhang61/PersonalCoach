@@ -803,8 +803,14 @@ class DataProcessor:
         wk_avg_hr = sum(wk_hrs) / len(wk_hrs) if wk_hrs else 0
         wk_pace_dec = (wk_time_sec / (wk_miles * 60)) if wk_miles > 0 else 0
 
-        elapsed_weeks = max(1, current_week_num)
-        avg_weekly_miles = cycle_miles / elapsed_weeks if elapsed_weeks > 0 else 0
+        # Old: `max(1, current_week_num)` — divisor depended on which week
+        # the user clicked, so AVG/WEEK shifted with the dropdown. The cycle
+        # average is a property of the cycle, not the viewing context. Count
+        # weeks that have already started today to get a stable per-cycle
+        # number that doesn't drift as the user navigates.
+        today_iso = datetime.date.today().isoformat()
+        elapsed_weeks = max(1, sum(1 for w in weeks if w["start"] <= today_iso))
+        avg_weekly_miles = cycle_miles / elapsed_weeks
 
         return {
             'block_id': block_id,
