@@ -48,7 +48,11 @@ export function LapTable({ activityId }: { activityId: number }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-md border border-border">
+    // overflow-x-auto rather than overflow-hidden: the Effort badge has
+    // whitespace-nowrap, so on narrower phones (or for legacy free-form
+    // category labels) the rightmost column would otherwise be clipped
+    // silently. Auto-scroll keeps the data reachable instead.
+    <div className="overflow-x-auto rounded-md border border-border">
       <table className="w-full text-left text-sm">
         <thead className="bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
           <tr>
