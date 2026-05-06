@@ -102,11 +102,13 @@ function downsampleEvery(rows: TelemetryRow[], step: number): TelemetryRow[] {
   return rows.filter((_, i) => i % step === 0);
 }
 
+type XMode = "time" | "distance";
+
 // Stable, locale-free time format. Always colon-delimited so labels can't
 // be confused with distance ("75m" used to read as 75 metres).
 //   < 1h:  MM:SS   (e.g. "25:00", "99:10")
 //   ≥ 1h:  H:MM    (e.g. "1:15"; appends ":SS" only when seconds non-zero)
-const xTickFormatter = (v: number | string | undefined) => {
+const fmtTimeTick = (v: number | string | undefined) => {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return "";
   const total = Math.round(n);
@@ -120,14 +122,31 @@ const xTickFormatter = (v: number | string | undefined) => {
   return `${m}:${String(s).padStart(2, "0")}`;
 };
 
+// Miles, one decimal under 10mi; whole numbers above that. Keeps tick
+// width steady so labels don't visually jiggle as ticks scroll past.
+const fmtDistanceTick = (v: number | string | undefined) => {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return "";
+  return n >= 10 && n % 1 < 0.05 ? `${Math.round(n)}` : n.toFixed(1);
+};
+
+const xKeyFor = (mode: XMode): "Second" | "Distance" =>
+  mode === "time" ? "Second" : "Distance";
+const xTickFor = (mode: XMode) =>
+  mode === "time" ? fmtTimeTick : fmtDistanceTick;
+
 interface ChartPaneProps {
   rows: TelemetryRow[];
   // 1 spec → single-axis chart (area allowed for elevation).
   // 2 specs → dual-axis line chart; first goes on the left, second on the right.
   specs: MetricSpec[];
+  // x-axis mode: "time" plots seconds, "distance" plots cumulative miles.
+  xMode: XMode;
 }
 
-function ChartPane({ rows, specs }: ChartPaneProps) {
+function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
+  const xKey = xKeyFor(xMode);
+  const xTickFormatter = xTickFor(xMode);
   const primary = specs[0];
   const secondary = specs[1] ?? null;
   const config: ChartConfig = {
@@ -159,7 +178,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
         <AreaChart data={rows}>
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
           <XAxis
-            dataKey="Second"
+            dataKey={xKey}
             tickLine={false}
             axisLine={false}
             tickMargin={6}
@@ -180,7 +199,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
             content={
               <ChartTooltipContent
                 labelFormatter={(_v, payload) =>
-                  xTickFormatter(payload?.[0]?.payload?.Second)
+                  xTickFormatter(payload?.[0]?.payload?.[xKey])
                 }
               />
             }
@@ -195,7 +214,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
             isAnimationActive={false}
           />
           <Brush
-            dataKey="Second"
+            dataKey={xKey}
             height={20}
             stroke="var(--muted-foreground)"
             travellerWidth={8}
@@ -232,7 +251,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
       <LineChart data={rows}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis
-          dataKey="Second"
+          dataKey={xKey}
           tickLine={false}
           axisLine={false}
           tickMargin={6}
@@ -247,7 +266,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
           content={
             <ChartTooltipContent
               labelFormatter={(_v, payload) =>
-                xTickFormatter(payload?.[0]?.payload?.Second)
+                xTickFormatter(payload?.[0]?.payload?.[xKey])
               }
             />
           }
@@ -293,7 +312,7 @@ function ChartPane({ rows, specs }: ChartPaneProps) {
           />
         )}
         <Brush
-          dataKey="Second"
+          dataKey={xKey}
           height={20}
           stroke="var(--muted-foreground)"
           travellerWidth={8}
@@ -325,6 +344,10 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   // When the primary is dropped from a 2-up view, the surviving metric
   // takes over the left axis on the next render.
   const [active, setActive] = useState<TelemetrySummaryKey[]>(["HeartRate"]);
+  // Garmin-style time/distance toggle. Default to time — runs without GPS
+  // (treadmill, indoor) won't have distance, so we fall back to time below
+  // even if the user previously picked distance.
+  const [xMode, setXMode] = useState<XMode>("time");
 
   const onTabClick = (key: TelemetrySummaryKey) => {
     setActive((prev) => {
@@ -359,7 +382,27 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
     m.key === "Pace" ? { ...m, yDomain: paceClip } : m,
   );
 
-  const rows = downsampleEvery(data.raw ?? [], 2);
+  const rawRows = data.raw ?? [];
+  // Distance mode is only useful if we actually have GPS distance samples
+  // (indoor / treadmill runs come back without sumDistance). Hide the
+  // toggle and force time when there's no usable distance series.
+  const distanceAvailable = rawRows.some(
+    (r) => typeof r.Distance === "number" && Number.isFinite(r.Distance),
+  );
+  const effectiveXMode: XMode =
+    xMode === "distance" && distanceAvailable ? "distance" : "time";
+
+  // In distance mode, drop rows whose Distance is null/undefined — recharts
+  // would otherwise plot them at x=0 and skew the axis.
+  const rows = downsampleEvery(
+    effectiveXMode === "distance"
+      ? rawRows.filter(
+          (r) =>
+            typeof r.Distance === "number" && Number.isFinite(r.Distance),
+        )
+      : rawRows,
+    2,
+  );
   const activeSpecs: MetricSpec[] = active
     .map((k) => metrics.find((m) => m.key === k))
     .filter((m): m is MetricSpec => m != null);
@@ -403,10 +446,43 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
           );
         })}
       </div>
-      {subtitle && (
-        <p className="text-xs text-muted-foreground tabular-nums">{subtitle}</p>
-      )}
-      <ChartPane rows={rows} specs={renderSpecs} />
+      <div className="flex items-center justify-between gap-2">
+        {subtitle ? (
+          <p className="min-w-0 truncate text-xs text-muted-foreground tabular-nums">
+            {subtitle}
+          </p>
+        ) : (
+          <span />
+        )}
+        {distanceAvailable && (
+          <div
+            role="group"
+            aria-label="X-axis"
+            className="flex shrink-0 rounded-md border border-border bg-background p-0.5 text-[11px] font-medium"
+          >
+            {(["time", "distance"] as const).map((m) => {
+              const isActive = effectiveXMode === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setXMode(m)}
+                  className={
+                    "rounded px-2 py-0.5 transition-colors " +
+                    (isActive
+                      ? "bg-foreground text-background"
+                      : "text-muted-foreground hover:text-foreground")
+                  }
+                  aria-pressed={isActive}
+                >
+                  {m === "time" ? "Time" : "Distance"}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <ChartPane rows={rows} specs={renderSpecs} xMode={effectiveXMode} />
     </div>
   );
 }
