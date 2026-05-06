@@ -709,24 +709,18 @@ class DataProcessor:
             json.dump(remaining, f, indent=4)
         return True
 
-    # Lump all run-flavored Garmin typeKeys under one synthetic "running"
-    # bucket. Treadmill / track / indoor are still runs from the user's
-    # POV; splitting them in monthly historical view would just fragment
-    # the same volume across multiple bars.
-    RUNNING_TYPES = {
-        "running",
-        "track_running",
-        "treadmill_running",
-        "indoor_running",
-    }
-
     def get_monthly_activity_stats(self, activity_type: str = "all") -> list[dict]:
         """Monthly aggregates across data/get_activities/ for the historical
         chart on the Training tab.
 
         activity_type:
           - "all"      → every activity
-          - "running"  → all run-flavored typeKeys lumped (see RUNNING_TYPES)
+          - "running"  → any typeKey containing "running" — matches what
+                         RunActivity.is_run_dict and /api/runs use, so
+                         trail_running / virtual_running / future Garmin
+                         run-flavored types stay in agreement with the
+                         rest of the app instead of vanishing from this
+                         chart only.
           - other      → exact Garmin typeKey match (e.g. "lap_swimming")
 
         Returns a list sorted by month ascending. Designed to feed both the
@@ -763,7 +757,7 @@ class DataProcessor:
             for r in rows:
                 type_key = (r.get("activityType") or {}).get("typeKey") or ""
                 if activity_type == "running":
-                    if type_key not in self.RUNNING_TYPES:
+                    if not RunActivity.is_run_dict(r):
                         continue
                 elif activity_type != "all" and type_key != activity_type:
                     continue
