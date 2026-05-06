@@ -968,6 +968,10 @@ class DataProcessor:
 
             parsed_data.append({
                 "Lap": get_lap(current_sec), "Second": current_sec,
+                # Cumulative miles for chart x-axis distance mode. Garmin's
+                # sumDistance is metres; convert here so the client doesn't
+                # have to think about units.
+                "Distance": (sum_dist / 1609.34) if sum_dist is not None else None,
                 "HeartRate": hr, "Speed_mps": speed_mps,
                 "Cadence": cadence, "Elevation": elevation,
                 "StrideLength": stride_cm,

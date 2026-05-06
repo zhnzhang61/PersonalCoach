@@ -269,6 +269,7 @@ export interface LapsUpdateBody {
 export interface TelemetryRow {
   Lap: number;
   Second: number;
+  Distance?: number | null; // cumulative miles
   HeartRate?: number | null;
   Speed_mps?: number | null;
   Pace?: number | null; // min/mi
