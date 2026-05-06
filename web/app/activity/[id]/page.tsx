@@ -15,6 +15,7 @@ import type {
   WeatherSnapshot,
 } from "@/lib/types";
 import { EditRunForm } from "@/components/activity/edit-run-form";
+import { LapTable } from "@/components/activity/lap-table";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
 
 const RunMap = dynamic(
@@ -180,6 +181,7 @@ export default function ActivityDetailPage({
       <div className="mt-6 space-y-4">
         <RunMap activityId={activityId} />
         <TelemetryCharts activityId={activityId} />
+        <LapTable activityId={activityId} />
       </div>
     </div>
   );
