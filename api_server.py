@@ -361,6 +361,14 @@ def training_cycle_stats(
     return stats
 
 
+@app.get("/api/training/monthly-stats")
+def training_monthly_stats(
+    activity_type: str = Query(default="all"),
+) -> dict[str, Any]:
+    months = processor.get_monthly_activity_stats(activity_type=activity_type)
+    return {"activity_type": activity_type, "months": months}
+
+
 @app.get("/api/manual-activities")
 def list_manual_activities(
     start: str = Query(...),

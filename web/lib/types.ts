@@ -187,6 +187,25 @@ export interface CycleStatsResponse {
 }
 
 // ==========================================
+// Historical monthly stats (Training tab → Historical chart)
+// ==========================================
+export interface MonthlyActivityStats {
+  month: string; // YYYY-MM
+  count: number;
+  miles: number;
+  hours: number;
+  elevation_ft: number;
+  avg_pace_dec: number | null; // min/mi as decimal; null when miles == 0
+  avg_pace: string | null; // pre-formatted "M:SS" for prompt/tooltip use
+  avg_hr: number | null;
+}
+
+export interface MonthlyStatsResponse {
+  activity_type: string;
+  months: MonthlyActivityStats[];
+}
+
+// ==========================================
 // Run activities (Garmin). Extra Garmin keys may be present and are ignored.
 // ==========================================
 export interface RunCategoryStat {
