@@ -17,6 +17,13 @@ import os
 from pathlib import Path
 from typing import Any
 
+# oauthlib refuses non-HTTPS callbacks by default ("OAuth 2 MUST utilize
+# https"). Our redirect URI is http://localhost:8765/... — fine for a
+# single-user local app, but the library can't tell. The env-var override
+# is the documented escape hatch for localhost dev. setdefault so a user
+# can still flip it off via env if they ever proxy through TLS.
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
