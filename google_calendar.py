@@ -82,6 +82,13 @@ class GoogleCalendar:
     def __init__(self, data_dir: str = "data") -> None:
         self.token_path = Path(data_dir) / "oauth" / "google_token.json"
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        # state → PKCE code_verifier. Library generates a fresh verifier
+        # in authorization_url(); the same one needs to be re-attached to
+        # the Flow we build for token exchange in finish_flow(), or
+        # Google rejects with "(invalid_grant) Missing code verifier".
+        # Single-user dev → in-memory dict is fine; abandoned flows leak
+        # entries until process restart.
+        self._pending_verifiers: dict[str, str] = {}
 
     # ---- OAuth flow ------------------------------------------------------
 
@@ -102,10 +109,18 @@ class GoogleCalendar:
             prompt="consent",
             include_granted_scopes="true",
         )
+        self._pending_verifiers[state] = flow.code_verifier
         return url, state
 
     def finish_flow(self, authorization_response: str, state: str) -> None:
         flow = self.build_flow(state=state)
+        # Re-attach the verifier the library stashed on the previous Flow
+        # instance. Pop rather than read so a successful exchange clears
+        # the entry; an abandoned flow leaks until restart, which is fine
+        # for single-user dev.
+        verifier = self._pending_verifiers.pop(state, None)
+        if verifier:
+            flow.code_verifier = verifier
         flow.fetch_token(authorization_response=authorization_response)
         creds = flow.credentials
         self._save_creds(creds)
