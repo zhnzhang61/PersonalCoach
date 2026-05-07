@@ -17,6 +17,22 @@ import os
 from pathlib import Path
 from typing import Any
 
+# oauthlib refuses non-HTTPS callbacks by default ("OAuth 2 MUST utilize
+# https"). The OAUTHLIB_INSECURE_TRANSPORT escape hatch is documented
+# strictly for local testing — flipping it on globally would also disable
+# the check for any HTTPS deployment that imports this module, defeating
+# the purpose. Gate the bypass to the actual localhost redirect case so
+# a future TLS deploy still gets the protection.
+def _maybe_allow_insecure_localhost() -> None:
+    redirect = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+    if redirect.startswith(("http://localhost", "http://127.0.0.1")):
+        # setdefault rather than overwrite so the operator can still
+        # explicitly disable it via env if they want strict checking.
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
+
+_maybe_allow_insecure_localhost()
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
