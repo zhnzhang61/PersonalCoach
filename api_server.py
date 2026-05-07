@@ -445,6 +445,17 @@ def calendar_events(
     except ValueError as e:
         raise HTTPException(400, f"Bad datetime: {e}")
 
+    # Google Calendar API rejects naive timeMin/timeMax with HTTP 400.
+    # FullCalendar sends timezone-aware ISO strings, but ad-hoc callers
+    # (curl smoke tests, future AI tools) often pass naive ISO. Default
+    # to the server's local zone — matches the user's wall-clock intent
+    # for "events in this date window".
+    local_tz = datetime.datetime.now().astimezone().tzinfo
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=local_tz)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=local_tz)
+
     events: list[dict[str, Any]] = []
 
     # ---- Google Calendar (life events: work blocks, PT, sauna, etc.) ----
