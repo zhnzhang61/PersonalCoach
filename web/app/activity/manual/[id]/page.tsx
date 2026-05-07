@@ -190,6 +190,7 @@ export default function ManualActivityDetailPage({
               description: activity.desc ?? "",
               duration_min: activity.duration_min,
               distance_mi: activity.distance_mi,
+              start_time: activity.start_time ?? null,
             }}
             pending={updateMut.isPending}
             deletePending={deleteMut.isPending}

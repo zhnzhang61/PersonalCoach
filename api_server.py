@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from agentic_coach import AgenticCoach
 from cognitive_memory_engine import MemoryOS
 from data_processor import DataProcessor
+from google_calendar import GoogleCalendar
 
 
 app = FastAPI(title="PersonalCoach API", version="0.1.0")
@@ -29,6 +30,7 @@ app.add_middleware(
 )
 
 processor = DataProcessor()
+gcal = GoogleCalendar()
 memory_engine = MemoryOS(
     db_path="data/cognition.db",
     semantic_profile_path=processor.paths["semantic_memory"],
@@ -130,6 +132,9 @@ class ManualActivityCreate(BaseModel):
     description: str = ""
     duration_min: float | None = None
     distance_mi: float | None = None
+    # "HH:MM" — optional. Drives whether the calendar shows this as a
+    # timed block or an all-day chip.
+    start_time: str | None = None
 
 
 class ManualActivityUpdate(BaseModel):
@@ -141,6 +146,7 @@ class ManualActivityUpdate(BaseModel):
     description: str | None = None
     duration_min: float | None = None
     distance_mi: float | None = None
+    start_time: str | None = None
 
 
 class BlockCreate(BaseModel):
@@ -369,6 +375,182 @@ def training_monthly_stats(
     return {"activity_type": activity_type, "months": months}
 
 
+# ==========================================
+# Google Calendar OAuth + unified calendar events
+# ==========================================
+# OAuth flow: frontend hits /oauth/google/start which 302s to Google's
+# consent screen; Google calls /oauth/google/callback with the code and
+# state we issued; we exchange + persist creds, then bounce the user
+# back to /training with a ?connected=1 query for the UI to pick up.
+
+from fastapi.responses import RedirectResponse
+
+
+@app.get("/api/oauth/google/status")
+def oauth_google_status() -> dict[str, Any]:
+    return {"connected": gcal.is_connected()}
+
+
+@app.get("/oauth/google/start")
+def oauth_google_start() -> RedirectResponse:
+    url, _state = gcal.authorization_url()
+    # google_auth_oauthlib threads state through the URL itself, so we
+    # don't need to round-trip it via cookies/session. The library
+    # validates it on callback.
+    return RedirectResponse(url)
+
+
+@app.get("/oauth/google/callback")
+def oauth_google_callback(
+    state: str = Query(...),
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> RedirectResponse:
+    if error:
+        return RedirectResponse(f"http://localhost:3000/training?gcal_error={error}")
+    # Reconstruct the full URL fastapi saw — fetch_token wants the same
+    # query string Google bounced back with.
+    auth_response = (
+        f"{os.environ.get('GOOGLE_OAUTH_REDIRECT_URI', 'http://localhost:8765/oauth/google/callback')}"
+        f"?state={state}&code={code}"
+    )
+    try:
+        gcal.finish_flow(auth_response, state)
+    except Exception as e:
+        return RedirectResponse(f"http://localhost:3000/training?gcal_error={e}")
+    return RedirectResponse("http://localhost:3000/training?gcal_connected=1")
+
+
+@app.post("/api/oauth/google/disconnect")
+def oauth_google_disconnect() -> dict[str, bool]:
+    gcal.disconnect()
+    return {"ok": True}
+
+
+@app.get("/api/calendar/events")
+def calendar_events(
+    start: str = Query(..., description="ISO 8601 start datetime"),
+    end: str = Query(..., description="ISO 8601 end datetime"),
+) -> dict[str, Any]:
+    """Unified calendar events: Google Calendar + ManualActivity (with
+    start_time) + Garmin runs, all in [start, end].
+
+    Designed to feed both the UI calendar and the AI's availability tool.
+    Each event has a `source` discriminator so the AI can reason about
+    "this is a real-life commitment vs a planned workout".
+    """
+    try:
+        start_dt = datetime.datetime.fromisoformat(start.replace("Z", "+00:00"))
+        end_dt = datetime.datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise HTTPException(400, f"Bad datetime: {e}")
+
+    events: list[dict[str, Any]] = []
+
+    # ---- Google Calendar (life events: work blocks, PT, sauna, etc.) ----
+    google_connected = gcal.is_connected()
+    if google_connected:
+        try:
+            events.extend(gcal.list_events(start_dt, end_dt))
+        except Exception as e:
+            # Don't fail the whole request — surface the error so the UI
+            # can show "Google calendar disconnected" without losing the
+            # other event sources.
+            events.append({
+                "source": "google_error",
+                "id": "google_error",
+                "title": f"Google Calendar error: {e}",
+                "start": start,
+                "end": end,
+                "all_day": True,
+            })
+
+    # ---- ManualActivity (logged "I did 20min stretching" entries) ----
+    start_date = start_dt.date().isoformat()
+    end_date = end_dt.date().isoformat()
+    for a in processor.get_manual_activities_in_range(start_date, end_date):
+        ev_start, ev_end, all_day = _manual_activity_window(a)
+        events.append({
+            "source": "manual",
+            "id": f"manual:{a['id']}",
+            "title": _manual_activity_title(a),
+            "start": ev_start,
+            "end": ev_end,
+            "all_day": all_day,
+            "description": a.get("desc"),
+            "manual_activity": a,
+        })
+
+    # ---- Garmin runs (auto-synced runs become calendar events) ----
+    for r in processor.get_activities_in_range(start_date, end_date):
+        if "running" not in (r.get("activityType") or {}).get("typeKey", ""):
+            continue
+        # startTimeLocal is "YYYY-MM-DD HH:MM:SS" in the user's local
+        # zone, no offset suffix. Treat it as wall-clock time matching
+        # the request's local view.
+        local_start = r.get("startTimeLocal")
+        if not local_start:
+            continue
+        try:
+            run_start_dt = datetime.datetime.fromisoformat(local_start)
+        except Exception:
+            continue
+        dur_s = r.get("movingDuration") or r.get("duration") or 0
+        run_end_dt = run_start_dt + datetime.timedelta(seconds=dur_s)
+        meta = r.get("manual_meta") or {}
+        title = meta.get("name") or r.get("activityName") or "Run"
+        events.append({
+            "source": "garmin_run",
+            "id": f"run:{r.get('activityId')}",
+            "title": title,
+            "start": run_start_dt.isoformat(),
+            "end": run_end_dt.isoformat(),
+            "all_day": False,
+            "activity_id": r.get("activityId"),
+        })
+
+    return {
+        "start": start,
+        "end": end,
+        "google_connected": google_connected,
+        "events": events,
+    }
+
+
+def _manual_activity_title(a: dict[str, Any]) -> str:
+    """Build a short title for a manual activity event. Type as the lead
+    word (Run / Swim / Gym / Other), description in parens when present.
+    Keeps the calendar grid scannable on a phone."""
+    type_label = (a.get("type") or "Other").replace("_", " ").title()
+    desc = (a.get("desc") or "").strip()
+    if desc:
+        return f"{type_label} — {desc}" if len(desc) <= 24 else f"{type_label}"
+    return type_label
+
+
+def _manual_activity_window(a: dict[str, Any]) -> tuple[str, str, bool]:
+    """Resolve a ManualActivity's calendar window.
+
+    With start_time + duration_min: a real timed event window.
+    Without start_time: an all-day event on `date`.
+    """
+    date_str = a.get("date")
+    start_time = a.get("start_time")  # "HH:MM" (optional)
+    duration_min = a.get("duration_min")
+    if not start_time:
+        # All-day. FullCalendar wants the date as start, end as next day.
+        next_day = (
+            datetime.date.fromisoformat(date_str) + datetime.timedelta(days=1)
+        ).isoformat()
+        return date_str, next_day, True
+    # Timed event. Default to 30 min when duration unknown so the block
+    # renders visibly.
+    start_iso = f"{date_str}T{start_time}:00"
+    start_dt = datetime.datetime.fromisoformat(start_iso)
+    end_dt = start_dt + datetime.timedelta(minutes=duration_min or 30)
+    return start_dt.isoformat(), end_dt.isoformat(), False
+
+
 @app.get("/api/manual-activities")
 def list_manual_activities(
     start: str = Query(...),
@@ -396,6 +578,7 @@ def create_manual_activity(body: ManualActivityCreate) -> dict[str, Any]:
         description=body.description,
         duration_min=body.duration_min,
         distance_mi=body.distance_mi,
+        start_time=body.start_time,
     )
     return {"ok": True, "activity": entry}
 
