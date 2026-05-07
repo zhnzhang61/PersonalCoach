@@ -85,9 +85,90 @@ class AgenticCoach:
             print(f"[CME] context retrieval error: {e}")
         return ""
 
+    def _build_calendar_context(self, days_ahead: int = 7) -> str:
+        """Inject the user's upcoming calendar (Google + ManualActivity +
+        Garmin) into the coach's system prompt so the agent doesn't suggest
+        runs during work blocks or right after PT.
+
+        Phase 1 is read-only context. Phase 2 will let the agent push
+        suggestions back as planned events.
+        """
+        try:
+            import datetime
+            from google_calendar import GoogleCalendar
+            from data_processor import DataProcessor
+
+            now = datetime.datetime.now().astimezone()
+            until = now + datetime.timedelta(days=days_ahead)
+
+            lines: list[str] = []
+
+            # Life events from Google. Skip if not connected — calendar is
+            # opt-in. Quietly degrade rather than failing the chat turn.
+            try:
+                gcal = GoogleCalendar()
+                if gcal.is_connected():
+                    for ev in gcal.list_events(now, until):
+                        when = self._fmt_event_time(ev["start"], ev["end"], ev["all_day"])
+                        lines.append(f"- {when} {ev['title']} (Google)")
+            except Exception as e:
+                print(f"[Calendar AI ctx] Google fetch error: {e}")
+
+            # ManualActivity entries (timed only — all-day stretching etc
+            # would noise up the prompt without helping availability calls).
+            try:
+                dp = DataProcessor()
+                for a in dp.get_manual_activities_in_range(
+                    now.date().isoformat(), until.date().isoformat()
+                ):
+                    if not a.get("start_time"):
+                        continue
+                    duration = a.get("duration_min")
+                    label = (a.get("type") or "other").title()
+                    desc = a.get("desc") or ""
+                    when = f"{a['date']} {a['start_time']}"
+                    if duration:
+                        when += f" ({int(duration)} min)"
+                    body = f"{label}" + (f" — {desc}" if desc else "")
+                    lines.append(f"- {when} {body} (logged)")
+            except Exception as e:
+                print(f"[Calendar AI ctx] manual fetch error: {e}")
+
+            if not lines:
+                return ""
+            return (
+                "\n\n=== UPCOMING SCHEDULE (next "
+                f"{days_ahead} days) ===\n"
+                "Treat these as fixed commitments — don't propose workouts "
+                "that overlap them. The user works 8:30am-6:30pm on weekdays "
+                "by default; ignore items that are obviously not blocking "
+                "exercise (e.g. recurring 'birthdays' calendars). Times are "
+                "the user's local time.\n"
+                + "\n".join(lines)
+                + "\n=== END SCHEDULE ==="
+            )
+        except Exception as e:
+            # Whole-method bail — calendar context is best-effort.
+            print(f"[Calendar AI ctx] error: {e}")
+            return ""
+
+    @staticmethod
+    def _fmt_event_time(start: str, end: str, all_day: bool) -> str:
+        """Compact, locale-free time format for prompt lines."""
+        import datetime
+        if all_day:
+            return f"{start} (all day)"
+        try:
+            s = datetime.datetime.fromisoformat(start.replace("Z", "+00:00"))
+            e = datetime.datetime.fromisoformat(end.replace("Z", "+00:00"))
+            return f"{s.strftime('%a %b %-d %H:%M')}-{e.strftime('%H:%M')}"
+        except Exception:
+            return f"{start}-{end}"
+
     def _coach_node(self, state: State):
         profile_str = json.dumps(self.user_profile, indent=2)
         cme_ctx = self._build_cognitive_context(state)
+        cal_ctx = self._build_calendar_context(days_ahead=7)
         sys_msg = SystemMessage(content=f"""
         You are an elite Running Coach and Sports Physiologist.
         Focus on biomechanics, pace, splits, and training, but ALWAYS connect them to the athlete's overall health context.
@@ -97,6 +178,7 @@ class AgenticCoach:
         ===============================================
         Use this baseline to evaluate all incoming data.
         {cme_ctx}
+        {cal_ctx}
         """)
         messages = [sys_msg] + state["messages"]
         msg, provider = call_llm(messages, role="creative")

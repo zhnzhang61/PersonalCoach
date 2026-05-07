@@ -370,12 +370,49 @@ export interface ManualActivity {
   desc: string;
   duration_min?: number;
   distance_mi?: number;
+  // "HH:MM" — optional. When present, the activity gets a real timed
+  // window on the calendar; when absent it renders all-day.
+  start_time?: string | null;
 }
 
 export interface ManualActivitiesResponse {
   start: string;
   end: string;
   activities: ManualActivity[];
+}
+
+// ==========================================
+// Unified calendar events (Training tab → Plan calendar)
+// ==========================================
+// After server-side normalisation, Google Calendar events + ManualActivity
+// rows + Garmin runs all flatten into the same shape. The `source`
+// discriminator drives both UI styling and AI reasoning ("this is a real
+// commitment" vs "this is a planned workout").
+export type CalendarEventSource =
+  | "google"
+  | "google_error"
+  | "manual"
+  | "garmin_run";
+
+export interface CalendarEvent {
+  source: CalendarEventSource;
+  id: string;
+  title: string;
+  start: string; // ISO datetime, or YYYY-MM-DD for all-day
+  end: string;
+  all_day: boolean;
+  location?: string | null;
+  description?: string | null;
+  calendar_id?: string;
+  activity_id?: number;
+  manual_activity?: ManualActivity;
+}
+
+export interface CalendarEventsResponse {
+  start: string;
+  end: string;
+  google_connected: boolean;
+  events: CalendarEvent[];
 }
 
 export interface SleepDetail {

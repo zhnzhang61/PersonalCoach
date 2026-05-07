@@ -1,9 +1,10 @@
-import { Calendar, Sparkles, Target } from "lucide-react";
+import { Sparkles, Target } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { TrainingSelector } from "@/components/training-selector";
 import { CycleOverview } from "@/components/training/cycle-overview";
 import { MonthlyChart } from "@/components/training/monthly-chart";
 import { PlaceholderCard } from "@/components/training/placeholder-card";
+import { PlanCalendar } from "@/components/training/plan-calendar";
 
 export default function TrainingPage() {
   return (
@@ -13,11 +14,7 @@ export default function TrainingPage() {
         <TrainingSelector />
         <CycleOverview />
         <MonthlyChart />
-        <PlaceholderCard
-          Icon={Calendar}
-          title="Plan calendar"
-          description="Schedule workouts across the cycle and check off as you go."
-        />
+        <PlanCalendar />
         <PlaceholderCard
           Icon={Sparkles}
           title="AI training plans"

@@ -114,6 +114,10 @@ class ManualActivity:
     description: str
     duration_min: Optional[float] = None
     distance_mi: Optional[float] = None
+    # "HH:MM" (optional). When present, the activity gets a real timed
+    # window on the calendar (start_time → start_time + duration_min);
+    # when absent it renders as an all-day chip on `date`.
+    start_time: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "ManualActivity":
@@ -127,6 +131,7 @@ class ManualActivity:
             description=d.get("desc", "") or "",
             duration_min=d.get("duration_min"),
             distance_mi=d.get("distance_mi"),
+            start_time=d.get("start_time"),
         )
 
     def to_dict(self) -> dict:
@@ -140,6 +145,8 @@ class ManualActivity:
             out["duration_min"] = self.duration_min
         if self.distance_mi is not None:
             out["distance_mi"] = self.distance_mi
+        if self.start_time is not None:
+            out["start_time"] = self.start_time
         return out
 
 
@@ -637,7 +644,7 @@ class DataProcessor:
             for d in self.get_manual_activities_in_range(start_str, end_str)
         ]
 
-    def add_manual_activity(self, date_str, activity_type, description, duration_min=None, distance_mi=None):
+    def add_manual_activity(self, date_str, activity_type, description, duration_min=None, distance_mi=None, start_time=None):
         activity_type = activity_type if activity_type in ManualActivity.VALID_TYPES else "other"
         with open(self.paths['aux'], 'r') as f:
             current = json.load(f)
@@ -651,6 +658,8 @@ class DataProcessor:
             entry["duration_min"] = duration_min
         if distance_mi is not None:
             entry["distance_mi"] = distance_mi
+        if start_time:
+            entry["start_time"] = start_time
         current.append(entry)
         with open(self.paths['aux'], 'w') as f:
             json.dump(current, f, indent=4)
@@ -659,7 +668,7 @@ class DataProcessor:
     # Fields that are allowed to be cleared by passing None. Everything else
     # is structurally required — letting a caller null them would leave a
     # malformed record that breaks date-range filters and renders blank.
-    _MANUAL_NULLABLE_FIELDS = {"duration_min", "distance_mi"}
+    _MANUAL_NULLABLE_FIELDS = {"duration_min", "distance_mi", "start_time"}
 
     def update_manual_activity(self, activity_id, **fields) -> dict | None:
         """

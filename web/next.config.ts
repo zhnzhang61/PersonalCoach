@@ -35,6 +35,12 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${API_TARGET}/api/:path*` },
+      // OAuth start + callback live on the FastAPI server (Google's
+      // registered redirect URI points at :8765 directly), but the link
+      // the user clicks comes from the Next page, so we need to proxy
+      // the start handler through too. Without this, /oauth/google/start
+      // hits Next and 404s before redirecting to Google.
+      { source: "/oauth/:path*", destination: `${API_TARGET}/oauth/:path*` },
     ];
   },
 };

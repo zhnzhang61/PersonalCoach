@@ -19,6 +19,7 @@ export interface ManualActivityFormValues {
   description: string;
   duration_min: number | null;
   distance_mi: number | null;
+  start_time: string | null;
 }
 
 export interface ManualActivityFormInitial {
@@ -27,6 +28,7 @@ export interface ManualActivityFormInitial {
   description?: string;
   duration_min?: number | null;
   distance_mi?: number | null;
+  start_time?: string | null;
 }
 
 interface Props {
@@ -68,6 +70,7 @@ export function ManualActivityForm({
   const [distance, setDistance] = useState(
     initial?.distance_mi != null ? String(initial.distance_mi) : "",
   );
+  const [startTime, setStartTime] = useState(initial?.start_time ?? "");
   const showDistance = type === "run" || type === "swim";
 
   const submit = () => {
@@ -77,6 +80,9 @@ export function ManualActivityForm({
       description: desc,
       duration_min: duration ? Number(duration) : null,
       distance_mi: distance && showDistance ? Number(distance) : null,
+      // Empty string → null so the activity stays an all-day event
+      // instead of getting pinned to 00:00.
+      start_time: startTime || null,
     });
   };
 
@@ -112,14 +118,24 @@ export function ManualActivityForm({
         ))}
       </div>
 
-      <label className="flex flex-col gap-1">
-        <span className="eyebrow text-[10px]">Date</span>
-        <Input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-        />
-      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-1">
+          <span className="eyebrow text-[10px]">Date</span>
+          <Input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="eyebrow text-[10px]">Start time (optional)</span>
+          <Input
+            type="time"
+            value={startTime ?? ""}
+            onChange={(e) => setStartTime(e.target.value)}
+          />
+        </label>
+      </div>
 
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1">
