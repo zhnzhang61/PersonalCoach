@@ -447,14 +447,16 @@ def calendar_events(
 
     # Google Calendar API rejects naive timeMin/timeMax with HTTP 400.
     # FullCalendar sends timezone-aware ISO strings, but ad-hoc callers
-    # (curl smoke tests, future AI tools) often pass naive ISO. Default
-    # to the server's local zone — matches the user's wall-clock intent
-    # for "events in this date window".
-    local_tz = datetime.datetime.now().astimezone().tzinfo
+    # (curl smoke tests, future AI tools) often pass naive ISO. Treat
+    # those as local wall-clock time. naive_dt.astimezone() interprets
+    # the value as local and resolves the offset against the system's
+    # TZ rules *for that specific date*, so a January window queried in
+    # June still gets the EST offset rather than EDT (which would shift
+    # the window an hour off and clip events at the edges).
     if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=local_tz)
+        start_dt = start_dt.astimezone()
     if end_dt.tzinfo is None:
-        end_dt = end_dt.replace(tzinfo=local_tz)
+        end_dt = end_dt.astimezone()
 
     events: list[dict[str, Any]] = []
 
