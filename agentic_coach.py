@@ -292,6 +292,40 @@ class AgenticCoach:
 
         atexit.register(self._cleanup_sync)
 
+    # -- API reachability probe --------------------------------------
+
+    @staticmethod
+    async def _require_api_reachable(api_base: str) -> None:
+        """Ping api_server's /api/runs endpoint once; raise a clear
+        error if unreachable. Required because every MCP tool resolves
+        through HTTP to api_server — non-api callers (dashboard, tests)
+        used to read DataProcessor in-process, but the v2 design moved
+        all data access through HTTP to keep a single source of truth
+        and avoid two live DataProcessor instances racing on the same
+        JSON files. So api_server must be running."""
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{api_base}/api/runs", params={
+                    "start": "2024-01-01", "end": "2024-01-02",
+                })
+                # Any 2xx/4xx means the server is up. 5xx + connection
+                # errors are the failure modes we care about.
+                if r.status_code >= 500:
+                    raise RuntimeError(
+                        f"api_server reachable at {api_base} but returned "
+                        f"{r.status_code}"
+                    )
+        except Exception as e:
+            raise RuntimeError(
+                "AgenticCoach now requires api_server to be running — every "
+                "MCP tool wraps a FastAPI endpoint. Start it with:\n"
+                "    uv run uvicorn api_server:app --port 8765\n"
+                "or override PERSONAL_COACH_API_BASE if it's on a different "
+                f"host/port. Tried: {api_base} ({e!r})"
+            ) from e
+
     # -- Loop submit helper ------------------------------------------
 
     def _submit(self, coro):
@@ -320,6 +354,14 @@ class AgenticCoach:
             api_base = os.environ.get(
                 "PERSONAL_COACH_API_BASE", "http://127.0.0.1:8765"
             )
+
+            # Hard prereq: every MCP tool wraps an api_server endpoint.
+            # If the FastAPI server isn't reachable, every tool call
+            # will fail mid-conversation with a ToolException — really
+            # confusing for non-api callers (Streamlit dashboard, ad-hoc
+            # scripts). Probe once up front and bail with a message
+            # that points the user at the fix.
+            await self._require_api_reachable(api_base)
             self._mcp_client = MultiServerMCPClient({
                 "personal-coach": {
                     "command": "uv",
