@@ -2,6 +2,7 @@ import os
 import json
 import csv
 import datetime
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, ClassVar, Literal, Optional
@@ -178,6 +179,7 @@ class DataProcessor:
             'aux': os.path.join(data_dir, 'blocks', 'auxiliary_log.json'),
             'ledger': os.path.join(data_dir, 'derived', 'daily_health_metrics.csv'),
             'weather': os.path.join(data_dir, 'weather'),
+            'user_zones': os.path.join(data_dir, 'manual_inputs', 'user_zones.json'),
             
             # 3. AI Memory Paths (NEW)
             'semantic_memory': os.path.join(data_dir, 'memory', 'user_profile.json'),
@@ -823,6 +825,371 @@ class DataProcessor:
                 "avg_hr": avg_hr,
             })
         return out
+
+    # ==========================================
+    # 🏃 COACH-VIEW AGGREGATORS (Phase 2a — feed MCP tools)
+    # ==========================================
+
+    # user_zones.json keys → EFFORT_CATEGORIES vocabulary used in
+    # manual_meta.lap_categories. The two label sets aren't textually
+    # identical (zone file says "Hold Back / Recovery" while lap labels say
+    # "Hold Back Easy"), so we keep the mapping in one place.
+    _ZONE_TO_RPE_LABEL: ClassVar[dict[str, str]] = {
+        "Hold Back / Recovery": "Hold Back Easy",
+        "Steady / Constant":    "Steady Effort",
+        "Increasing Effort":    "Increasing Effort",
+        "Marathon Pace":        "Marathon",
+        "Lactate Threshold":    "LT Effort",
+        "VO2 Max":              "VO2Max",
+    }
+    # Display order = ascending by HR. The zone dict ordering on disk
+    # happens to be DESCENDING (VO2 first), so we sort by parsed `low`.
+
+    _ZONE_RANGE_RE: ClassVar[re.Pattern] = re.compile(
+        r"^\s*(?:(?P<op>[<>])\s*(?P<single>\d+)|(?P<low>\d+)\s*-\s*(?P<high>\d+))\s*bpm\s*$"
+    )
+
+    @classmethod
+    def _parse_zone_range(cls, s: str) -> tuple[int, int]:
+        m = cls._ZONE_RANGE_RE.match(s)
+        if not m:
+            raise ValueError(f"Cannot parse zone range: {s!r}")
+        if m.group("op") == ">":
+            # Sentinel ceiling — 220 covers any human max-HR.
+            return int(m.group("single")) + 1, 220
+        if m.group("op") == "<":
+            return 0, int(m.group("single")) - 1
+        return int(m.group("low")), int(m.group("high"))
+
+    def get_hr_zones(self) -> list[dict]:
+        """Manually annotated HR bands from data/manual_inputs/user_zones.json,
+        normalised to the rpe_label vocabulary used in
+        manual_meta.lap_categories. Sorted ascending by `low` HR.
+
+        Designed for both the chart UI and AI prompt context — `low/high`
+        are integer bpm, `name` is the long zone label, `rpe_label` is the
+        short token the user puts on each lap.
+        """
+        if not os.path.exists(self.paths["user_zones"]):
+            return []
+        with open(self.paths["user_zones"]) as f:
+            raw = json.load(f)
+
+        zones: list[dict] = []
+        for name, rng in raw.items():
+            try:
+                low, high = self._parse_zone_range(rng)
+            except ValueError:
+                continue
+            zones.append({
+                "name": name,
+                "low": low,
+                "high": high,
+                "rpe_label": self._ZONE_TO_RPE_LABEL.get(name, name),
+            })
+        zones.sort(key=lambda z: z["low"])
+        return zones
+
+    @staticmethod
+    def _phase_for_week(week_num: int, weeks_total: int) -> str:
+        """Heuristic block-phase bucketing. First quarter = base, middle
+        half = build, next eighth = peak, last eighth = taper. Caller can
+        override later if explicit phase boundaries are added."""
+        if weeks_total <= 0:
+            return "unknown"
+        # Cap week_num so a week_num past the cycle still resolves.
+        pct = max(0.0, min(1.0, week_num / max(weeks_total, 1)))
+        if pct < 0.25:
+            return "base"
+        if pct < 0.75:
+            return "build"
+        if pct < 0.875:
+            return "peak"
+        return "taper"
+
+    def _today_active_block(self) -> dict | None:
+        """The block whose [start, end] contains today, if any."""
+        today = datetime.date.today().isoformat()
+        for b in self.get_blocks():
+            if b.get("start_date") and b.get("end_date") \
+                    and b["start_date"] <= today <= b["end_date"]:
+                return b
+        return None
+
+    def get_athlete_profile_full(self) -> dict:
+        """Composite athlete profile for the AI coach: identity (with
+        unit-converted weight/height), fitness (VO2max + LT + RPE-named HR
+        zones), current cycle phase, preferences, medical notes.
+
+        Designed to replace `build_agent_working_memory`'s profile section
+        and be MCP-tool ready. See docs/mcp_tools_design.md §1.
+        """
+        sem = self.get_semantic_memory() or {}
+        gp = sem.get("garmin_profile", {}) if isinstance(sem, dict) else {}
+        ud = gp.get("userData", {}) if isinstance(gp, dict) else {}
+
+        weight_g = ud.get("weight")
+        height_cm_raw = ud.get("height")
+        # Garmin gives weight in grams and height in cm. Convert to kg.
+        weight_kg = round(weight_g / 1000, 1) if weight_g else None
+
+        birth = ud.get("birthDate")
+        age = None
+        if birth:
+            try:
+                bd = datetime.date.fromisoformat(birth)
+                today = datetime.date.today()
+                age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+            except Exception:
+                pass
+
+        # LT pace: Garmin's `lactateThresholdSpeed` is undocumented in
+        # units. Empirically 0.369 for this user produces a coherent
+        # 7:16/mi when treated as 1/10 m/s (decimetre/sec), which fits
+        # their VO2max 48 + LT HR 179 profile. Plain m/s would give
+        # 72 min/mi (impossible). Detect via threshold and multiply by 10
+        # when it's the small-number form. If it's >= 1.0 we trust it as
+        # m/s for whoever might have a different storage convention.
+        lt_speed = ud.get("lactateThresholdSpeed")
+        lt_pace_str: str | None = None
+        if lt_speed and lt_speed > 0:
+            mps = lt_speed * 10 if lt_speed < 1.0 else lt_speed
+            pace_min_per_mi = (1609.34 / mps) / 60
+            if 4 <= pace_min_per_mi <= 14:  # sanity clamp
+                lt_pace_str = (
+                    f"{int(pace_min_per_mi)}:"
+                    f"{int((pace_min_per_mi % 1) * 60):02d}/mi"
+                )
+
+        # Current block + phase
+        block = self._today_active_block()
+        current_block: dict | None = None
+        if block:
+            try:
+                bs = datetime.date.fromisoformat(block["start_date"])
+                be = datetime.date.fromisoformat(block["end_date"])
+                weeks_total = max(1, (be - bs).days // 7 + 1)
+                today = datetime.date.today()
+                weeks_elapsed = max(0, (today - bs).days // 7)
+                weeks_to_event = max(0, (be - today).days // 7)
+                current_block = {
+                    "id": block.get("id"),
+                    "name": block.get("name"),
+                    "start_date": block["start_date"],
+                    "end_date": block["end_date"],
+                    "primary_event": block.get("primary_event"),
+                    "weeks_total": weeks_total,
+                    "weeks_elapsed": weeks_elapsed,
+                    "weeks_to_event": weeks_to_event,
+                    "phase": self._phase_for_week(weeks_elapsed, weeks_total),
+                }
+            except Exception:
+                current_block = None
+
+        return {
+            "athlete": {
+                "age": age,
+                "sex": ud.get("gender"),
+                "weight_kg": weight_kg,
+                "height_cm": round(height_cm_raw, 1) if height_cm_raw else None,
+            },
+            "fitness": {
+                "vo2max_running": ud.get("vo2MaxRunning"),
+                "lactate_threshold_hr": ud.get("lactateThresholdHeartRate"),
+                "lactate_threshold_pace": lt_pace_str,
+                "hr_zones": self.get_hr_zones(),
+            },
+            "current_block": current_block,
+            "preferences": sem.get("preferences", []) if isinstance(sem, dict) else [],
+            "medical_notes": sem.get("medical_notes", []) if isinstance(sem, dict) else [],
+        }
+
+    # --- Readiness ---------------------------------------------------------
+
+    def get_readiness(self, target_date: str | None = None) -> dict:
+        """Today's readiness signal. Compares today's sleep/RHR/HRV to the
+        7-day baseline and emits a green/yellow/red verdict + rationale.
+        Falls back gracefully when ledger data is missing.
+
+        See docs/mcp_tools_design.md §2 for the green/yellow/red rule and
+        the field shape. Designed to be MCP-tool consumable.
+        """
+        target = target_date or datetime.date.today().isoformat()
+        ledger = self.get_health_stats() or []
+        # Ledger ascending. Take last 8 days ending at target so we can
+        # split today vs the 7-day baseline.
+        rows = [r for r in ledger if r.get("date") and r["date"] <= target]
+        rows = rows[-8:]
+        if not rows:
+            return {
+                "date": target,
+                "readiness": {"score": "unknown", "rationale": "No ledger rows."},
+                "today": None,
+                "baseline_7d": None,
+                "deltas_pct": None,
+                "history_7d": [],
+            }
+
+        today_row = rows[-1] if rows[-1].get("date") == target else None
+        baseline_rows = rows[:-1] if today_row else rows
+
+        def _avg(field: str) -> float | None:
+            vals = [r.get(field) for r in baseline_rows if r.get(field) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else None
+
+        baseline = {
+            "rhr": _avg("rhr"),
+            "hrv": _avg("hrv"),
+            "sleep_hours": _avg("sleep_hours"),
+            "stress_avg": _avg("stress"),
+        }
+
+        def _delta_pct(today_val, base_val) -> str | None:
+            if today_val is None or base_val is None or base_val == 0:
+                return None
+            d = (today_val - base_val) / base_val * 100
+            return f"{d:+.1f}"
+
+        deltas = None
+        score = "unknown"
+        rationale = "Insufficient data for today."
+        if today_row:
+            deltas = {
+                "rhr": _delta_pct(today_row.get("rhr"), baseline["rhr"]),
+                "hrv": _delta_pct(today_row.get("hrv"), baseline["hrv"]),
+                "sleep_hours": _delta_pct(
+                    today_row.get("sleep_hours"), baseline["sleep_hours"]
+                ),
+            }
+
+            # Rule: green if HRV ±5%, RHR ±5%, sleep ≥7h. Red if HRV down
+            # >10% OR RHR up >10% OR sleep < 5h. Else yellow.
+            sleep_h = today_row.get("sleep_hours") or 0
+            rhr_d = (
+                (today_row["rhr"] - baseline["rhr"]) / baseline["rhr"] * 100
+                if today_row.get("rhr") and baseline["rhr"] else 0
+            )
+            hrv_d = (
+                (today_row["hrv"] - baseline["hrv"]) / baseline["hrv"] * 100
+                if today_row.get("hrv") and baseline["hrv"] else 0
+            )
+            if hrv_d < -10 or rhr_d > 10 or sleep_h < 5:
+                score = "red"
+            elif abs(hrv_d) <= 5 and abs(rhr_d) <= 5 and sleep_h >= 7:
+                score = "green"
+            else:
+                score = "yellow"
+
+            parts = []
+            if today_row.get("rhr") is not None and baseline["rhr"] is not None:
+                parts.append(
+                    f"RHR {today_row['rhr']:.0f} vs 7d-baseline {baseline['rhr']} ({deltas['rhr']}%)"
+                )
+            if today_row.get("hrv") is not None and baseline["hrv"] is not None:
+                parts.append(
+                    f"HRV {today_row['hrv']:.0f} vs baseline {baseline['hrv']} ({deltas['hrv']}%)"
+                )
+            if sleep_h:
+                parts.append(f"sleep {sleep_h:.1f}h")
+            rationale = "; ".join(parts) if parts else "limited signals"
+
+        return {
+            "date": target,
+            "readiness": {"score": score, "rationale": rationale},
+            "today": today_row,
+            "baseline_7d": baseline,
+            "deltas_pct": deltas,
+            "history_7d": baseline_rows,
+        }
+
+    # --- Training load -----------------------------------------------------
+
+    def get_training_load(self, window_days: int = 28) -> dict:
+        """Acute (7d) / chronic (28d) training load + ACWR + weekly miles
+        trend. Surfaces the injury-risk signal a coach checks before
+        prescribing. See docs/mcp_tools_design.md §3.
+
+        ACWR = (7d_avg_load) / (28d_avg_load). Bands per Gabbett:
+          <0.8 detraining · 0.8-1.3 sweet · 1.3-1.5 caution · >1.5 danger.
+        """
+        today = datetime.date.today()
+        chronic_start = (today - timedelta(days=window_days)).isoformat()
+        acute_start = (today - timedelta(days=7)).isoformat()
+        end = today.isoformat()
+
+        chronic_runs = self.get_activities_in_range(chronic_start, end)
+        chronic_runs = [
+            r for r in chronic_runs if RunActivity.is_run_dict(r)
+        ]
+        acute_runs = [
+            r for r in chronic_runs if r.get("startTimeLocal", "")[:10] >= acute_start
+        ]
+
+        def _summarise(runs: list[dict]) -> dict:
+            miles = sum((r.get("distance") or 0) / 1609.34 for r in runs)
+            duration_s = sum(
+                r.get("movingDuration") or r.get("duration") or 0 for r in runs
+            )
+            load = sum(r.get("activityTrainingLoad") or 0 for r in runs)
+            return {
+                "miles": round(miles, 1),
+                "moving_hours": round(duration_s / 3600, 1),
+                "session_count": len(runs),
+                "garmin_load_sum": round(load, 0),
+            }
+
+        acute = _summarise(acute_runs)
+        chronic = _summarise(chronic_runs)
+        weeks_in_window = max(1, window_days / 7)
+        chronic["miles_per_week_avg"] = round(
+            chronic["miles"] / weeks_in_window, 1
+        )
+        chronic["garmin_load_per_week_avg"] = round(
+            chronic["garmin_load_sum"] / weeks_in_window, 0
+        )
+
+        # ACWR: 7d avg / 28d avg, in load units.
+        acute_avg = acute["garmin_load_sum"] / 7 if acute["garmin_load_sum"] else 0
+        chronic_avg = chronic["garmin_load_sum"] / window_days if chronic["garmin_load_sum"] else 0
+        acwr = round(acute_avg / chronic_avg, 2) if chronic_avg > 0 else None
+        if acwr is None:
+            acwr_band = "unknown"
+        elif acwr < 0.8:
+            acwr_band = "detraining"
+        elif acwr <= 1.3:
+            acwr_band = "sweet"
+        elif acwr <= 1.5:
+            acwr_band = "caution"
+        else:
+            acwr_band = "danger"
+
+        # Weekly miles trend, bucketed Mon-Sun for the window.
+        weekly: dict[str, float] = {}
+        for r in chronic_runs:
+            d = r.get("startTimeLocal", "")[:10]
+            if not d:
+                continue
+            try:
+                dt = datetime.date.fromisoformat(d)
+            except ValueError:
+                continue
+            # Snap to that week's Monday.
+            week_start = (dt - timedelta(days=dt.weekday())).isoformat()
+            weekly[week_start] = weekly.get(week_start, 0) + (r.get("distance") or 0) / 1609.34
+        trend = sorted(
+            [{"week_start": k, "miles": round(v, 1)} for k, v in weekly.items()],
+            key=lambda x: x["week_start"],
+        )
+
+        return {
+            "today": end,
+            "window_days": window_days,
+            "acute_7d": acute,
+            "chronic_28d": chronic,
+            "acwr": acwr,
+            "acwr_band": acwr_band,
+            "weekly_miles_trend": trend,
+        }
 
     def compute_cycle_and_week_stats(self, block_id, week_start, week_end):
         """

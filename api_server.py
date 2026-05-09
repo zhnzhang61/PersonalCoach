@@ -298,6 +298,57 @@ def sync_health_ledger(days_back: int = 120) -> dict[str, Any]:
     return {"ok": True, "rows": len(rows)}
 
 
+@app.get("/api/health/ledger")
+def health_ledger(days: int = Query(default=14, ge=1, le=365)) -> dict[str, Any]:
+    """Recent daily health metrics — sleep, RHR, HRV, stress, run miles —
+    for the last `days` days. Reads the cached ledger CSV; recompute via
+    POST /api/sync/health-ledger if it's stale."""
+    rows = processor.get_health_stats() or []
+    # rows are date-sorted ascending. Tail the requested window.
+    return {"days": days, "rows": rows[-days:]}
+
+
+@app.get("/api/profile")
+def user_profile_endpoint() -> dict[str, Any]:
+    """User's semantic-memory baseline profile (HR zones, goals, etc.)
+    that the coach prompts already inject. Exposed so MCP / AI tools can
+    read the same source of truth without duplicating the file path.
+
+    Note: returns the *raw* on-disk profile. For the AI-coach-shaped view
+    (unit-converted, RPE-named HR zones, current cycle phase) use
+    /api/athlete/profile instead.
+    """
+    return processor.get_semantic_memory() or {}
+
+
+@app.get("/api/athlete/profile")
+def athlete_profile_full() -> dict[str, Any]:
+    """Composite athlete profile for AI coaching: identity (kg/cm),
+    fitness (VO2max, LT pace, RPE-named HR zones from
+    data/manual_inputs/user_zones.json), current cycle phase,
+    preferences, medical notes. See docs/mcp_tools_design.md §1.
+    """
+    return processor.get_athlete_profile_full()
+
+
+@app.get("/api/health/readiness")
+def health_readiness(date: str | None = Query(default=None)) -> dict[str, Any]:
+    """Single-day readiness signal (green/yellow/red) with 7-day baselines
+    + deltas + rationale. Replaces the raw 7-day ledger dump for AI
+    consumption — see docs/mcp_tools_design.md §2.
+    """
+    return processor.get_readiness(target_date=date)
+
+
+@app.get("/api/training/load")
+def training_load(window: int = Query(default=28, ge=7, le=120)) -> dict[str, Any]:
+    """Acute (7d) / chronic (Nd) training load + ACWR ratio + weekly miles
+    trend, in a single payload. Used by the AI coach to assess injury
+    risk and fitness trajectory. See docs/mcp_tools_design.md §3.
+    """
+    return processor.get_training_load(window_days=window)
+
+
 @app.get("/api/training/blocks")
 def training_blocks() -> dict[str, Any]:
     blocks = processor.get_blocks()
