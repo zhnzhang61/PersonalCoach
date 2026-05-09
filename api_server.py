@@ -856,8 +856,90 @@ def ai_health_analysis(body: HealthAnalysisInput) -> dict[str, Any]:
 
 @app.post("/api/ai/chat")
 def ai_chat(body: ChatInput) -> dict[str, Any]:
-    answer = agent.chat(user_input=body.message, thread_id=body.thread_id, system_context=body.system_context)
+    answer = agent.chat(
+        user_input=body.message,
+        thread_id=body.thread_id,
+        system_context=body.system_context,
+    )
     return {"thread_id": body.thread_id, "answer": answer}
+
+
+# ==========================================================================
+# Default actions — Phase 2 prebuilt flows. Each pre-fetches a tuned set
+# of MCP tools in parallel and feeds the JSON to the LLM as system
+# context (option A from the design discussion). Free chat continues to
+# go through /api/ai/chat with no pre-fetch.
+# ==========================================================================
+
+
+class ActionInput(BaseModel):
+    thread_id: str | None = None
+    message: str | None = None  # optional freeform extra question
+    # Action-specific args (only `review_workout` uses these today):
+    activity_id: int | None = None
+    run_date: str | None = None
+
+
+@app.post("/api/ai/action/{name}")
+def ai_action(name: str, body: ActionInput) -> dict[str, Any]:
+    """Run one of the 5 default actions. The action wrapper inside
+    AgenticCoach pre-fetches the relevant MCP tools in parallel and
+    injects results into the LLM's system prompt — see
+    docs/mcp_tools_design.md and agentic_coach.py."""
+    try:
+        if name == "review_workout":
+            if body.activity_id is None:
+                raise HTTPException(400, "review_workout requires activity_id")
+            answer = agent.review_workout(
+                activity_id=body.activity_id,
+                thread_id=body.thread_id,
+                run_date=body.run_date,
+                user_message=body.message,
+            )
+            tid = body.thread_id or f"review_workout_{body.activity_id}"
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "make_plan":
+            answer = agent.make_plan(
+                thread_id=body.thread_id, user_message=body.message
+            )
+            tid = body.thread_id or f"make_plan_{datetime.date.today().isoformat()}"
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "review_health":
+            answer = agent.review_health(
+                thread_id=body.thread_id, user_message=body.message
+            )
+            tid = body.thread_id or f"review_health_{datetime.date.today().isoformat()}"
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "follow_up_memory":
+            answer = agent.follow_up_memory(
+                thread_id=body.thread_id, user_message=body.message
+            )
+            tid = body.thread_id or f"follow_up_memory_{datetime.date.today().isoformat()}"
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "summarize_and_archive":
+            if not body.thread_id:
+                raise HTTPException(
+                    400, "summarize_and_archive requires thread_id"
+                )
+            return agent.summarize_and_archive(thread_id=body.thread_id)
+
+        raise HTTPException(404, f"Unknown action: {name}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Surface failures with stack-trace context — these flows can
+        # fail in the LLM call, the MCP subprocess, or the prefetch.
+        import traceback
+
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "action": name,
+        }
 
 
 @app.get("/api/ai/history/{thread_id}")
