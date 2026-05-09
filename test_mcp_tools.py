@@ -32,33 +32,34 @@ def _short(payload, limit: int = 280) -> str:
 # Args are tuned to today's data (May 7 2026). The smoke run will print
 # a compact one-line summary per tool plus a few sample fields.
 CALLS: list[tuple[str, dict, str]] = [
-    ("list_runs", {"start": "2026-05-01", "end": "2026-05-07"}, "runs this week"),
-    ("get_run_detail", {"activity_id": 22739453672}, "Weehawken Running"),
-    ("get_run_laps", {"activity_id": 22739453672}, "10 laps"),
-    ("get_run_telemetry", {"activity_id": 22739453672, "downsample_sec": 30}, "telemetry summary"),
-    ("list_blocks", {}, "blocks + selected"),
-    (
-        "get_cycle_stats",
-        {
-            "block_id": "block_002",
-            "week_start": "2026-05-04",
-            "week_end": "2026-05-10",
-        },
-        "Pre Fall 2026 Build, week 2",
-    ),
-    ("get_monthly_stats", {"activity_type": "running"}, "23 months"),
-    ("list_manual_activities", {"start": "2026-04-25", "end": "2026-05-07"}, "steam room entries"),
+    # Profile + state
+    ("get_athlete_profile", {}, "identity + RPE-named HR zones + cycle phase"),
+    ("get_readiness", {}, "today's green/yellow/red"),
+    ("get_training_load", {"window_days": 28}, "ACWR + weekly trend"),
+    # Runs (three-stream coach view)
+    ("list_runs", {"start": "2026-05-01", "end": "2026-05-09"}, "compact run list"),
+    ("get_run_detail", {"activity_id": 22739453672}, "Weehawken 10mi (objective + perceived)"),
+    ("get_run_telemetry", {"activity_id": 22739453672, "downsample_sec": 60}, "buckets + drift"),
+    ("get_run_weather", {"activity_id": 22739453672}, "5/2 weather"),
+    # Cycle / monthly
+    ("list_blocks", {}, "3 blocks + active id"),
+    ("get_cycle_stats",
+     {"block_id": "block_002", "week_start": "2026-05-04", "week_end": "2026-05-10"},
+     "Pre Fall 2026 Build, week 2"),
+    ("get_monthly_stats", {"activity_type": "running"}, "23 months running"),
+    # Manuals + calendar + plan
+    ("list_manual_activities",
+     {"start": "2026-04-25", "end": "2026-05-09"},
+     "steam room entries"),
     ("get_manual_activity", {"activity_id": "manual_1777658163"}, "single steam room"),
-    (
-        "get_calendar_events",
-        {
-            "start": "2026-05-05T00:00:00",
-            "end": "2026-05-12T23:59:59",
-        },
-        "google + manual + run merge",
-    ),
-    ("get_health_metrics", {"days": 7}, "sleep/RHR/HRV last week"),
-    ("get_user_profile", {}, "garmin profile JSON"),
+    ("get_calendar_events",
+     {"start": "2026-05-05T00:00:00", "end": "2026-05-12T23:59:59"},
+     "google + manual + run merge"),
+    ("get_workout_plan", {"date": "2026-05-09"}, "Phase 1 always null"),
+    # CME
+    ("recall_topics", {"status": "active"}, "active CME topics"),
+    ("search_episodes", {"keywords": ["hot", "long run"], "limit": 3}, "episodic recall"),
+    ("get_pending_clarifications", {}, "unresolved questions"),
 ]
 
 
