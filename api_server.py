@@ -298,6 +298,24 @@ def sync_health_ledger(days_back: int = 120) -> dict[str, Any]:
     return {"ok": True, "rows": len(rows)}
 
 
+@app.get("/api/health/ledger")
+def health_ledger(days: int = Query(default=14, ge=1, le=365)) -> dict[str, Any]:
+    """Recent daily health metrics — sleep, RHR, HRV, stress, run miles —
+    for the last `days` days. Reads the cached ledger CSV; recompute via
+    POST /api/sync/health-ledger if it's stale."""
+    rows = processor.get_health_stats() or []
+    # rows are date-sorted ascending. Tail the requested window.
+    return {"days": days, "rows": rows[-days:]}
+
+
+@app.get("/api/profile")
+def user_profile_endpoint() -> dict[str, Any]:
+    """User's semantic-memory baseline profile (HR zones, goals, etc.)
+    that the coach prompts already inject. Exposed so MCP / AI tools can
+    read the same source of truth without duplicating the file path."""
+    return processor.get_semantic_memory() or {}
+
+
 @app.get("/api/training/blocks")
 def training_blocks() -> dict[str, Any]:
     blocks = processor.get_blocks()
