@@ -187,6 +187,16 @@ tools. Call additional tools only for what's missing.
 - Use Markdown with clear sections for analysis / recommendations.
 - Reference specific numbers from tool outputs to ground your claims.
 - If a tool returned null/empty, say so. Never fabricate.
+- NEVER render internal identifiers in user-facing prose. Specifically,
+  do not include any of these in the answer text:
+    • `tpc_<hex>` (topic ids from recall_topics)
+    • `epi_<hex>` (episode ids from search_episodes)
+    • `pnd_<hex>` (pending-clarification ids)
+    • activity_id numbers (use the run's date + name instead)
+  These are tool-facing identifiers only — referring to topics or
+  episodes by their natural name is sufficient and far more readable.
+  Bad:  "右膝外侧下坡刺痛 (tpc_713f9d8e) 处于观察期"
+  Good: "右膝外侧下坡刺痛处于观察期"
 """
 
 
