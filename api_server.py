@@ -982,7 +982,11 @@ def ai_history(thread_id: str) -> dict[str, Any]:
         content = msg.content
         if isinstance(content, list):
             content = "".join([block.get("text", "") for block in content if isinstance(block, dict)])
-        messages.append({"type": msg.type, "content": str(content)})
+        # NOTE: emit `role` (LangChain calls it `.type` internally —
+        # "human"/"ai"/"system"/"tool" — but the front-end TS type and
+        # filters key on `role`). Aligning the wire to `role` here is a
+        # one-line change vs. renaming three frontend files.
+        messages.append({"role": msg.type, "content": str(content)})
     return {"thread_id": thread_id, "messages": messages}
 
 
