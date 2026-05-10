@@ -975,6 +975,27 @@ def ai_sessions_new() -> dict[str, str]:
     return {"thread_id": _coach_session_thread_id()}
 
 
+@app.delete("/api/ai/sessions/{thread_id}")
+def ai_session_delete(thread_id: str) -> dict[str, Any]:
+    """Wipe the verbatim history of one Coach session.
+
+    Removes the LangGraph checkpoints + writes for `thread_id` plus
+    its session_meta sidecar row. Long-term memories that were
+    consolidated out of the session (topics/episodes in the CME) are
+    deliberately NOT removed — those are commingled with other
+    sessions' lessons and can't be cleanly separated.
+
+    Used today for two flows: (1) the user explicitly clicking a trash
+    icon on an archived-session divider in /coach, and (2) ad-hoc
+    cleanup of smoke-test pollution during dev.
+    """
+    try:
+        return agent.delete_session(thread_id)
+    except ValueError as e:
+        # thread_id doesn't pass the coach_*Z guard
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/ai/history/{thread_id}")
 def ai_history(thread_id: str) -> dict[str, Any]:
     messages = []

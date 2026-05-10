@@ -924,6 +924,55 @@ class AgenticCoach:
             })
         return out
 
+    def delete_session(self, thread_id: str) -> dict:
+        """Wipe a coach session from chat_memory.db.
+
+        Removes the LangGraph checkpoints + writes for `thread_id`
+        plus the session_meta sidecar row. The CME side (topics /
+        episodes that were consolidated *out* of this session) is
+        deliberately NOT touched — those rows are commingled with
+        memories from other sessions and we can't safely separate
+        them. So a deleted thread loses its verbatim history but its
+        long-term lessons remain in the agent's memory tools.
+
+        Guards:
+          - thread_id must look like `coach_<timestamp>Z` so a typo
+            or malicious caller can't blow away non-coach checkpoint
+            data.
+          - Returns row-counts so the caller can tell "actually
+            deleted" from "thread didn't exist".
+        """
+        if not (thread_id.startswith("coach_") and thread_id.endswith("Z")):
+            raise ValueError(
+                f"refusing to delete non-coach thread_id: {thread_id!r}"
+            )
+        try:
+            with self.conn:  # transaction
+                ck = self.conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+                ).rowcount
+                wr = self.conn.execute(
+                    "DELETE FROM writes WHERE thread_id = ?", (thread_id,)
+                ).rowcount
+                sm = self.conn.execute(
+                    "DELETE FROM session_meta WHERE thread_id = ?", (thread_id,)
+                ).rowcount
+            return {
+                "thread_id": thread_id,
+                "checkpoints_deleted": ck,
+                "writes_deleted": wr,
+                "session_meta_deleted": sm,
+            }
+        except sqlite3.OperationalError as e:
+            # Tables not created yet — nothing to delete, treat as no-op.
+            return {
+                "thread_id": thread_id,
+                "checkpoints_deleted": 0,
+                "writes_deleted": 0,
+                "session_meta_deleted": 0,
+                "note": f"sqlite tables missing: {e}",
+            }
+
     # -- Conversation history helpers --------------------------------
 
     def get_history(self, thread_id: str) -> list[BaseMessage]:

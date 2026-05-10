@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Loader2 } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import { classifyCoachError } from "@/lib/coach-errors";
 import { useCoachSession } from "@/lib/hooks/use-coach-session";
 import type {
@@ -103,6 +103,28 @@ export function CoachThread() {
 
   const refreshAll = () => {
     qc.invalidateQueries({ queryKey: ["coach"] });
+  };
+
+  /**
+   * Delete an archived session from the user's history.
+   *
+   * Confirms with a native dialog (this is rare admin-ish action;
+   * native confirm is fine on mobile). Removes verbatim history +
+   * session_meta on the backend; long-term lessons (CME topics /
+   * episodes) deliberately remain — they're commingled with other
+   * sessions. After delete, invalidate queries so the divider goes
+   * away.
+   */
+  const deleteArchivedSession = async (threadId: string) => {
+    if (!window.confirm("删除这次归档会话的对话记录？\n（学到的长期记忆不会被删除。）")) {
+      return;
+    }
+    try {
+      await apiDelete(`/api/ai/sessions/${encodeURIComponent(threadId)}`);
+      refreshAll();
+    } catch (e) {
+      setErrorMsg((e as Error).message);
+    }
   };
 
   /**
@@ -266,7 +288,11 @@ export function CoachThread() {
           .reverse()
           .map(({ session, messages }) => (
             <div key={session.thread_id}>
-              <SessionDivider session={session} variant="archived" />
+              <SessionDivider
+                session={session}
+                variant="archived"
+                onDelete={deleteArchivedSession}
+              />
               <div className="space-y-3">
                 {visible(messages).map((m, i) => (
                   <MessageBubble key={i} message={m} />
