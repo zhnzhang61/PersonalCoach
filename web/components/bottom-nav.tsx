@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BarChart3, Heart, Settings } from "lucide-react";
+import { Activity, BarChart3, Heart, MessageCircle, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const items = [
@@ -18,6 +18,12 @@ const items = [
     label: "Training",
     icon: BarChart3,
     match: (p: string) => p.startsWith("/training"),
+  },
+  {
+    href: "/coach",
+    label: "Coach",
+    icon: MessageCircle,
+    match: (p: string) => p.startsWith("/coach"),
   },
   {
     href: "/setup",

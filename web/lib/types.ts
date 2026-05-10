@@ -442,3 +442,60 @@ export interface SleepDetail {
     awake_count: number | null;
   };
 }
+
+// ==========================================
+// Coach chat (session-based; see docs/coach_chat_design.md)
+// ==========================================
+
+export type CoachActionName =
+  | "review_workout"
+  | "make_plan"
+  | "review_health"
+  | "follow_up_memory"
+  | "summarize_and_archive";
+
+export interface CoachMessage {
+  role: "human" | "ai" | "system" | "tool";
+  content: string;
+  ts?: string;
+}
+
+export interface CoachSession {
+  thread_id: string;
+  started_at: string | null;
+  closed_at: string | null;
+  summary: string | null;
+  topics_added: number;
+  episodes_added: number;
+  message_count: number;
+}
+
+export interface CoachSessionsResponse {
+  sessions: CoachSession[];
+  limit: number;
+  before: string | null;
+}
+
+export interface CoachChatResponse {
+  thread_id: string;
+  answer: string;
+}
+
+export interface CoachActionResponse {
+  thread_id: string;
+  answer?: string;
+  // archive-only fields:
+  summary?: string | null;
+  topics_added?: number;
+  episodes_added?: number;
+  closed_at?: string | null;
+  consolidation?: unknown;
+  // error path:
+  error?: string;
+  traceback?: string;
+}
+
+export interface CoachHistoryResponse {
+  thread_id: string;
+  messages: CoachMessage[];
+}

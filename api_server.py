@@ -856,8 +856,144 @@ def ai_health_analysis(body: HealthAnalysisInput) -> dict[str, Any]:
 
 @app.post("/api/ai/chat")
 def ai_chat(body: ChatInput) -> dict[str, Any]:
-    answer = agent.chat(user_input=body.message, thread_id=body.thread_id, system_context=body.system_context)
+    answer = agent.chat(
+        user_input=body.message,
+        thread_id=body.thread_id,
+        system_context=body.system_context,
+    )
     return {"thread_id": body.thread_id, "answer": answer}
+
+
+# ==========================================================================
+# Default actions — Phase 2 prebuilt flows. Each pre-fetches a tuned set
+# of MCP tools in parallel and feeds the JSON to the LLM as system
+# context (option A from the design discussion). Free chat continues to
+# go through /api/ai/chat with no pre-fetch.
+# ==========================================================================
+
+
+class ActionInput(BaseModel):
+    # thread_id is REQUIRED for all session-bound actions (the 4
+    # utility actions append to the active session; archive closes the
+    # active session). The frontend tracks current_session_id in
+    # localStorage and passes it on every request.
+    thread_id: str
+    message: str | None = None  # optional freeform extra question
+    # Action-specific args (only `review_workout` uses these today):
+    activity_id: int | None = None
+    run_date: str | None = None
+
+
+def _coach_session_thread_id() -> str:
+    """Generate a fresh coach-session thread_id. Frontend normally
+    owns this, but the api can mint one as a fallback."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"coach_{ts}"
+
+
+@app.post("/api/ai/action/{name}")
+def ai_action(name: str, body: ActionInput) -> dict[str, Any]:
+    """Run one of the 5 default actions inside the given session.
+
+    Each utility action (review_workout / make_plan / review_health /
+    follow_up_memory) pre-fetches the relevant MCP tools in parallel
+    and APPENDS its result to the existing thread_id so multiple
+    actions stack into a coherent session.
+
+    summarize_and_archive closes the session — the frontend should
+    rotate to a new session_id on the next user message.
+    """
+    try:
+        tid = body.thread_id
+
+        if name == "review_workout":
+            if body.activity_id is None:
+                raise HTTPException(400, "review_workout requires activity_id")
+            answer = agent.review_workout(
+                activity_id=body.activity_id,
+                thread_id=tid,
+                run_date=body.run_date,
+                user_message=body.message,
+            )
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "make_plan":
+            answer = agent.make_plan(thread_id=tid, user_message=body.message)
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "review_health":
+            answer = agent.review_health(thread_id=tid, user_message=body.message)
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "follow_up_memory":
+            answer = agent.follow_up_memory(thread_id=tid, user_message=body.message)
+            return {"thread_id": tid, "answer": answer}
+
+        if name == "summarize_and_archive":
+            return agent.summarize_and_archive(thread_id=tid)
+
+        raise HTTPException(404, f"Unknown action: {name}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Surface failures with stack-trace context — these flows can
+        # fail in the LLM call, the MCP subprocess, or the prefetch.
+        import traceback
+
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "action": name,
+        }
+
+
+# --- Session listing ---
+
+
+@app.get("/api/ai/sessions")
+def ai_sessions(
+    limit: int = Query(default=10, ge=1, le=100),
+    before: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """List Coach sessions in reverse-chronological order (newest
+    first). `before` is a thread_id used as a paging cursor — only
+    sessions older than that are returned. See
+    docs/coach_chat_design.md.
+    """
+    return {
+        "sessions": agent.list_sessions(limit=limit, before=before),
+        "limit": limit,
+        "before": before,
+    }
+
+
+@app.post("/api/ai/sessions")
+def ai_sessions_new() -> dict[str, str]:
+    """Mint a fresh session thread_id. Frontend can also generate this
+    client-side; the endpoint exists so non-web clients (curl, future
+    integrations) don't have to know the thread_id format."""
+    return {"thread_id": _coach_session_thread_id()}
+
+
+@app.delete("/api/ai/sessions/{thread_id}")
+def ai_session_delete(thread_id: str) -> dict[str, Any]:
+    """Wipe the verbatim history of one Coach session.
+
+    Removes the LangGraph checkpoints + writes for `thread_id` plus
+    its session_meta sidecar row. Long-term memories that were
+    consolidated out of the session (topics/episodes in the CME) are
+    deliberately NOT removed — those are commingled with other
+    sessions' lessons and can't be cleanly separated.
+
+    Used today for two flows: (1) the user explicitly clicking a trash
+    icon on an archived-session divider in /coach, and (2) ad-hoc
+    cleanup of smoke-test pollution during dev.
+    """
+    try:
+        return agent.delete_session(thread_id)
+    except ValueError as e:
+        # thread_id doesn't pass the coach_*Z guard
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/ai/history/{thread_id}")
@@ -867,7 +1003,11 @@ def ai_history(thread_id: str) -> dict[str, Any]:
         content = msg.content
         if isinstance(content, list):
             content = "".join([block.get("text", "") for block in content if isinstance(block, dict)])
-        messages.append({"type": msg.type, "content": str(content)})
+        # NOTE: emit `role` (LangChain calls it `.type` internally —
+        # "human"/"ai"/"system"/"tool" — but the front-end TS type and
+        # filters key on `role`). Aligning the wire to `role` here is a
+        # one-line change vs. renaming three frontend files.
+        messages.append({"role": msg.type, "content": str(content)})
     return {"thread_id": thread_id, "messages": messages}
 
 

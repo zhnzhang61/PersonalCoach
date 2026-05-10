@@ -109,11 +109,26 @@ class MemoryOS:
         self.conn.commit()
         self._migrate_topic_decisions_check()
 
-        # In-memory topic-embedding cache. Key: topic_id. Value: (signature, vector).
-        # The `signature` is a hash of (name + working_conclusion) — if it
-        # differs from the stored signature we re-embed, so stale cache entries
-        # self-heal after update_topic() without needing explicit invalidation.
-        self._topic_embeddings: dict[str, tuple[str, list[float]]] = {}
+        # In-memory topic-embedding cache.
+        #
+        # Key:   (provider, topic_id)  — the provider component prevents
+        #        a mid-process change of TOPIC_EMBED_PROVIDER from causing
+        #        old vectors (in space A) to be cosine-compared with new
+        #        vectors (in space B) silently. Different providers →
+        #        different cache slots → no cross-space contamination.
+        # Value: (signature, vector) — the `signature` is a hash of the
+        #        topic_signature_text (name + working_conclusion + open_question).
+        #        If it differs from the stored signature we re-embed, so
+        #        stale entries self-heal after update_topic() without
+        #        needing explicit invalidation.
+        #
+        # NOTE: not persisted. Process restart = empty cache = vectors
+        # get recomputed lazily on next find_matching_topic call. At
+        # 11 topics today this is ~1s of API time. If we ever cross
+        # 300+ topics, persist this to a `topic_embeddings` table
+        # (PRIMARY KEY (provider, topic_id), columns signature + vec_blob)
+        # — at that scale the cold-start latency starts to matter.
+        self._topic_embeddings: dict[tuple[str, str], tuple[str, list[float]]] = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -167,12 +182,19 @@ class MemoryOS:
     def _llm_invoke(self, prompt: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        # Route through groq-first fallback. CME consolidation is a
+        # background job that fires on every End & Save (and on every
+        # imported workout via the episodic path) — keeping it off the
+        # gemini RPM budget protects user-facing chat/action latency.
+        # Falls back to gemini if Groq is down or Llama struggles with
+        # the JSON shape on a particular input.
         msg, _ = call_llm(
             [
                 SystemMessage(content="You are a memory analysis assistant. Always respond in valid JSON when asked for JSON."),
                 HumanMessage(content=prompt),
             ],
             role="structured",
+            fallback_chain=["groq", "gemini"],
         )
         return str(msg.content).strip()
 
@@ -673,6 +695,14 @@ class MemoryOS:
         ]
         return " :: ".join(p.strip() for p in parts if p and p.strip())
 
+    def _invalidate_topic_cache(self, topic_id: str) -> None:
+        """Drop every cached embedding for `topic_id` regardless of which
+        provider produced it. Called whenever a topic's signature text
+        changes (update / merge / delete) so the next match recomputes."""
+        keys = [k for k in self._topic_embeddings if k[1] == topic_id]
+        for k in keys:
+            self._topic_embeddings.pop(k, None)
+
     def _embed_topic(self, topic: dict) -> list[float]:
         """Return the cached embedding for a topic, recomputing if stale."""
         import hashlib
@@ -680,13 +710,14 @@ class MemoryOS:
         sig_text = self._topic_signature_text(topic)
         sig = hashlib.sha1(sig_text.encode("utf-8")).hexdigest()
         tid = topic["topic_id"]
+        cache_key = (self.TOPIC_EMBED_PROVIDER, tid)
 
-        cached = self._topic_embeddings.get(tid)
+        cached = self._topic_embeddings.get(cache_key)
         if cached and cached[0] == sig:
             return cached[1]
 
         vec = call_embedding([sig_text], provider=self.TOPIC_EMBED_PROVIDER)[0]
-        self._topic_embeddings[tid] = (sig, vec)
+        self._topic_embeddings[cache_key] = (sig, vec)
         return vec
 
     def find_matching_topic(
@@ -847,7 +878,7 @@ class MemoryOS:
                         updates["status"] = proposal["status"]
                 if updates:
                     self.update_topic(target_topic_id, **updates)
-                    self._topic_embeddings.pop(target_topic_id, None)
+                    self._invalidate_topic_cache(target_topic_id)
             else:  # conflict
                 self.promote_topic_to_conflicting(
                     target_topic_id,
@@ -973,7 +1004,7 @@ class MemoryOS:
         )
         self.conn.commit()
         # Invalidate cached embedding — signature changed
-        self._topic_embeddings.pop(topic_id, None)
+        self._invalidate_topic_cache(topic_id)
         return True
 
     # ==================================================================
@@ -1122,7 +1153,7 @@ class MemoryOS:
                         updates["status"] = t["status"]
                 if updates:
                     self.update_topic(match_tid, **updates)
-                    self._topic_embeddings.pop(match_tid, None)
+                    self._invalidate_topic_cache(match_tid)
                 print(f"[CME] new_topic '{name}' → auto-merged into {match_tid}")
             else:
                 # Below threshold — park for user confirmation. UI will let user
@@ -1152,7 +1183,7 @@ class MemoryOS:
                 updates["working_conclusion"] = u["updated_conclusion"]
             if updates:
                 self.update_topic(tid, **updates)
-                self._topic_embeddings.pop(tid, None)
+                self._invalidate_topic_cache(tid)
 
         # --- Step 3: conflicts — auto-promote or queue for user confirmation ---
         for c in result.get("conflicts", []):

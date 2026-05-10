@@ -28,6 +28,13 @@ const nextConfig: NextConfig = {
     "zhans-macbook-pro",
     "*.ts.net",
     "100.110.119.107",
+    // Local Wi-Fi IP — phone-on-LAN access during dev.
+    "192.168.1.227",
+    // Loopback — desktop browsers hitting http://127.0.0.1:3001 or
+    // http://localhost:3001 during dev. Without these, /_next/* dev
+    // chunks 404/blocked and the page hydrates with empty skeletons.
+    "127.0.0.1",
+    "localhost",
   ],
   // Hide the floating "N" route-info badge in dev — we view this on the
   // iPhone where the badge crowds the bottom-left corner.

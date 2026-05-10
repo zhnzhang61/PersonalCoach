@@ -59,7 +59,11 @@ _PROVIDERS: dict[str, dict] = {
     "gemini": {
         "class": "langchain_google_genai.ChatGoogleGenerativeAI",
         "params": {
-            "model": "gemini-2.5-flash",
+            # 3.1-flash-lite (May 2026): 15 RPM / 250k TPM / 500 RPD on free
+            # tier — TPM is what was breaking us on Groq Llama 70B. Per-day
+            # cap of 500 calls covers a full day of chat + actions for one
+            # user. See https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-1-flash-lite
+            "model": "gemini-3.1-flash-lite",
             "api_key_env": "GEMINI_KEY",
         },
     },
@@ -241,9 +245,14 @@ _EMBEDDING_PROVIDERS: dict[str, dict] = {
     "gemini": {
         "class": "langchain_google_genai.GoogleGenerativeAIEmbeddings",
         "params": {
-            # Google Gemini embedding, 3072-dim. text-embedding-004 / embedding-001
-            # return 404 NOT_FOUND on the v1beta API as of April 2026.
-            "model": "models/gemini-embedding-001",
+            # gemini-embedding-2 (May 2026) — multimodal-capable successor
+            # to embedding-001. We currently only embed short text (topic
+            # signatures), but the upgrade is harmless even for text-only
+            # use and lets us feed images/audio/video into the same vector
+            # space later (e.g. embed a route map thumbnail to find similar
+            # past runs). The cache lives in CME keyed by (provider, tid)
+            # so the model swap doesn't pollute mid-flight.
+            "model": "models/gemini-embedding-2",
             "api_key_env": "GEMINI_KEY",
         },
     },
