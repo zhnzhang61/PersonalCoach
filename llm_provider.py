@@ -245,9 +245,14 @@ _EMBEDDING_PROVIDERS: dict[str, dict] = {
     "gemini": {
         "class": "langchain_google_genai.GoogleGenerativeAIEmbeddings",
         "params": {
-            # Google Gemini embedding, 3072-dim. text-embedding-004 / embedding-001
-            # return 404 NOT_FOUND on the v1beta API as of April 2026.
-            "model": "models/gemini-embedding-001",
+            # gemini-embedding-2 (May 2026) — multimodal-capable successor
+            # to embedding-001. We currently only embed short text (topic
+            # signatures), but the upgrade is harmless even for text-only
+            # use and lets us feed images/audio/video into the same vector
+            # space later (e.g. embed a route map thumbnail to find similar
+            # past runs). The cache lives in CME keyed by (provider, tid)
+            # so the model swap doesn't pollute mid-flight.
+            "model": "models/gemini-embedding-2",
             "api_key_env": "GEMINI_KEY",
         },
     },
