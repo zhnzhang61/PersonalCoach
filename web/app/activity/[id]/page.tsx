@@ -180,7 +180,11 @@ export default function ActivityDetailPage({
       ) : null}
 
       <div className="mt-5">
-        <AskAiButton activityId={activityId} runDate={dateStr ?? null} />
+        <AskAiButton
+          activityId={activityId}
+          runDate={dateStr ?? null}
+          runName={name}
+        />
       </div>
 
       <div className="mt-6 space-y-4">

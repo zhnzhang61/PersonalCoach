@@ -13,6 +13,25 @@ interface Props {
   // Optional: pass run start-date so the agent's review prompt has a
   // concrete date even before MCP tools are called.
   runDate?: string | null;
+  // Optional: human-readable run name (e.g. "Weehawken Running"). Used
+  // to phrase the chat-bubble that lands in /coach as a sentence the
+  // user would have written ("请分析我 2026年5月10日 Weehawken
+  // Running 这次训练。") instead of a raw activity_id reference.
+  runName?: string | null;
+}
+
+/**
+ * Format an ISO date (YYYY-MM-DD or full timestamp) as a Chinese
+ * date phrase: "2026年5月10日". Returns null if the input doesn't
+ * start with a parseable date.
+ */
+function formatRunDateZh(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d] = m;
+  // Drop leading zeros from month/day for a more natural Chinese reading.
+  return `${y}年${parseInt(mo, 10)}月${parseInt(d, 10)}日`;
 }
 
 /**
@@ -24,7 +43,7 @@ interface Props {
  * Per design doc: review_workout is launched here, not from the Coach
  * tab pills — the coach tab doesn't know which run the user means.
  */
-export function AskAiButton({ activityId, runDate }: Props) {
+export function AskAiButton({ activityId, runDate, runName }: Props) {
   const router = useRouter();
   const { ensureCurrent } = useCoachSession();
   const [pending, setPending] = useState(false);
@@ -36,6 +55,15 @@ export function AskAiButton({ activityId, runDate }: Props) {
     setPending(true);
     const tid = ensureCurrent();
 
+    // Build the user-facing message that will render as a chat bubble
+    // in /coach. Falls back to the raw activity_id form only if we
+    // genuinely have nothing readable.
+    const dateZh = formatRunDateZh(runDate);
+    const descriptor = [dateZh, runName?.trim()].filter(Boolean).join(" ");
+    const message = descriptor
+      ? `请分析我 ${descriptor} 这次训练。`
+      : `请分析我 activity_id=${activityId} 这次训练。`;
+
     // Single rate-limit-aware retry. Same pattern as the coach thread:
     // if the agent's first call hits Gemini's 15 RPM, wait the
     // suggested cooldown and try once more before showing the error.
@@ -44,6 +72,7 @@ export function AskAiButton({ activityId, runDate }: Props) {
         thread_id: tid,
         activity_id: activityId,
         run_date: runDate ?? undefined,
+        message,
       });
 
     for (let attempt = 0; attempt < 2; attempt++) {
