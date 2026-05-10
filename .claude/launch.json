@@ -23,11 +23,8 @@
     {
       "name": "web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "web", "run", "dev", "--", "--port", "3001"],
-      "env": {
-        "API_BASE": "http://127.0.0.1:8766"
-      },
-      "port": 3001
+      "runtimeArgs": ["--prefix", "web", "run", "dev"],
+      "port": 3000
     }
   ]
 }
