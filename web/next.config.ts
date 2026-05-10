@@ -28,6 +28,8 @@ const nextConfig: NextConfig = {
     "zhans-macbook-pro",
     "*.ts.net",
     "100.110.119.107",
+    // Local Wi-Fi IP — phone-on-LAN access during dev.
+    "192.168.1.227",
   ],
   // Hide the floating "N" route-info badge in dev — we view this on the
   // iPhone where the badge crowds the bottom-left corner.

@@ -59,7 +59,11 @@ _PROVIDERS: dict[str, dict] = {
     "gemini": {
         "class": "langchain_google_genai.ChatGoogleGenerativeAI",
         "params": {
-            "model": "gemini-2.5-flash",
+            # 3.1-flash-lite (May 2026): 15 RPM / 250k TPM / 500 RPD on free
+            # tier — TPM is what was breaking us on Groq Llama 70B. Per-day
+            # cap of 500 calls covers a full day of chat + actions for one
+            # user. See https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-1-flash-lite
+            "model": "gemini-3.1-flash-lite",
             "api_key_env": "GEMINI_KEY",
         },
     },

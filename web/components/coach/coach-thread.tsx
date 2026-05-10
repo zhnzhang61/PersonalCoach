@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Loader2 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { classifyCoachError } from "@/lib/coach-errors";
 import { useCoachSession } from "@/lib/hooks/use-coach-session";
 import type {
   CoachActionName,
@@ -104,21 +105,68 @@ export function CoachThread() {
     qc.invalidateQueries({ queryKey: ["coach"] });
   };
 
+  /**
+   * Run a coach call with rate-limit-aware single retry.
+   *
+   * The agent sometimes hits Gemini's 15 RPM ceiling — when it does we
+   * want to (a) tell the user nicely, (b) wait the suggested cooldown,
+   * (c) try once more, and only then surface the failure. Both the
+   * thrown-error case (proxy 5xx) and the action endpoint's "200 with
+   * `.error` body" case are handled uniformly.
+   *
+   * Returns the resolved value on success, or null on terminal failure
+   * (caller has already had errorMsg set for them).
+   */
+  const callWithRetry = async <T,>(
+    fn: () => Promise<T>,
+    getErrorFromResult: (result: T) => string | null | undefined,
+  ): Promise<T | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const value = await fn();
+        const embedded = getErrorFromResult(value);
+        if (embedded) {
+          const info = classifyCoachError(embedded);
+          if (info.kind === "rate_limit" && attempt === 0 && info.retryAfterSec) {
+            setErrorMsg(info.message);
+            await new Promise((r) => setTimeout(r, info.retryAfterSec! * 1000));
+            continue;
+          }
+          setErrorMsg(info.message);
+          return null;
+        }
+        setErrorMsg(null);
+        return value;
+      } catch (e) {
+        const info = classifyCoachError((e as Error).message);
+        if (info.kind === "rate_limit" && attempt === 0 && info.retryAfterSec) {
+          setErrorMsg(info.message);
+          await new Promise((r) => setTimeout(r, info.retryAfterSec! * 1000));
+          continue;
+        }
+        setErrorMsg(info.message);
+        return null;
+      }
+    }
+    return null;
+  };
+
   const sendChat = async (text: string) => {
     const tid = ensureCurrent();
     setPending("chat");
     setErrorMsg(null);
-    try {
-      await apiPost<CoachChatResponse>("/api/ai/chat", {
-        thread_id: tid,
-        message: text,
-      });
-      refreshAll();
-    } catch (e) {
-      setErrorMsg((e as Error).message);
-    } finally {
-      setPending(null);
-    }
+    await callWithRetry(
+      () =>
+        apiPost<CoachChatResponse>("/api/ai/chat", {
+          thread_id: tid,
+          message: text,
+        }),
+      // /api/ai/chat doesn't shape errors into the body — failures
+      // come back as thrown HTTP errors only.
+      () => null,
+    );
+    refreshAll();
+    setPending(null);
   };
 
   const runAction = async (name: CoachActionName) => {
@@ -128,48 +176,41 @@ export function CoachThread() {
       if (!currentId) return;
       setPending(name);
       setErrorMsg(null);
-      try {
-        const res = await apiPost<CoachActionResponse>(
-          `/api/ai/action/${name}`,
-          { thread_id: currentId },
-        );
-        if (res.error) {
-          setErrorMsg(res.error);
-        } else {
-          const lines: string[] = [];
-          if (res.summary) lines.push(res.summary);
-          const tags: string[] = [];
-          if (res.topics_added) tags.push(`+${res.topics_added} topic${res.topics_added === 1 ? "" : "s"}`);
-          if (res.episodes_added) tags.push(`+${res.episodes_added} episode${res.episodes_added === 1 ? "" : "s"}`);
-          if (tags.length) lines.push(tags.join(" · "));
-          setArchiveToast(lines.join("\n") || "Session archived.");
-          // Clear active id so the next message creates a new session.
-          clearCurrent();
-        }
-        refreshAll();
-      } catch (e) {
-        setErrorMsg((e as Error).message);
-      } finally {
-        setPending(null);
+      const res = await callWithRetry(
+        () =>
+          apiPost<CoachActionResponse>(`/api/ai/action/${name}`, {
+            thread_id: currentId,
+          }),
+        (r) => r.error,
+      );
+      if (res && !res.error) {
+        const lines: string[] = [];
+        if (res.summary) lines.push(res.summary);
+        const tags: string[] = [];
+        if (res.topics_added) tags.push(`+${res.topics_added} topic${res.topics_added === 1 ? "" : "s"}`);
+        if (res.episodes_added) tags.push(`+${res.episodes_added} episode${res.episodes_added === 1 ? "" : "s"}`);
+        if (tags.length) lines.push(tags.join(" · "));
+        setArchiveToast(lines.join("\n") || "Session archived.");
+        // Clear active id so the next message creates a new session.
+        clearCurrent();
       }
+      refreshAll();
+      setPending(null);
       return;
     }
 
     const tid = ensureCurrent();
     setPending(name);
     setErrorMsg(null);
-    try {
-      const res = await apiPost<CoachActionResponse>(
-        `/api/ai/action/${name}`,
-        { thread_id: tid },
-      );
-      if (res.error) setErrorMsg(res.error);
-      refreshAll();
-    } catch (e) {
-      setErrorMsg((e as Error).message);
-    } finally {
-      setPending(null);
-    }
+    await callWithRetry(
+      () =>
+        apiPost<CoachActionResponse>(`/api/ai/action/${name}`, {
+          thread_id: tid,
+        }),
+      (r) => r.error,
+    );
+    refreshAll();
+    setPending(null);
   };
 
   // Auto-dismiss archive toast after 6s.

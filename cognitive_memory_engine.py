@@ -167,12 +167,19 @@ class MemoryOS:
     def _llm_invoke(self, prompt: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        # Route through groq-first fallback. CME consolidation is a
+        # background job that fires on every End & Save (and on every
+        # imported workout via the episodic path) — keeping it off the
+        # gemini RPM budget protects user-facing chat/action latency.
+        # Falls back to gemini if Groq is down or Llama struggles with
+        # the JSON shape on a particular input.
         msg, _ = call_llm(
             [
                 SystemMessage(content="You are a memory analysis assistant. Always respond in valid JSON when asked for JSON."),
                 HumanMessage(content=prompt),
             ],
             role="structured",
+            fallback_chain=["groq", "gemini"],
         )
         return str(msg.content).strip()
 

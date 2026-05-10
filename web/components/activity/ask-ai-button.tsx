@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Sparkles } from "lucide-react";
 import { apiPost } from "@/lib/api";
+import { classifyCoachError } from "@/lib/coach-errors";
 import { useCoachSession } from "@/lib/hooks/use-coach-session";
 import type { CoachActionResponse } from "@/lib/types";
 
@@ -34,27 +35,48 @@ export function AskAiButton({ activityId, runDate }: Props) {
     setErrorMsg(null);
     setPending(true);
     const tid = ensureCurrent();
-    try {
-      const res = await apiPost<CoachActionResponse>(
-        "/api/ai/action/review_workout",
-        {
-          thread_id: tid,
-          activity_id: activityId,
-          run_date: runDate ?? undefined,
-        },
-      );
-      if (res.error) {
-        setErrorMsg(res.error);
+
+    // Single rate-limit-aware retry. Same pattern as the coach thread:
+    // if the agent's first call hits Gemini's 15 RPM, wait the
+    // suggested cooldown and try once more before showing the error.
+    const fire = () =>
+      apiPost<CoachActionResponse>("/api/ai/action/review_workout", {
+        thread_id: tid,
+        activity_id: activityId,
+        run_date: runDate ?? undefined,
+      });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fire();
+        if (res.error) {
+          const info = classifyCoachError(res.error);
+          if (info.kind === "rate_limit" && attempt === 0 && info.retryAfterSec) {
+            setErrorMsg(info.message);
+            await new Promise((r) => setTimeout(r, info.retryAfterSec! * 1000));
+            continue;
+          }
+          setErrorMsg(info.message);
+          setPending(false);
+          return;
+        }
+        // Action succeeded — jump to Coach tab. The thread query there
+        // will pick up the appended turn for this thread_id.
+        router.push("/coach");
+        return;
+      } catch (e) {
+        const info = classifyCoachError((e as Error).message);
+        if (info.kind === "rate_limit" && attempt === 0 && info.retryAfterSec) {
+          setErrorMsg(info.message);
+          await new Promise((r) => setTimeout(r, info.retryAfterSec! * 1000));
+          continue;
+        }
+        setErrorMsg(info.message);
         setPending(false);
         return;
       }
-      // Action succeeded — jump to Coach tab. The thread query there
-      // will pick up the appended turn for this thread_id.
-      router.push("/coach");
-    } catch (e) {
-      setErrorMsg((e as Error).message);
-      setPending(false);
     }
+    setPending(false);
   };
 
   return (

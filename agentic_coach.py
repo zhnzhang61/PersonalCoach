@@ -441,9 +441,13 @@ class AgenticCoach:
             )
             self._aio_checkpointer = await self._aio_checkpointer_cm.__aenter__()
 
-            # Use Gemini as primary chat model for agent flow. The
-            # call_llm fallback chain still applies to non-tool flows
-            # (consolidation, summaries, episodic summaries).
+            # Use Gemini 3.1 Flash Lite as primary chat model for agent flow.
+            # Free-tier limits (May 2026): 15 RPM / 250k TPM / 500 RPD —
+            # the 250k TPM in particular is the headroom we needed; Groq
+            # Llama 3.3 70B free tier capped at 12k TPM and review_workout's
+            # ~14k first-turn prompt overran. The call_llm fallback chain
+            # still applies to non-tool flows (consolidation, summaries,
+            # episodic summaries) — those are unchanged.
             llm = _get_llm("creative", "gemini")
             self._last_provider = "gemini"
 
@@ -849,7 +853,12 @@ class AgenticCoach:
 
     def summarize_thread(self, thread_id: str) -> str | None:
         """Compress a thread to 1-2 sentences. Used by
-        summarize_and_archive and the existing UI flow."""
+        summarize_and_archive and the existing UI flow.
+
+        Routed through groq-first fallback so it doesn't compete with
+        the agent's gemini RPM budget — this fires on every End & Save
+        and would otherwise eat 1 of the 15 free RPM that the user-
+        facing chat/action loop needs."""
         history = self.get_history(thread_id)
         if len(history) <= 3:
             return None
@@ -864,7 +873,11 @@ class AgenticCoach:
             "使用第三人称陈述句。\n\n"
             f"对话记录：\n{chat_text}"
         )
-        msg, _ = call_llm([HumanMessage(content=prompt)], role="precise")
+        msg, _ = call_llm(
+            [HumanMessage(content=prompt)],
+            role="precise",
+            fallback_chain=["groq", "gemini"],
+        )
         return str(msg.content).strip()
 
     # -- Back-compat shims -------------------------------------------
@@ -936,7 +949,11 @@ class AgenticCoach:
     ) -> dict:
         """Compress a workout into a 50-75 word memory capsule with
         tags. Used by the activity-tab Save flow to write to episodic
-        memory. Unchanged from v1 logic."""
+        memory. Unchanged from v1 logic.
+
+        Routed through groq-first fallback so a Garmin-sync batch (which
+        fires this once per imported run) doesn't burn the gemini RPM
+        budget shared with user-facing chat/action."""
         run_name = (
             (working_memory_dict.get("workout_summary") or {}).get("name")
             or "Unnamed Workout"
@@ -959,6 +976,7 @@ class AgenticCoach:
                 HumanMessage(content=prompt),
             ],
             role="structured",
+            fallback_chain=["groq", "gemini"],
         )
         try:
             content = (
