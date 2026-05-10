@@ -268,7 +268,16 @@ one-paragraph rationale.
 
 _REVIEW_HEALTH_INSTRUCTIONS = """### TASK: Review the user's recovery state
 
-Cover:
+**Line 1 must be a single declarative sentence** summarizing today's
+recovery state in plain language. No heading marker, no bullet, no
+greeting, no "根据数据" preamble. Just one sentence the user can read
+off a glance card. Examples:
+  • "今日恢复良好，绿灯日，可以正常训练。"
+  • "HRV 偏低 + 睡眠不足，建议改为轻量恢复。"
+  • "黄灯 — 各项指标偏离基线，今天降一档强度。"
+
+Then a blank line, then the full breakdown:
+
 1. Today's readiness score and what's driving it (which marker is
    off baseline).
 2. ACWR + 28-day load — is the body absorbing the load or
