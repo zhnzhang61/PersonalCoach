@@ -873,59 +873,64 @@ def ai_chat(body: ChatInput) -> dict[str, Any]:
 
 
 class ActionInput(BaseModel):
-    thread_id: str | None = None
+    # thread_id is REQUIRED for all session-bound actions (the 4
+    # utility actions append to the active session; archive closes the
+    # active session). The frontend tracks current_session_id in
+    # localStorage and passes it on every request.
+    thread_id: str
     message: str | None = None  # optional freeform extra question
     # Action-specific args (only `review_workout` uses these today):
     activity_id: int | None = None
     run_date: str | None = None
 
 
+def _coach_session_thread_id() -> str:
+    """Generate a fresh coach-session thread_id. Frontend normally
+    owns this, but the api can mint one as a fallback."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"coach_{ts}"
+
+
 @app.post("/api/ai/action/{name}")
 def ai_action(name: str, body: ActionInput) -> dict[str, Any]:
-    """Run one of the 5 default actions. The action wrapper inside
-    AgenticCoach pre-fetches the relevant MCP tools in parallel and
-    injects results into the LLM's system prompt — see
-    docs/mcp_tools_design.md and agentic_coach.py."""
+    """Run one of the 5 default actions inside the given session.
+
+    Each utility action (review_workout / make_plan / review_health /
+    follow_up_memory) pre-fetches the relevant MCP tools in parallel
+    and APPENDS its result to the existing thread_id so multiple
+    actions stack into a coherent session.
+
+    summarize_and_archive closes the session — the frontend should
+    rotate to a new session_id on the next user message.
+    """
     try:
+        tid = body.thread_id
+
         if name == "review_workout":
             if body.activity_id is None:
                 raise HTTPException(400, "review_workout requires activity_id")
             answer = agent.review_workout(
                 activity_id=body.activity_id,
-                thread_id=body.thread_id,
+                thread_id=tid,
                 run_date=body.run_date,
                 user_message=body.message,
             )
-            tid = body.thread_id or f"review_workout_{body.activity_id}"
             return {"thread_id": tid, "answer": answer}
 
         if name == "make_plan":
-            answer = agent.make_plan(
-                thread_id=body.thread_id, user_message=body.message
-            )
-            tid = body.thread_id or f"make_plan_{datetime.date.today().isoformat()}"
+            answer = agent.make_plan(thread_id=tid, user_message=body.message)
             return {"thread_id": tid, "answer": answer}
 
         if name == "review_health":
-            answer = agent.review_health(
-                thread_id=body.thread_id, user_message=body.message
-            )
-            tid = body.thread_id or f"review_health_{datetime.date.today().isoformat()}"
+            answer = agent.review_health(thread_id=tid, user_message=body.message)
             return {"thread_id": tid, "answer": answer}
 
         if name == "follow_up_memory":
-            answer = agent.follow_up_memory(
-                thread_id=body.thread_id, user_message=body.message
-            )
-            tid = body.thread_id or f"follow_up_memory_{datetime.date.today().isoformat()}"
+            answer = agent.follow_up_memory(thread_id=tid, user_message=body.message)
             return {"thread_id": tid, "answer": answer}
 
         if name == "summarize_and_archive":
-            if not body.thread_id:
-                raise HTTPException(
-                    400, "summarize_and_archive requires thread_id"
-                )
-            return agent.summarize_and_archive(thread_id=body.thread_id)
+            return agent.summarize_and_archive(thread_id=tid)
 
         raise HTTPException(404, f"Unknown action: {name}")
     except HTTPException:
@@ -940,6 +945,34 @@ def ai_action(name: str, body: ActionInput) -> dict[str, Any]:
             "traceback": traceback.format_exc(),
             "action": name,
         }
+
+
+# --- Session listing ---
+
+
+@app.get("/api/ai/sessions")
+def ai_sessions(
+    limit: int = Query(default=10, ge=1, le=100),
+    before: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """List Coach sessions in reverse-chronological order (newest
+    first). `before` is a thread_id used as a paging cursor — only
+    sessions older than that are returned. See
+    docs/coach_chat_design.md.
+    """
+    return {
+        "sessions": agent.list_sessions(limit=limit, before=before),
+        "limit": limit,
+        "before": before,
+    }
+
+
+@app.post("/api/ai/sessions")
+def ai_sessions_new() -> dict[str, str]:
+    """Mint a fresh session thread_id. Frontend can also generate this
+    client-side; the endpoint exists so non-web clients (curl, future
+    integrations) don't have to know the thread_id format."""
+    return {"thread_id": _coach_session_thread_id()}
 
 
 @app.get("/api/ai/history/{thread_id}")

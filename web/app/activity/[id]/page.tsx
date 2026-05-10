@@ -14,6 +14,7 @@ import type {
   RunDetailResponse,
   WeatherSnapshot,
 } from "@/lib/types";
+import { AskAiButton } from "@/components/activity/ask-ai-button";
 import { EditRunForm } from "@/components/activity/edit-run-form";
 import { LapTable } from "@/components/activity/lap-table";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
@@ -177,6 +178,10 @@ export default function ActivityDetailPage({
           {meta.notes}
         </p>
       ) : null}
+
+      <div className="mt-5">
+        <AskAiButton activityId={activityId} runDate={dateStr ?? null} />
+      </div>
 
       <div className="mt-6 space-y-4">
         <RunMap activityId={activityId} />

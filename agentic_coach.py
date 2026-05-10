@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import datetime
 import json
 import os
 import sqlite3
@@ -74,8 +75,10 @@ You are NOT split into "coach" and "doctor" personas. Both running
 biomechanics/training and physiological recovery/sleep/HRV are within
 your scope — pick the right tools for each question.
 
-You have MCP tools that read the user's data. Three streams to keep
-strictly distinguished in your reasoning:
+## Three streams (NEVER collapse them)
+
+You have MCP tools that read the user's data. Reasoning across these
+three streams correctly is the single most important thing:
 
   • objective — Garmin sensor measurements (HR, pace, training effect,
     HR zones against the user's RPE-named bands). Source of truth for
@@ -92,18 +95,37 @@ streams. E.g., Garmin says HIGHLY_IMPACTING_TEMPO + user labels
 Garmin says easy run + user notes "felt awful" = recovery deficit.
 Always look at all three before drawing a conclusion.
 
-When the user clicks a default action (review_workout, make_plan,
-etc.), the action wrapper has already pre-fetched the most relevant
-tools in parallel; you'll see their results as a JSON block in this
-system prompt. You can call more tools if you need them — but don't
-re-call ones already pre-fetched.
+## Conversation session rules
 
-When you respond:
+This conversation is one session, bounded by the user clicking
+"End & Save" when they're done. While it's active you have full
+verbatim access to every message in this session. You do NOT see
+content from prior closed sessions — those have been internalized
+into memory tools (CME). Don't ask the user to repeat things from
+prior sessions; use the tools.
+
+**On the FIRST user message of a new session** (no prior AI message
+in the conversation), call `get_pending_clarifications` exactly once.
+If it returns any items, ask the user those questions BEFORE any
+other coaching. These are explicit conflicts the agent owes the user
+from prior sessions.
+
+**Throughout the session**, when the user references a past
+situation, an old goal, an injury / niggle / preference you'd
+plausibly already know about, or whenever you'd want to reference
+prior coaching — call `recall_topics(status="active")` or
+`search_episodes(keywords=[...])`. Don't fabricate history.
+
+When a default action (review_workout / make_plan / review_health /
+follow_up_memory) has pre-fetched tool results into the system
+prompt above your messages, USE that data — don't re-call those
+tools. Call additional tools only for what's missing.
+
+## Output
+
 - Use Markdown with clear sections for analysis / recommendations.
 - Reference specific numbers from tool outputs to ground your claims.
-- If the user has unresolved CME clarifications, ask them BEFORE
-  giving advice.
-- Never fabricate. If a tool returned null/empty, say so.
+- If a tool returned null/empty, say so. Never fabricate.
 """
 
 
@@ -220,6 +242,24 @@ def _prefetch_follow_up_memory() -> list[tuple[str, dict]]:
     ]
 
 
+def _started_at_from_thread_id(thread_id: str) -> str | None:
+    """Coach session thread ids look like `coach_20260509T220103Z`.
+    Pull out the timestamp portion as ISO-8601 so the frontend can
+    sort/format without parsing thread_ids itself."""
+    if not thread_id.startswith("coach_"):
+        return None
+    rest = thread_id[len("coach_"):]
+    # Expect 8+T+6+Z layout (UTC-compact). Reformat to standard ISO.
+    if len(rest) >= 16 and rest.endswith("Z"):
+        try:
+            y, mo, d = rest[0:4], rest[4:6], rest[6:8]
+            h, mi, s = rest[9:11], rest[11:13], rest[13:15]
+            return f"{y}-{mo}-{d}T{h}:{mi}:{s}Z"
+        except Exception:
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # AgenticCoach
 # ---------------------------------------------------------------------------
@@ -262,6 +302,23 @@ class AgenticCoach:
         self.checkpointer = SqliteSaver(self.conn)
         self._aio_checkpointer: AsyncSqliteSaver | None = None
         self._aio_checkpointer_cm = None
+
+        # Session metadata sidecar — closed_at, summary, counts.
+        # Lives in the same chat_memory.db so a single backup covers
+        # both messages and session lifecycle. Active sessions have no
+        # row here; closed sessions have closed_at populated.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_meta (
+                thread_id      TEXT PRIMARY KEY,
+                closed_at      TEXT,
+                summary        TEXT,
+                topics_added   INTEGER DEFAULT 0,
+                episodes_added INTEGER DEFAULT 0
+            )
+            """
+        )
+        self.conn.commit()
 
         # MCP + agent are lazy-built on first chat (need an event loop).
         self._mcp_client = None
@@ -479,11 +536,13 @@ class AgenticCoach:
     def review_workout(
         self,
         activity_id: int,
-        thread_id: str | None = None,
+        thread_id: str,
         run_date: str | None = None,
         user_message: str | None = None,
     ) -> str:
-        thread_id = thread_id or f"review_workout_{activity_id}"
+        """Append a workout-review action to the given session thread.
+        Pre-fetches profile + run detail + telemetry + readiness +
+        pending in parallel. See docs/coach_chat_design.md."""
         return self._submit(self._action_turn(
             plan=_prefetch_review_workout(activity_id, run_date),
             instructions=_REVIEW_WORKOUT_INSTRUCTIONS,
@@ -495,10 +554,9 @@ class AgenticCoach:
 
     def make_plan(
         self,
-        thread_id: str | None = None,
+        thread_id: str,
         user_message: str | None = None,
     ) -> str:
-        thread_id = thread_id or f"make_plan_{date.today().isoformat()}"
         return self._submit(self._action_turn(
             plan=_prefetch_make_plan(),
             instructions=_MAKE_PLAN_INSTRUCTIONS,
@@ -508,10 +566,9 @@ class AgenticCoach:
 
     def review_health(
         self,
-        thread_id: str | None = None,
+        thread_id: str,
         user_message: str | None = None,
     ) -> str:
-        thread_id = thread_id or f"review_health_{date.today().isoformat()}"
         return self._submit(self._action_turn(
             plan=_prefetch_review_health(),
             instructions=_REVIEW_HEALTH_INSTRUCTIONS,
@@ -521,10 +578,9 @@ class AgenticCoach:
 
     def follow_up_memory(
         self,
-        thread_id: str | None = None,
+        thread_id: str,
         user_message: str | None = None,
     ) -> str:
-        thread_id = thread_id or f"follow_up_memory_{date.today().isoformat()}"
         return self._submit(self._action_turn(
             plan=_prefetch_follow_up_memory(),
             instructions=_FOLLOW_UP_MEMORY_INSTRUCTIONS,
@@ -533,22 +589,81 @@ class AgenticCoach:
         ))
 
     def summarize_and_archive(self, thread_id: str) -> dict[str, Any]:
-        """Post-conversation: ask the LLM to summarize the thread,
-        then run CME's consolidation. Returns the summary + whatever
-        consolidation reported (new topics / episodes / decisions)."""
+        """Close a session: summarize, run CME consolidation, record
+        session_meta so the sessions list shows it as closed.
+
+        Idempotent: if the thread is already archived, returns the
+        existing summary without re-running consolidation. Empty
+        sessions (≤2 messages) get a no-op archive that just clears
+        client state — no summary, no CME write."""
+        # Idempotency: don't double-archive.
+        existing = self._get_session_meta(thread_id)
+        if existing and existing.get("closed_at"):
+            return {
+                "thread_id": thread_id,
+                "summary": existing.get("summary"),
+                "consolidation": {
+                    "topics_added": existing.get("topics_added", 0),
+                    "episodes_added": existing.get("episodes_added", 0),
+                    "already_archived": True,
+                },
+                "closed_at": existing.get("closed_at"),
+            }
+
+        chat_list = self._chat_list_for_thread(thread_id)
+        if len(chat_list) < 2:
+            # Empty / 1-turn session — no point summarizing or
+            # consolidating. Just stamp it closed so it doesn't
+            # show up as active forever.
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self._set_session_meta(
+                thread_id, closed_at=now_iso, summary=None,
+                topics_added=0, episodes_added=0,
+            )
+            return {
+                "thread_id": thread_id,
+                "summary": None,
+                "consolidation": {"empty": True},
+                "closed_at": now_iso,
+            }
+
         summary = self.summarize_thread(thread_id)
         consolidation: dict[str, Any] | None = None
+        topics_added = 0
+        episodes_added = 0
         if self.memory_engine:
             try:
                 consolidation = self.memory_engine.consolidate_memory_background(
-                    thread_id, self._chat_list_for_thread(thread_id)
+                    thread_id, chat_list
                 )
+                # consolidate_memory_background may return None or a dict;
+                # the dict (when present) reports counts under various
+                # keys depending on CME version. Pull defensively.
+                if isinstance(consolidation, dict):
+                    topics_added = (
+                        len(consolidation.get("new_topics") or [])
+                        + len(consolidation.get("topics_created") or [])
+                    )
+                    episodes_added = (
+                        len(consolidation.get("new_episodes") or [])
+                        + len(consolidation.get("episodes_created") or [])
+                    )
             except Exception as e:
                 consolidation = {"error": str(e)}
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._set_session_meta(
+            thread_id, closed_at=now_iso, summary=summary,
+            topics_added=topics_added, episodes_added=episodes_added,
+        )
+
         return {
             "thread_id": thread_id,
             "summary": summary,
             "consolidation": consolidation,
+            "topics_added": topics_added,
+            "episodes_added": episodes_added,
+            "closed_at": now_iso,
         }
 
     # -- Core turn runners (async) -----------------------------------
@@ -605,6 +720,102 @@ class AgenticCoach:
         except Exception:
             model_name = provider
         return content + f"\n\n[Generated by {model_name}]"
+
+    # -- Session metadata --------------------------------------------
+
+    def _get_session_meta(self, thread_id: str) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT thread_id, closed_at, summary, topics_added, episodes_added "
+            "FROM session_meta WHERE thread_id = ?",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "thread_id": row[0],
+            "closed_at": row[1],
+            "summary": row[2],
+            "topics_added": row[3] or 0,
+            "episodes_added": row[4] or 0,
+        }
+
+    def _set_session_meta(
+        self,
+        thread_id: str,
+        *,
+        closed_at: str | None,
+        summary: str | None,
+        topics_added: int,
+        episodes_added: int,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO session_meta(thread_id, closed_at, summary, topics_added, episodes_added)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                closed_at = excluded.closed_at,
+                summary = excluded.summary,
+                topics_added = excluded.topics_added,
+                episodes_added = excluded.episodes_added
+            """,
+            (thread_id, closed_at, summary, topics_added, episodes_added),
+        )
+        self.conn.commit()
+
+    def list_sessions(
+        self, limit: int = 10, before: str | None = None
+    ) -> list[dict]:
+        """List Coach sessions in reverse-chronological order (newest
+        first), paginated.
+
+        Walks LangGraph's checkpoint table for distinct thread_ids
+        matching `coach_*`, joins with session_meta for closed_at /
+        summary / counts. `started_at` derived from the thread_id
+        timestamp suffix (cheap, sortable). `message_count` derived
+        from the latest checkpoint of that thread.
+
+        `before` accepts a thread_id; only thread_ids
+        lexicographically less than it are returned (since thread_ids
+        are timestamp-prefixed, lex order = chronological)."""
+        # Pull distinct coach_* thread_ids from the checkpoints table.
+        # AsyncSqliteSaver creates the table; if no chat has happened
+        # yet, the table won't exist — return [].
+        try:
+            sql = """
+                SELECT DISTINCT thread_id FROM checkpoints
+                WHERE thread_id LIKE 'coach_%'
+            """
+            params: list = []
+            if before:
+                sql += " AND thread_id < ?"
+                params.append(before)
+            sql += " ORDER BY thread_id DESC LIMIT ?"
+            params.append(limit)
+            cur = self.conn.execute(sql, params)
+            thread_ids = [r[0] for r in cur.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+        out: list[dict] = []
+        for tid in thread_ids:
+            meta = self._get_session_meta(tid) or {}
+            msgs = self.get_history(tid)
+            # Strip system messages from count — those are
+            # internal/pre-fetch noise from the user's POV.
+            user_or_ai = sum(
+                1 for m in msgs if m.type in ("human", "ai")
+            )
+            out.append({
+                "thread_id": tid,
+                "started_at": _started_at_from_thread_id(tid),
+                "closed_at": meta.get("closed_at"),
+                "summary": meta.get("summary"),
+                "topics_added": meta.get("topics_added", 0),
+                "episodes_added": meta.get("episodes_added", 0),
+                "message_count": user_or_ai,
+            })
+        return out
 
     # -- Conversation history helpers --------------------------------
 
