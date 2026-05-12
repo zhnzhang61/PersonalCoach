@@ -399,9 +399,25 @@ class AgenticCoach:
         db_path: str = "data/chat_memory.db",
         user_profile: dict | None = None,
         memory_engine=None,
+        skip_api_probe: bool = False,
     ):
+        """
+        Args:
+            skip_api_probe: when True, `_ensure_agent` skips the
+                `_require_api_reachable(api_base)` round-trip. Lets
+                tests construct an AgenticCoach + exercise the
+                non-agent methods (session_meta sidecar, history
+                lookup, delete_session, etc.) without standing up a
+                real api_server. Production paths leave this False.
+        """
         self.db_path = db_path
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # `db_path` may be `:memory:` or a path with no parent (e.g. a
+        # bare tmp filename in tests). Guard against passing "" to
+        # os.makedirs which raises FileNotFoundError.
+        parent = os.path.dirname(self.db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._skip_api_probe = skip_api_probe
 
         # Semantic profile — kept for back-compat (some v1 callers
         # passed this in). The new prompt doesn't pre-inject it; the
@@ -540,7 +556,13 @@ class AgenticCoach:
             # confusing for non-api callers (Streamlit dashboard, ad-hoc
             # scripts). Probe once up front and bail with a message
             # that points the user at the fix.
-            await self._require_api_reachable(api_base)
+            #
+            # Tests opt out via skip_api_probe=True — they typically
+            # mock the agent's chat/action methods entirely and never
+            # actually hit the MCP subprocess, so probing api_server
+            # would be a pointless dependency.
+            if not self._skip_api_probe:
+                await self._require_api_reachable(api_base)
             self._mcp_client = MultiServerMCPClient({
                 "personal-coach": {
                     "command": "uv",

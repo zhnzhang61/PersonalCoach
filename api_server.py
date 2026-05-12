@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+# (FileResponse import removed alongside the legacy GET / route.)
 from pydantic import BaseModel, Field
 
 from agentic_coach import AgenticCoach
@@ -163,10 +163,13 @@ class BlockUpdate(BaseModel):
     primary_event: str | None = None
 
 
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse("webapp/index.html")
-
+# NOTE: previously this module had `GET /` returning
+# FileResponse("webapp/index.html"), but `webapp/` doesn't exist —
+# that directory was the legacy Streamlit/static entry, retired
+# when the frontend moved to Next.js under `web/`. The route was
+# permanently broken (500 on every request) and surfaced by Phase
+# 2 endpoint smoke. Removed; the Next.js dev server / production
+# build serves the user-facing root on its own port.
 
 SYNC_STATE_PATH = Path("data") / "sync_state.json"
 

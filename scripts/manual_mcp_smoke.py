@@ -1,4 +1,10 @@
-"""Smoke-test the personal-coach MCP server via stdio.
+"""Manual smoke-test for the personal-coach MCP server via stdio.
+
+This is a dev tool, NOT a pytest target — it spawns a real subprocess,
+talks to a live api_server, and prints output for a human to eyeball.
+It used to live as `test_mcp_tools.py` at the repo root where pytest
+auto-collected it and choked on the network + subprocess side effects.
+Moved to `scripts/` and renamed during Phase 2 testability work.
 
 Spawns `personal_coach_mcp` as a subprocess, lists its tools, and calls
 each with a sensible default. Prints a compact summary so a human can
@@ -6,7 +12,7 @@ eyeball the output before we wire any agent up to it.
 
 Usage:
     PERSONAL_COACH_API_BASE=http://127.0.0.1:8766 \
-        uv run python test_mcp_tools.py
+        uv run python scripts/manual_mcp_smoke.py
 """
 
 from __future__ import annotations
