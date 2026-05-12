@@ -14,11 +14,28 @@ Fixtures here are used by every test under tests/. The big ones:
 
   • `tmp_chat_db`, `tmp_cme_db`: per-test SQLite paths so direct unit
     tests of AgenticCoach / MemoryOS don't share state.
+
+CRITICAL design note (see codex P2 review on PR #61):
+  `api_server` builds four heavy singletons at module-import time
+  (DataProcessor / GoogleCalendar / MemoryOS / AgenticCoach). Each
+  of those constructors touches the file system or opens a SQLite
+  connection — `DataProcessor.__init__` calls `_ensure_infrastructure`
+  which creates `data/blocks/`, `data/memory/user_profile.json`, etc.;
+  `MemoryOS.__init__` opens `data/cognition.db` and runs migrations;
+  `AgenticCoach.__init__` opens `data/chat_memory.db`. Running pytest
+  with the real classes can therefore mutate the developer's live
+  data and races against an open dev server.
+
+  We avoid that by patching the four classes at conftest module load
+  BEFORE `import api_server`, so the singletons it constructs are
+  shape-correct mocks. The patches are then stopped so direct-class
+  tests (`test_cme_v2`, `test_agentic_coach_basics`) still see the
+  real implementations.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -259,27 +276,74 @@ def _build_gcal_mock() -> MagicMock:
     return m
 
 
+# ---------------------------------------------------------------------------
+# Class-level patches activated BEFORE importing api_server.
+# ---------------------------------------------------------------------------
+#
+# Order matters. Module-level execution sequence in this file is:
+#
+#   1. patch("data_processor.DataProcessor", …).start()        ← active
+#   2. patch("google_calendar.GoogleCalendar", …).start()      ← active
+#   3. patch("cognitive_memory_engine.MemoryOS", …).start()    ← active
+#   4. patch("agentic_coach.AgenticCoach", …).start()          ← active
+#   5. import api_server   ← module-load constructs singletons,
+#                            sees the patched (mock) classes, never
+#                            touches real data/.
+#   6. for p in patches:  p.stop()   ← real classes restored.
+#
+# After step 6, `api_server.{processor,gcal,memory_engine,agent}` are
+# bound to shape-correct MagicMocks, and the *classes* themselves are
+# back to their real implementations — so the CME and AgenticCoach
+# direct-construction tests (test_cme_v2, test_agentic_coach_basics)
+# still get the real code paths.
+
+_class_patches = [
+    patch("data_processor.DataProcessor", return_value=_build_processor_mock()),
+    patch("google_calendar.GoogleCalendar", return_value=_build_gcal_mock()),
+    patch("cognitive_memory_engine.MemoryOS", return_value=_build_memory_engine_mock()),
+    patch("agentic_coach.AgenticCoach", return_value=_build_agent_mock()),
+]
+for _p in _class_patches:
+    _p.start()
+
+# Construct singletons under the mocked classes. After this import the
+# api_server module's globals reference our mock instances.
+import api_server  # noqa: E402
+
+for _p in _class_patches:
+    _p.stop()
+
+
 @pytest.fixture(autouse=True)
 def mock_app_deps(monkeypatch):
-    """Replace api_server's four module-level singletons with mocks.
+    """Replace api_server's four module-level singletons with FRESH
+    per-test mocks.
 
-    Autouse so EVERY test runs against the mocks — no test can
-    accidentally call out to real Garmin / Google / MCP / disk.
-    Tests that need a specific return value override the relevant
-    method's return_value directly:
+    The module-level patches above already installed mock instances
+    at import time, but those persist for the whole pytest session —
+    they'd accumulate `.call_args_list` state across tests. This
+    autouse fixture swaps in a freshly-built mock per test so each
+    test starts with a clean slate. Tests that want a specific return
+    value override the relevant method directly:
 
         api_server.agent.chat.return_value = "custom"
     """
-    # Importing api_server fires its constructors. We accept that one
-    # round of file-system reads happens (DataProcessor reads data/
-    # in __init__) since it's read-only. Then we overwrite the
-    # singletons.
-    import api_server
-
     monkeypatch.setattr(api_server, "processor", _build_processor_mock())
     monkeypatch.setattr(api_server, "agent", _build_agent_mock())
     monkeypatch.setattr(api_server, "memory_engine", _build_memory_engine_mock())
     monkeypatch.setattr(api_server, "gcal", _build_gcal_mock())
+
+    # Redirect the sync-state sidecar to /tmp so the smoke for
+    # POST /api/sync/garmin (which writes the file on success) doesn't
+    # leave a `data/sync_state.json` behind in real working trees.
+    import tempfile
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        api_server,
+        "SYNC_STATE_PATH",
+        Path(tempfile.gettempdir()) / "personalcoach_test_sync_state.json",
+    )
 
     # Pin PERSONAL_COACH_API_BASE so anything reading it doesn't
     # accidentally try a real loopback call.
@@ -290,6 +354,5 @@ def mock_app_deps(monkeypatch):
 def client():
     """FastAPI TestClient bound to the (mocked) api_server.app."""
     from fastapi.testclient import TestClient
-    import api_server
 
     return TestClient(api_server.app)
