@@ -38,10 +38,22 @@ function fmtDelta(b: BaselineSummary): string | null {
   return `${sign}${b.delta_pct.toFixed(0)}%`;
 }
 
+// MetricCard's badge tone is a narrower union than our app-wide `Tone`
+// (no "flat"; has "warn"). Map explicitly so the compiler can narrow
+// — a naked ternary leaves the result as the wider Tone union.
+type BadgeTone = "neutral" | "good" | "warn" | "bad";
+
+function toBadgeTone(t: Tone): BadgeTone | null {
+  if (t === "good" || t === "bad") return t;
+  if (t === "flat") return "neutral";
+  return null; // "neutral" → skip the badge entirely
+}
+
 function snapshotMetricToCardProps(m: MetricSnapshot) {
   const recent = m.baselines.recent;
   const delta = recent ? fmtDelta(recent) : null;
   const baseline = recent ? fmtBaseline(recent, m.unit) : null;
+  const badgeTone = recent ? toBadgeTone(recent.tone) : null;
   // Re-use MetricCard's existing badge slot for the colored delta. The
   // baseline goes in the hint line below the value.
   return {
@@ -49,9 +61,7 @@ function snapshotMetricToCardProps(m: MetricSnapshot) {
     value: fmtValue(m),
     unit: m.unit ?? undefined,
     badge:
-      recent && recent.tone !== "neutral" && delta
-        ? { text: delta, tone: recent.tone === "flat" ? "neutral" : recent.tone }
-        : undefined,
+      badgeTone && delta ? { text: delta, tone: badgeTone } : undefined,
     hint: baseline ?? undefined,
   } as const;
 }
