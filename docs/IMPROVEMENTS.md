@@ -47,23 +47,30 @@ Just lock down "current testing can't regress". **No new tests.**
    checks before merge.
 4. `docs/CI.md` documenting how to reproduce CI locally.
 
-### Phase 2 — Module testability (1 day)
+### Phase 2 — Module testability (1 day) ✅ done 2026-05-12
 
-Many modules are structurally untestable today: `AgenticCoach()`
-requires api_server reachable at construction time; `personal_coach_mcp.py`
-is a stdio subprocess.
+> Test count went from 54 → 128 passing (3 integration skipped).
+> See `phase2-testability` branch.
 
-1. `AgenticCoach.__init__(skip_api_probe: bool = False)` — tests pass
-   True to skip `_require_api_reachable`.
-2. Move `test_mcp_tools.py` → `scripts/manual_mcp_smoke.py` — it's a
-   dev tool, not a test, and shouldn't be in `tests/`.
-3. Add shared fixtures to `tests/conftest.py`:
-   - `fake_api_server` — httpx mock transport
+1. ✅ `AgenticCoach.__init__(skip_api_probe: bool = False)` — tests
+   pass True to skip `_require_api_reachable`.
+2. ✅ Moved `test_mcp_tools.py` → `scripts/manual_mcp_smoke.py` —
+   it's a dev tool, not a test.
+3. ✅ Shared fixtures in `tests/conftest.py`:
    - `tmp_chat_db`, `tmp_cme_db` — isolated SQLite per test
-   - `mock_call_llm`, `mock_call_embedding` — patch at module boundary
-4. `tests/test_endpoint_smoke.py` — FastAPI TestClient hits ~70
-   endpoints, asserts 200/422 + schema. **Highest leverage per LOC:**
-   coverage goes from 0 to 70 happy paths in one file.
+   - `mock_app_deps` (autouse) — swaps `api_server.{processor,
+     gcal, memory_engine, agent}` with MagicMocks pre-configured
+     with shape-correct defaults
+   - `client` — FastAPI TestClient bound to the mocked app
+4. ✅ `tests/test_endpoint_smoke.py` — parametrized 65-row table
+   hitting every documented endpoint; asserts "no 500" + status
+   code in expected set. Caught one real bug along the way:
+   `GET /` returned `FileResponse("webapp/index.html")` but
+   `webapp/` doesn't exist (legacy Streamlit cruft). Route
+   deleted in this PR.
+5. ✅ `tests/test_agentic_coach_basics.py` — unit tests of the
+   constructor + module-level helpers + delete_session guard,
+   now possible thanks to skip_api_probe.
 
 ### Phase 3 — Per-module coverage (one PR per module)
 
