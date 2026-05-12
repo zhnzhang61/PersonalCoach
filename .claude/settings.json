@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx eslint .)",
+      "Bash(uv run pytest tests/)",
+      "mcp__Claude_Preview__preview_screenshot",
+      "mcp__Claude_Preview__preview_stop",
+      "mcp__Claude_Preview__preview_logs",
+      "mcp__Claude_Preview__preview_list",
+      "mcp__Claude_Preview__preview_console_logs",
+      "mcp__Claude_Preview__preview_resize",
+      "mcp__Claude_Preview__preview_snapshot",
+      "mcp__Claude_Preview__preview_click",
+      "mcp__Claude_Preview__preview_fill"
+    ]
+  }
+}
