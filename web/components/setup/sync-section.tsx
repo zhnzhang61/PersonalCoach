@@ -5,17 +5,17 @@ import { formatDistanceToNow, parseISO } from "date-fns";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet, apiPost } from "@/lib/api";
 import { GARMIN_SSO_URL } from "@/lib/sso";
+import { cn } from "@/lib/utils";
 import type {
   RefreshTokenResult,
   SyncResult,
   SyncStatus,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 export function SyncSection() {
   const qc = useQueryClient();
@@ -142,16 +142,21 @@ function RefreshTokenCard() {
             </span>
             <div className="flex-1 space-y-2">
               <p>Open the Garmin sign-in page in Safari.</p>
-              <Button asChild variant="secondary" className="w-full sm:w-auto">
-                <a
-                  href={GARMIN_SSO_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <ExternalLink className="size-4" aria-hidden />
-                  Open Garmin sign-in
-                </a>
-              </Button>
+              {/* base-ui Button doesn't support asChild — style an anchor
+                  directly with buttonVariants so it looks identical
+                  while still being a real <a> with target=_blank. */}
+              <a
+                href={GARMIN_SSO_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  buttonVariants({ variant: "secondary" }),
+                  "w-full sm:w-auto",
+                )}
+              >
+                <ExternalLink className="size-4" aria-hidden />
+                Open Garmin sign-in
+              </a>
             </div>
           </li>
           <li className="flex items-start gap-3">

@@ -1,0 +1,93 @@
+# Phase 1 CI — lock in current state, no regressions.
+#
+# What runs:
+#   • py-test         pytest tests/                       (54 passed, 3 integration skipped)
+#   • web-typecheck   tsc --noEmit                        (must stay at 0 errors)
+#   • web-lint        eslint .                            (warnings allowed, errors fail)
+#
+# What does NOT run yet (deferred to Phase 4 / on-demand):
+#   • integration tests touching real Gemini / Groq APIs (need --integration flag)
+#
+# To reproduce locally, see docs/CI.md.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-flight run if the same ref is pushed again — saves CI time
+# when you push fixes in quick succession.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  py-test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Cache the venv between runs — speeds up subsequent CI by ~30s.
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run pytest
+        run: uv run pytest tests/
+
+  web-typecheck:
+    name: web typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript compile (no emit)
+        run: npx tsc --noEmit
+
+  web-lint:
+    name: web lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        # --max-warnings 0 would be stricter; today there's no policy on
+        # warnings so we let them pass and only fail on errors. Revisit
+        # once we have a clean warning baseline.
+        run: npx eslint .
