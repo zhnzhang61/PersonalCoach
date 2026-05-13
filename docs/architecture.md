@@ -49,12 +49,12 @@ graph TB
     FS[("📂 data/<br/>get_activities/ · *.fit ·<br/>derived/ · manual_inputs/")]:::db
 
     %% --- CLI / background ---
-    subgraph CLI["⚙️ CLI / batch scripts"]
-        GS["<b>garmin_sync.py</b><br/>pull activities + health"]:::proc
-        GL["<b>garmin_ticket_login.py</b><br/>OAuth1 ticket dance"]:::proc
-        GCalScript["<b>google_calendar.py</b><br/>OAuth + event fetch"]:::proc
-        Migrate["<b>migrate.py</b><br/>one-shot DB migrations"]:::proc
-        Dashboard["<b>dashboard.py</b><br/>(legacy Streamlit,<br/>deprecated)"]:::proc
+    subgraph CLI["⚙️ scripts/ — CLI + one-off tools"]
+        MCPSmoke["<b>manual_mcp_smoke.py</b><br/>dev: stdio dump each MCP tool"]:::proc
+        MigrateGarmin["<b>migrate_garmin_token.py</b><br/>pirate-garmin → garth tokens"]:::proc
+        MigV2["<b>migrations/v2_cme_schema.py</b><br/>add Conflicting status"]:::proc
+        MigV3["<b>migrations/v3_dedupe_topics.py</b><br/>cosine-merge duplicate topics"]:::proc
+        MigV4["<b>migrations/v4_link_episodes.py</b><br/>backfill topic_episode_links"]:::proc
     end
 
     %% --- Edges ---
@@ -73,11 +73,15 @@ graph TB
     CME --> LP
     DP --> FS
     MCP -. "HTTP back to FastAPI<br/>(no in-proc shortcut —<br/>one DataProcessor instance)" .-> API
-    GS --> Garmin
-    GS --> FS
-    GCalScript --> GCal
-    Migrate --> CMEDB
-    Migrate --> ChatDB
+    %% Subprocess spawns: api_server runs garmin_sync + garmin_ticket_login
+    %% via `python -m backend.<module>` (POST /api/sync/garmin endpoints).
+    %% Those modules are in `backend/` now, not standalone CLIs.
+    API -. "spawn -m backend.garmin_sync" .-> Garmin
+    API --> GCal
+    %% CME migrations write to cognition.db.
+    MigV2 --> CMEDB
+    MigV3 --> CMEDB
+    MigV4 --> CMEDB
 ```
 
 ---
@@ -100,25 +104,27 @@ graph TB
 | `web/lib/coach-errors.ts` | Classify provider rate-limit / proxy timeouts → friendly Chinese messages |
 | `web/lib/todays-read.ts` | Per-day cache for Today's Read sentence |
 
-### Backend (Python, top of repo)
-| Script | Purpose |
+### Backend (`backend/` package)
+| Module | Purpose |
 |--------|---------|
-| **`api_server.py`** | FastAPI HTTP layer. ~70 endpoints — runs, manual activities, health, training blocks, calendar, AI (chat / 5 actions / sessions / history), CME (topics / episodes / pending), Garmin/Google OAuth. The single source of truth: anything else that needs data calls HTTP here, not `DataProcessor` directly. |
-| **`agentic_coach.py`** | The agent. Owns: `AgenticCoach` class wrapping LangGraph's `create_react_agent`; chat_memory.db (SQLite checkpointer); session lifecycle (`chat`, 5 actions, `summarize_and_archive`, `list_sessions`, `delete_session`); pre-fetch plans that hydrate review_workout / make_plan / etc with parallel MCP calls; the `_SYSTEM_PROMPT` and action-specific instruction fragments. |
-| **`cognitive_memory_engine.py`** | Long-term memory store. Topics state machine (Open / Testing / Resolved / Conflicting), episodes (5W1H+E), pending_clarifications, topic_episode_links. Embedding-based topic match (cosine + signature hash, cache keyed on `(provider, topic_id)`). Owns `consolidate_memory_background` — the LLM call that extracts {new_topics, topic_updates, new_episodes, conflicts} from a closed chat thread. |
-| **`data_processor.py`** | Pure data layer. `RunActivity`, `ManualActivity`, `DataProcessor` classes. Reads `data/*.fit` + derived JSON, normalizes pace/HR/stride/elevation/weather, owns the surface bucket / category labels. Only `api_server.py` is allowed to construct a `DataProcessor` (per [feedback_no_data_processing_in_dashboard.md](#)). |
-| **`llm_provider.py`** | The ONLY module allowed to call LLMs. Three public functions: `call_llm(messages, role, provider?, fallback_chain?)`, `call_embedding(texts, provider)`, `cosine_similarity`. Provider table: gemini (3.1-flash-lite) → groq (llama 3.3 70B) → omlx (local Qwen, last-resort). Embeddings pinned to gemini (embedding-2, multimodal-ready). |
-| **`personal_coach_mcp.py`** | MCP server (`@mcp.tool()` decorators). Spawned as a stdio subprocess by `agentic_coach._ensure_agent`. 17 tools: `get_athlete_profile`, `get_readiness`, `get_training_load`, `list_runs`, `get_run_detail`, `get_run_telemetry`, `get_run_weather`, `list_blocks`, `get_cycle_stats`, `get_monthly_stats`, `list_manual_activities`, `get_manual_activity`, `get_calendar_events`, `get_workout_plan`, `recall_topics`, `search_episodes`, `get_pending_clarifications`. Every tool is a thin HTTP wrapper around api_server — keeps one DataProcessor instance, avoids two-process races. |
+| **`backend/api_server.py`** | FastAPI HTTP layer. ~70 endpoints — runs, manual activities, health, training blocks, calendar, AI (chat / 5 actions / sessions / history), CME (topics / episodes / pending), Garmin/Google OAuth. The single source of truth: anything else that needs data calls HTTP here, not `DataProcessor` directly. |
+| **`backend/agentic_coach.py`** | The agent. Owns: `AgenticCoach` class wrapping LangGraph's `create_react_agent`; chat_memory.db (SQLite checkpointer); session lifecycle (`chat`, 5 actions, `summarize_and_archive`, `list_sessions`, `delete_session`); pre-fetch plans that hydrate review_workout / make_plan / etc with parallel MCP calls; the `_SYSTEM_PROMPT` and action-specific instruction fragments. |
+| **`backend/cognitive_memory_engine.py`** | Long-term memory store. Topics state machine (Open / Testing / Resolved / Conflicting), episodes (5W1H+E), pending_clarifications, topic_episode_links. Embedding-based topic match (cosine + signature hash, cache keyed on `(provider, topic_id)`). Owns `consolidate_memory_background` — the LLM call that extracts {new_topics, topic_updates, new_episodes, conflicts} from a closed chat thread. |
+| **`backend/data_processor.py`** | Pure data layer. `RunActivity`, `ManualActivity`, `DataProcessor` classes. Reads `data/*.fit` + derived JSON, normalizes pace/HR/stride/elevation/weather, owns the surface bucket / category labels. Only `api_server.py` is allowed to construct a `DataProcessor` (per [feedback_no_data_processing_in_dashboard.md](#)). |
+| **`backend/llm_provider.py`** | The ONLY module allowed to call LLMs. Three public functions: `call_llm(messages, role, provider?, fallback_chain?)`, `call_embedding(texts, provider)`, `cosine_similarity`. Provider table: gemini (3.1-flash-lite) → groq (llama 3.3 70B) → omlx (local Qwen, last-resort). Embeddings pinned to gemini (embedding-2, multimodal-ready). |
+| **`backend/personal_coach_mcp.py`** | MCP server (`@mcp.tool()` decorators). Spawned as a stdio subprocess by `agentic_coach._ensure_agent`. 17 tools: `get_athlete_profile`, `get_readiness`, `get_training_load`, `list_runs`, `get_run_detail`, `get_run_telemetry`, `get_run_weather`, `list_blocks`, `get_cycle_stats`, `get_monthly_stats`, `list_manual_activities`, `get_manual_activity`, `get_calendar_events`, `get_workout_plan`, `recall_topics`, `search_episodes`, `get_pending_clarifications`. Every tool is a thin HTTP wrapper around api_server — keeps one DataProcessor instance, avoids two-process races. |
+| **`backend/garmin_sync.py`** | Pull activities + daily health from Garmin Connect. Writes to `data/get_activities/`, `data/get_activity_details/`, `data/derived/`, etc. Refresh-token flow uses `backend/garmin_ticket_login.py`. Spawned via `python -m backend.garmin_sync` by `POST /api/sync/garmin`. |
+| **`backend/garmin_ticket_login.py`** | OAuth1 ticket-and-jar dance — Garmin's auth is older than OIDC, this writes `oauth1_token.json` + `domain_profile.json`. |
+| **`backend/google_calendar.py`** | Google OAuth + event listing for the Training tab calendar. |
 
-### CLI / background
-| Script | Purpose |
+### CLI / one-off scripts (`scripts/` package)
+| Module | Purpose |
 |--------|---------|
-| `garmin_sync.py` | Pull activities + daily health from Garmin Connect. Writes to `data/get_activities/`, `data/get_activity_details/`, `data/derived/`, etc. Refresh-token flow uses `garmin_ticket_login.py`. |
-| `garmin_ticket_login.py` | OAuth1 ticket-and-jar dance — Garmin's auth is older than OIDC, this writes `oauth1_token.json` + `domain_profile.json`. |
-| `google_calendar.py` | Google OAuth + event listing for the Training tab calendar. |
-| `migrate.py` | One-shot DB migrations (e.g., `migrations/v3_dedupe_topics.py`). |
-| `dashboard.py` | Legacy Streamlit dashboard — **deprecated**, retained for historical reasons. UI moved to `web/` in Phase 2. |
-| `test_mcp_tools.py` | Manual smoke script for the MCP server. |
+| `scripts/manual_mcp_smoke.py` | Manual smoke script for the MCP server — spawns the stdio subprocess and dumps each tool's reply for a human to eyeball. Dev tool, not a pytest target. |
+| `scripts/migrate_garmin_token.py` | One-off CLI to migrate a pirate-garmin `native-oauth2.json` into the garth-format tokens that `backend.garmin_sync` reads. Run once when onboarding. |
+| `scripts/migrations/v2_cme_schema.py` | Add `open_question` / `conflict_context` to CME topics + allow `'Conflicting'` status. Idempotent. |
+| `scripts/migrations/v3_dedupe_topics.py` | Cosine-merge duplicate topic rows via embeddings. Run after v2. |
+| `scripts/migrations/v4_link_episodes.py` | Interactive backfill of `topic_episode_links` for orphan episodes. |
 
 ---
 
