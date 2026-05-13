@@ -56,7 +56,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 # llm_provider is the ONLY module allowed to construct LangChain models.
-from llm_provider import (
+from backend.llm_provider import (
     _get_llm,  # private to other modules; in-project use is fine
     call_llm,
     get_provider_model_name,
@@ -516,7 +516,7 @@ class AgenticCoach:
             raise RuntimeError(
                 "AgenticCoach now requires api_server to be running — every "
                 "MCP tool wraps a FastAPI endpoint. Start it with:\n"
-                "    uv run uvicorn api_server:app --port 8765\n"
+                "    uv run uvicorn backend.api_server:app --port 8765\n"
                 "or override PERSONAL_COACH_API_BASE if it's on a different "
                 f"host/port. Tried: {api_base} ({e!r})"
             ) from e
@@ -565,7 +565,7 @@ class AgenticCoach:
             self._mcp_client = MultiServerMCPClient({
                 "personal-coach": {
                     "command": "uv",
-                    "args": ["run", "python", "-m", "personal_coach_mcp"],
+                    "args": ["run", "python", "-m", "backend.personal_coach_mcp"],
                     "transport": "stdio",
                     "env": {
                         **os.environ,

@@ -30,7 +30,7 @@ import json
 import pandas as pd
 import pytest
 
-from data_processor import (
+from backend.data_processor import (
     DataProcessor,
     ManualActivity,
     RunActivity,

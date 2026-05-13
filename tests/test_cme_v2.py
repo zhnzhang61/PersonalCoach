@@ -28,7 +28,7 @@ if str(_ROOT) not in sys.path:
 @pytest.fixture
 def mem(tmp_path):
     """Fresh MemoryOS instance; then apply v2 schema changes to match production."""
-    from cognitive_memory_engine import MemoryOS
+    from backend.cognitive_memory_engine import MemoryOS
 
     db_path = tmp_path / "cme.db"
     profile_path = tmp_path / "semantic.json"

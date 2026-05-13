@@ -1,6 +1,6 @@
 import os
 
-from garmin_ticket_login import migrate_pirate_token_to_garth
+from backend.garmin_ticket_login import migrate_pirate_token_to_garth
 
 
 def migrate_token():

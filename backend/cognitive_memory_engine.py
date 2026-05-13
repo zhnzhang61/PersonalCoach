@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from llm_provider import call_embedding, call_llm, cosine_similarity
+from backend.llm_provider import call_embedding, call_llm, cosine_similarity
 
 
 # ---------------------------------------------------------------------------

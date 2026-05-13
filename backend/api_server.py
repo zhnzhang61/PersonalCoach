@@ -13,10 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 # (FileResponse import removed alongside the legacy GET / route.)
 from pydantic import BaseModel, Field
 
-from agentic_coach import AgenticCoach
-from cognitive_memory_engine import MemoryOS
-from data_processor import DataProcessor
-from google_calendar import GoogleCalendar
+from backend.agentic_coach import AgenticCoach
+from backend.cognitive_memory_engine import MemoryOS
+from backend.data_processor import DataProcessor
+from backend.google_calendar import GoogleCalendar
 
 
 app = FastAPI(title="PersonalCoach API", version="0.1.0")
@@ -231,7 +231,7 @@ def sync_garmin_status() -> dict[str, Any]:
 
 @app.post("/api/sync/garmin")
 def sync_garmin() -> dict[str, Any]:
-    cmd = [sys.executable, "garmin_sync.py", "--no-fallback"]
+    cmd = [sys.executable, "-m", "backend.garmin_sync", "--no-fallback"]
     # /dev/null on stdin so any prompt-based fallback can't hang the request.
     result = subprocess.run(
         cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
@@ -279,7 +279,7 @@ class TicketRefresh(BaseModel):
 
 @app.post("/api/sync/garmin/refresh-token")
 def refresh_garmin_token(body: TicketRefresh) -> dict[str, Any]:
-    cmd = [sys.executable, "garmin_ticket_login.py", "--ticket", body.ticket, "--compat"]
+    cmd = [sys.executable, "-m", "backend.garmin_ticket_login", "--ticket", body.ticket, "--compat"]
     # No browser, no input prompts — we already have the ticket.
     result = subprocess.run(
         cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
