@@ -1,6 +1,11 @@
 # 数据和缓存文件
 data/
 *.fit
+# SQLite test/work artifacts that occasionally land at the repo root
+# (the real ones live under data/ — anything at root is leakage).
+/*.db
+/*.db-shm
+/*.db-wal
 
 # 运行时日志
 logs/
