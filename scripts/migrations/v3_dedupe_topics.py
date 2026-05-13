@@ -35,7 +35,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+# File is now at scripts/migrations/v3_dedupe_topics.py — three levels
+# under the repo root (.parent → migrations/, .parent.parent → scripts/,
+# .parent.parent.parent → repo root). Pre-PR-C it was only two levels
+# deep (migrations/X.py), so we needed `.parent.parent` then.
+_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

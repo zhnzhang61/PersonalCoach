@@ -399,13 +399,34 @@ Plus removals: `deprecated/`, `dashboard.py`, `.streamlit/`, root
   with smoke-import of all three entry points.
 - ✅ 209 tests still pass
 
-**PR C — Move CLI + migrations to `scripts/` (~30 min)**
-- `git mv migrate.py scripts/migrate_garmin_token.py`
-- `git mv migrations/ scripts/migrations/`
-- Update `python -m migrations.v4_link_episodes` →
+**PR C — Move CLI + migrations to `scripts/` (~30 min)** ✅ done 2026-05-13
+- ✅ `git mv migrate.py scripts/migrate_garmin_token.py`
+- ✅ `git mv migrations/ scripts/migrations/`
+- ✅ Added `scripts/__init__.py` + `scripts/migrations/__init__.py`
+  (explicit package markers, mirroring `backend/__init__.py` from
+  PR B; lets `python -m scripts.migrate_garmin_token` and
+  `python -m scripts.migrations.vN_*` work cleanly)
+- ✅ Updated v4 docstring usage:
+  `python -m migrations.v4_link_episodes` →
   `python -m scripts.migrations.v4_link_episodes`
-- Update test imports in `test_cme_v2.py` / `test_cme_v2b.py` if
-  they import from `migrations`
+- ✅ **Fixed real bug along the way**: `v3_dedupe_topics.py` and
+  `v4_link_episodes.py` both did
+  `_ROOT = Path(__file__).resolve().parent.parent` assuming the file
+  sat at `migrations/X.py` (two levels deep). After the move the file
+  is at `scripts/migrations/X.py` (three levels), so `_ROOT` would
+  point at `scripts/` not the repo root — `from backend.X import Y`
+  inside the migration would fail at runtime. Bumped to
+  `.parent.parent.parent`.
+- ✅ README.md `uv run python migrate.py` →
+  `uv run python -m scripts.migrate_garmin_token`
+- ✅ docs/architecture.md: Backend table now lists modules under
+  `backend/` with full paths; CLI subgraph + table now lists
+  `scripts/*` with new names. Dropped the (already-deleted)
+  `dashboard.py` row. Updated the Mermaid edges to show the
+  subprocess spawn from api_server → backend.garmin_sync, and
+  migrations writing to cognition.db.
+- ✅ No test imports `migrations` directly, so no test refactor
+  needed.
 
 ---
 

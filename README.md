@@ -69,10 +69,10 @@ uv run python garmin_ticket_login.py --url "$PASTED_URL" --compat --run-sync
 若你已用其他方式生成了 `~/.local/share/pirate-garmin/native-oauth2.json`，只需写入 Garth：
 
 ```bash
-uv run python migrate.py
+uv run python -m scripts.migrate_garmin_token
 ```
 
-（`migrate.py` 与 `garmin_ticket_login.py` 共用同一套迁移逻辑。）
+（`scripts/migrate_garmin_token.py` 与 `backend/garmin_ticket_login.py` 共用同一套迁移逻辑。）
 
 ---
 

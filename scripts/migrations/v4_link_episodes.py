@@ -6,8 +6,8 @@ prints its content + a numbered list of all topics, and asks the user which
 topics (if any) it belongs to. Writes the junction rows.
 
 Usage:
-    python -m migrations.v4_link_episodes [--db path/to/cognition.db]
-    python -m migrations.v4_link_episodes --dry-run
+    python -m scripts.migrations.v4_link_episodes [--db path/to/cognition.db]
+    python -m scripts.migrations.v4_link_episodes --dry-run
 
 Answer format for each episode:
     - Comma-separated topic numbers (e.g. "1,3,7") to link
@@ -24,7 +24,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+# File is now at scripts/migrations/v4_link_episodes.py — three
+# directory levels under the repo root. Pre-PR-C it was at
+# migrations/X.py (two levels), so we needed `.parent.parent`.
+_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
