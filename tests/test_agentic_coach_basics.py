@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_coach import AgenticCoach, _started_at_from_thread_id
+from backend.agentic_coach import AgenticCoach, _started_at_from_thread_id
 
 
 class TestSkipApiProbe:

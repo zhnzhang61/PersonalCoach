@@ -39,7 +39,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from llm_provider import call_embedding, cosine_similarity  # noqa: E402
+from backend.llm_provider import call_embedding, cosine_similarity  # noqa: E402
 
 
 DUPLICATE_THRESHOLD = 0.95

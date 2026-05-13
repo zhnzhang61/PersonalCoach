@@ -106,7 +106,7 @@ def main() -> int:
     print(_render_topics(topics))
     print()
 
-    from cognitive_memory_engine import MemoryOS
+    from backend.cognitive_memory_engine import MemoryOS
 
     mem = MemoryOS(db_path=args.db)
 

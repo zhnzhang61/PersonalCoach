@@ -31,8 +31,7 @@ if str(_ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _reset_llm_and_embed_caches():
-    import llm_provider
-
+    import backend.llm_provider as llm_provider
     llm_provider._llm_cache.clear()
     llm_provider._embedding_cache.clear()
     yield
@@ -43,7 +42,7 @@ def _reset_llm_and_embed_caches():
 @pytest.fixture
 def mem(tmp_path):
     """MemoryOS with v2 schema applied (mirrors migrations/v2_cme_schema.py)."""
-    from cognitive_memory_engine import MemoryOS
+    from backend.cognitive_memory_engine import MemoryOS
 
     m = MemoryOS(
         db_path=str(tmp_path / "cme.db"),
@@ -120,12 +119,12 @@ def _stub_embeddings(mapping: dict[str, list[float]]):
 
 class TestLLMProviderEmbedding:
     def test_call_embedding_empty_list_returns_empty(self):
-        from llm_provider import call_embedding
+        from backend.llm_provider import call_embedding
 
         assert call_embedding([]) == []
 
     def test_call_embedding_unknown_provider_raises(self):
-        from llm_provider import call_embedding
+        from backend.llm_provider import call_embedding
 
         with pytest.raises(ValueError, match="not registered"):
             call_embedding(["hi"], provider="nonexistent")
@@ -134,18 +133,17 @@ class TestLLMProviderEmbedding:
         """Verify embedding calls go through _build_embedder and return the
         underlying client's embed_documents result."""
         from unittest.mock import MagicMock
-        import llm_provider
-
+        import backend.llm_provider as llm_provider
         fake_client = MagicMock()
         fake_client.embed_documents.return_value = [[0.1, 0.2, 0.3]]
-        with patch("llm_provider._build_embedder", return_value=fake_client):
+        with patch("backend.llm_provider._build_embedder", return_value=fake_client):
             vecs = llm_provider.call_embedding(["hello"], provider="gemini")
 
         assert vecs == [[0.1, 0.2, 0.3]]
         fake_client.embed_documents.assert_called_once_with(["hello"])
 
     def test_cosine_similarity_known_values(self):
-        from llm_provider import cosine_similarity
+        from backend.llm_provider import cosine_similarity
 
         assert cosine_similarity([1, 0], [1, 0]) == pytest.approx(1.0)
         assert cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
@@ -162,7 +160,7 @@ class TestLLMProviderEmbedding:
 
 class TestFindMatchingTopic:
     def test_returns_nothing_when_no_topics_exist(self, mem):
-        with patch("cognitive_memory_engine.call_embedding") as m:
+        with patch("backend.cognitive_memory_engine.call_embedding") as m:
             m.side_effect = AssertionError("should not be called when topics empty")
             auto, cands = mem.find_matching_topic("anything")
         assert auto is None
@@ -172,7 +170,7 @@ class TestFindMatchingTopic:
         tid = mem.create_topic(name="下雨天跑步偏好", root_category="Preference")
         # Identical vectors → similarity 1.0 → above threshold
         with patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"下雨天跑步": [1.0, 0.0, 0.0]}),
         ):
             auto, cands = mem.find_matching_topic("下雨天跑步偏好")
@@ -183,7 +181,7 @@ class TestFindMatchingTopic:
     def test_no_match_below_threshold_returns_candidates_only(self, mem):
         t1 = mem.create_topic(name="心率区间", root_category="Running")
         with patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({
                 "心率区间": [0.0, 1.0, 0.0],   # topic vec
                 "下雨":      [1.0, 0.0, 0.0],   # query vec (orthogonal → sim 0)
@@ -199,7 +197,7 @@ class TestFindMatchingTopic:
         t_rain = mem.create_topic(name="下雨天跑步偏好", root_category="Pref")
         t_hr = mem.create_topic(name="心率区间", root_category="Running")
         with patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({
                 "下雨天跑步": [1.0, 0.0, 0.0],     # topic 1
                 "心率区间":    [0.5, 0.87, 0.0],    # topic 2 (partial overlap)
@@ -215,7 +213,7 @@ class TestFindMatchingTopic:
     def test_embed_failure_returns_no_match_gracefully(self, mem):
         mem.create_topic(name="anything", root_category="General")
         with patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=RuntimeError("gemini down"),
         ):
             auto, cands = mem.find_matching_topic("query")
@@ -298,10 +296,10 @@ class TestConsolidateV2:
 
         # Align LLM and embeddings so rain-query matches rain-topic
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"下雨天跑步": [1.0, 0.0, 0.0]}),
         ):
             mem.consolidate_memory_background("t1", self.CHAT)
@@ -336,10 +334,10 @@ class TestConsolidateV2:
         }
 
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"心率": [1.0, 0.0, 0.0]}),
         ):
             mem.consolidate_memory_background("t2", self.CHAT)
@@ -371,10 +369,10 @@ class TestConsolidateV2:
         }
 
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({
                 "心率区间": [1.0, 0.0, 0.0],
                 "马拉松配速": [0.0, 1.0, 0.0],
@@ -414,10 +412,10 @@ class TestConsolidateV2:
         }
 
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),  # no matches
         ):
             mem.consolidate_memory_background("t4", self.CHAT)
@@ -429,8 +427,8 @@ class TestConsolidateV2:
         assert mem.list_pending(resolved=False) == []
 
     def test_empty_chat_is_noop(self, mem):
-        with patch("cognitive_memory_engine.call_llm") as mc, patch(
-            "cognitive_memory_engine.call_embedding"
+        with patch("backend.cognitive_memory_engine.call_llm") as mc, patch(
+            "backend.cognitive_memory_engine.call_embedding"
         ) as me:
             mem.consolidate_memory_background("t5", [])
             assert not mc.called
@@ -450,10 +448,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),
         ):
             mem.consolidate_memory_background("same_thread", self.CHAT)
@@ -478,10 +476,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),
         ):
             mem.consolidate_memory_background("thread_A", self.CHAT)
@@ -504,10 +502,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json_first)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),
         ):
             mem.consolidate_memory_background("t_link", self.CHAT)
@@ -528,10 +526,10 @@ class TestConsolidateV2:
         ]
 
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json_second)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"心率区间": [1.0, 0.0, 0.0]}),
         ):
             mem.consolidate_memory_background("t_link", self.CHAT)
@@ -558,10 +556,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),
         ):
             mem.consolidate_memory_background("t_orphan", self.CHAT)
@@ -586,10 +584,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"心率区间": [1.0, 0.0, 0.0]}),
         ):
             mem.consolidate_memory_background("t_ok", self.CHAT)
@@ -660,10 +658,10 @@ class TestConsolidateV2:
             ],
         }
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({}),
         ):
             mem.consolidate_memory_background("t_ts", self.CHAT)
@@ -787,10 +785,10 @@ class TestDecisionQueue:
         }
         # Orthogonal vectors → best score = 0.0, well below 0.80 threshold
         with patch(
-            "cognitive_memory_engine.call_llm",
+            "backend.cognitive_memory_engine.call_llm",
             return_value=(AIMessage(content=json.dumps(llm_json)), "gemini"),
         ), patch(
-            "cognitive_memory_engine.call_embedding",
+            "backend.cognitive_memory_engine.call_embedding",
             side_effect=_stub_embeddings({"心率": [1, 0, 0], "训练量": [0, 1, 0]}),
         ):
             mem.consolidate_memory_background("t_park", [{"role": "human", "content": "x"}])

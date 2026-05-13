@@ -375,22 +375,29 @@ Plus removals: `deprecated/`, `dashboard.py`, `.streamlit/`, root
   "streamlit / dashboard" callers
 - Update `README.md` attribution that thanks Streamlit
 
-**PR B — Move backend Python under `backend/` (1 day, biggest risk)**
-- `git mv` 9 .py files into `backend/`
-- Add `backend/__init__.py`
-- Rewrite every `from data_processor import X` →
-  `from backend.data_processor import X` (in tests, scripts, MCP
-  prefetches, conftest, sibling backend modules)
-- Update subprocess invocations:
+**PR B — Move backend Python under `backend/` (1 day, biggest risk)** ✅ done 2026-05-13
+- ✅ `git mv` 9 .py files into `backend/`
+- ✅ Added `backend/__init__.py` documenting entry points
+- ✅ Rewrote every `from data_processor import X` →
+  `from backend.data_processor import X` across tests, migrations,
+  `migrate.py`, sibling backend modules
+- ✅ `import api_server` in conftest → `import backend.api_server as api_server`
+- ✅ `patch("X.…")` targets in tests → `patch("backend.X.…")`
+- ✅ Subprocess invocations:
   - `subprocess.run([sys.executable, "garmin_sync.py", ...])`
-    → `[..., "-m", "backend.garmin_sync", ...]`
+    → `[..., "-m", "backend.garmin_sync", ...]` (api_server)
+  - same for `garmin_ticket_login.py`
   - MCP spawn: `uv run python -m personal_coach_mcp` →
-    `uv run python -m backend.personal_coach_mcp`
-- Update `uvicorn api_server:app` → `uvicorn backend.api_server:app`
-  in `.claude/launch.json`, `docs/CI.md`, `README.md`
-- `pyproject.toml` — add `[tool.hatch.build]` packages = ["backend"]
-  if needed for the package install
-- CI gate from PRs #60–#62 catches anything that breaks
+    `uv run python -m backend.personal_coach_mcp` (agentic_coach +
+    scripts/manual_mcp_smoke)
+- ✅ `uvicorn api_server:app` → `uvicorn backend.api_server:app` in
+  `.claude/launch.json` and the error message inside
+  agentic_coach._require_api_reachable
+- ✅ No pyproject.toml change needed — Python 3.12 treats a dir with
+  `__init__.py` at the project root as importable as long as cwd is
+  on `sys.path`, which it is for both uvicorn and `python -m`. Verified
+  with smoke-import of all three entry points.
+- ✅ 209 tests still pass
 
 **PR C — Move CLI + migrations to `scripts/` (~30 min)**
 - `git mv migrate.py scripts/migrate_garmin_token.py`

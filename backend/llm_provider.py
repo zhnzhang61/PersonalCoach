@@ -42,8 +42,12 @@ from typing import Literal
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage
 
-# Load .env from project root (handles worktree symlinks)
-_env_path = Path(__file__).resolve().parent / ".env"
+# Load .env from project root (handles worktree symlinks).
+# After the PR-B reorg this file lives at `backend/llm_provider.py`, so
+# the project root is `__file__.parent.parent` (one above the package
+# dir). Pre-reorg the file was at the project root so .parent was
+# sufficient; now we need .parent.parent.
+_env_path = Path(__file__).resolve().parent.parent / ".env"
 if _env_path.exists():
     load_dotenv(dotenv_path=_env_path, override=True)
 

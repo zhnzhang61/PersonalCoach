@@ -7,7 +7,7 @@
       "runtimeArgs": [
         "run",
         "uvicorn",
-        "api_server:app",
+        "backend.api_server:app",
         "--reload",
         "--port",
         "8765"

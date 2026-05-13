@@ -77,7 +77,7 @@ async def run_smoke() -> None:
 
     params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "-m", "personal_coach_mcp"],
+        args=["run", "python", "-m", "backend.personal_coach_mcp"],
         env={
             **os.environ,
             "PERSONAL_COACH_API_BASE": api_base,

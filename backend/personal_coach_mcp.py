@@ -18,7 +18,7 @@ HTTP indirection (rather than `import data_processor`): two live
 DataProcessor instances on the same JSON files invites concurrency
 bugs; the existing api_server endpoints are the single source of truth.
 
-Run: `uv run python -m personal_coach_mcp` (stdio transport).
+Run: `uv run python -m backend.personal_coach_mcp` (stdio transport).
 """
 
 from __future__ import annotations

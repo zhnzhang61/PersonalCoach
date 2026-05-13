@@ -53,8 +53,7 @@ def _fail_llm(exc: Exception):
 @pytest.fixture(autouse=True)
 def _reset_llm_cache():
     """Clear the internal LLM cache between tests so monkey-patches don't leak."""
-    import llm_provider
-
+    import backend.llm_provider as llm_provider
     llm_provider._llm_cache.clear()
     yield
     llm_provider._llm_cache.clear()
@@ -68,9 +67,9 @@ def _reset_llm_cache():
 class TestCallLLMCore:
     def test_happy_path_returns_aimessage_and_provider(self):
         """call_llm returns (AIMessage, provider_name) on success."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
-        with patch("llm_provider._build_llm", return_value=_fake_llm("hello")):
+        with patch("backend.llm_provider._build_llm", return_value=_fake_llm("hello")):
             msg, provider = call_llm([HumanMessage(content="hi")], role="creative")
 
         assert isinstance(msg, AIMessage)
@@ -80,10 +79,10 @@ class TestCallLLMCore:
 
     def test_provider_pinning_no_fallback_on_failure(self):
         """When provider is pinned, failures are raised — no fallback attempted."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         fail = _fail_llm(RuntimeError("429 quota"))
-        with patch("llm_provider._build_llm", return_value=fail) as build:
+        with patch("backend.llm_provider._build_llm", return_value=fail) as build:
             with pytest.raises(RuntimeError, match="429 quota"):
                 call_llm(
                     [HumanMessage(content="hi")],
@@ -95,7 +94,7 @@ class TestCallLLMCore:
 
     def test_fallback_chain_walks_on_failure(self):
         """Gemini fails → Groq succeeds → returns Groq result with provider='groq'."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         gemini = _fail_llm(RuntimeError("Gemini 429"))
         groq = _fake_llm("from groq")
@@ -104,7 +103,7 @@ class TestCallLLMCore:
         def side_effect(provider, temperature):
             return {"gemini": gemini, "groq": groq, "omlx": omlx}[provider]
 
-        with patch("llm_provider._build_llm", side_effect=side_effect):
+        with patch("backend.llm_provider._build_llm", side_effect=side_effect):
             msg, provider = call_llm([HumanMessage(content="hi")], role="creative")
 
         assert msg.content == "from groq"
@@ -115,7 +114,7 @@ class TestCallLLMCore:
 
     def test_fallback_skips_to_third_when_first_two_fail(self):
         """Gemini 429 → Groq also fails → oMLX answers."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         gemini = _fail_llm(RuntimeError("Gemini 429"))
         groq = _fail_llm(RuntimeError("Groq down"))
@@ -124,7 +123,7 @@ class TestCallLLMCore:
         def side_effect(provider, temperature):
             return {"gemini": gemini, "groq": groq, "omlx": omlx}[provider]
 
-        with patch("llm_provider._build_llm", side_effect=side_effect):
+        with patch("backend.llm_provider._build_llm", side_effect=side_effect):
             msg, provider = call_llm([HumanMessage(content="hi")], role="creative")
 
         assert msg.content == "from omlx"
@@ -132,15 +131,15 @@ class TestCallLLMCore:
 
     def test_all_providers_fail_raises_runtime_error(self):
         """If everyone in the chain fails, RuntimeError is raised."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
-        with patch("llm_provider._build_llm", return_value=_fail_llm(RuntimeError("dead"))):
+        with patch("backend.llm_provider._build_llm", return_value=_fail_llm(RuntimeError("dead"))):
             with pytest.raises(RuntimeError, match="All LLM providers"):
                 call_llm([HumanMessage(content="hi")], role="creative")
 
     def test_custom_fallback_chain_respected(self):
         """Passing fallback_chain=['omlx'] skips gemini/groq entirely."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         omlx = _fake_llm("local")
 
@@ -149,7 +148,7 @@ class TestCallLLMCore:
                 raise AssertionError(f"Should not have tried {provider}")
             return omlx
 
-        with patch("llm_provider._build_llm", side_effect=side_effect):
+        with patch("backend.llm_provider._build_llm", side_effect=side_effect):
             msg, provider = call_llm(
                 [HumanMessage(content="hi")],
                 role="structured",
@@ -161,7 +160,7 @@ class TestCallLLMCore:
 
     def test_role_temperature_mapping(self):
         """Verify role → temperature is passed correctly to _build_llm."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         captured = {}
 
@@ -170,7 +169,7 @@ class TestCallLLMCore:
             captured["provider"] = provider
             return _fake_llm("ok")
 
-        with patch("llm_provider._build_llm", side_effect=spy_build):
+        with patch("backend.llm_provider._build_llm", side_effect=spy_build):
             call_llm([HumanMessage(content="x")], role="creative")
             assert captured["temp"] == 0.4
 
@@ -182,7 +181,7 @@ class TestCallLLMCore:
 
     def test_coerce_to_aimessage_handles_multimodal_content(self):
         """LangChain multi-modal list content is flattened to text."""
-        from llm_provider import _coerce_to_aimessage
+        from backend.llm_provider import _coerce_to_aimessage
 
         class FakeResponse:
             content = [
@@ -198,14 +197,14 @@ class TestCallLLMCore:
 
 class TestGetProviderModelName:
     def test_known_providers(self):
-        from llm_provider import get_provider_model_name
+        from backend.llm_provider import get_provider_model_name
 
         assert get_provider_model_name("gemini") == "gemini-3.1-flash-lite"
         assert get_provider_model_name("groq") == "llama-3.3-70b-versatile"
         assert get_provider_model_name("omlx") == "Qwen3.5-35B-A3B-8bit"
 
     def test_unknown_falls_back_to_key(self):
-        from llm_provider import get_provider_model_name
+        from backend.llm_provider import get_provider_model_name
 
         assert get_provider_model_name("nonexistent") == "nonexistent"
 
@@ -223,11 +222,11 @@ class TestAllCallSitesGoThroughCallLLM:
 
     # ------ Site 1: CME._llm_invoke ------
     def test_cme_llm_invoke_uses_call_llm_and_returns_string(self, tmp_path):
-        from cognitive_memory_engine import MemoryOS
+        from backend.cognitive_memory_engine import MemoryOS
 
         mem = MemoryOS(db_path=str(tmp_path / "cme.db"), semantic_profile_path=str(tmp_path / "sem.json"))
 
-        with patch("cognitive_memory_engine.call_llm") as mock_call:
+        with patch("backend.cognitive_memory_engine.call_llm") as mock_call:
             mock_call.return_value = (AIMessage(content="  some JSON  "), "gemini")
             result = mem._llm_invoke("test prompt")
 
@@ -267,12 +266,12 @@ class TestAllCallSitesGoThroughCallLLM:
 
     # ------ Site 6: AgenticCoach.generate_episodic_summary ------
     def test_generate_episodic_summary_uses_call_llm_with_structured_role(self, tmp_path):
-        from agentic_coach import AgenticCoach
+        from backend.agentic_coach import AgenticCoach
 
         coach = AgenticCoach(db_path=str(tmp_path / "chat.db"))
 
         json_response = '{"tags": ["Long Run", "Fatigue"], "summary_text": "Tired long run."}'
-        with patch("agentic_coach.call_llm") as mock_call:
+        with patch("backend.agentic_coach.call_llm") as mock_call:
             mock_call.return_value = (AIMessage(content=json_response), "gemini")
             out = coach.generate_episodic_summary({"workout_summary": {"name": "LSD"}})
 
@@ -282,11 +281,11 @@ class TestAllCallSitesGoThroughCallLLM:
 
     def test_generate_episodic_summary_survives_bad_json(self, tmp_path):
         """If LLM returns garbage, we fall back to a sensible default — no crash."""
-        from agentic_coach import AgenticCoach
+        from backend.agentic_coach import AgenticCoach
 
         coach = AgenticCoach(db_path=str(tmp_path / "chat.db"))
 
-        with patch("agentic_coach.call_llm") as mock_call:
+        with patch("backend.agentic_coach.call_llm") as mock_call:
             mock_call.return_value = (AIMessage(content="not json at all"), "gemini")
             out = coach.generate_episodic_summary({"workout_summary": {"name": "Broken"}})
 
@@ -317,7 +316,7 @@ class TestRealLLMSmoke:
     def test_gemini_real_call(self):
         if not os.getenv("GEMINI_KEY"):
             pytest.skip("No GEMINI_KEY in env")
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         msg, provider = call_llm(
             [HumanMessage(content="Say 'pong' and nothing else.")],
@@ -330,7 +329,7 @@ class TestRealLLMSmoke:
     def test_groq_real_call(self):
         if not os.getenv("GROQ_API_KEY"):
             pytest.skip("No GROQ_API_KEY in env")
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         msg, provider = call_llm(
             [HumanMessage(content="Say 'pong' and nothing else.")],
@@ -342,7 +341,7 @@ class TestRealLLMSmoke:
 
     def test_default_fallback_chain_resolves(self):
         """Whatever provider is reachable, the default chain produces *something*."""
-        from llm_provider import call_llm
+        from backend.llm_provider import call_llm
 
         msg, provider = call_llm(
             [HumanMessage(content="Say 'pong' and nothing else.")],

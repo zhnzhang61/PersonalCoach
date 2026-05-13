@@ -282,10 +282,10 @@ def _build_gcal_mock() -> MagicMock:
 #
 # Order matters. Module-level execution sequence in this file is:
 #
-#   1. patch("data_processor.DataProcessor", …).start()        ← active
-#   2. patch("google_calendar.GoogleCalendar", …).start()      ← active
-#   3. patch("cognitive_memory_engine.MemoryOS", …).start()    ← active
-#   4. patch("agentic_coach.AgenticCoach", …).start()          ← active
+#   1. patch("backend.data_processor.DataProcessor", …).start()        ← active
+#   2. patch("backend.google_calendar.GoogleCalendar", …).start()      ← active
+#   3. patch("backend.cognitive_memory_engine.MemoryOS", …).start()    ← active
+#   4. patch("backend.agentic_coach.AgenticCoach", …).start()          ← active
 #   5. import api_server   ← module-load constructs singletons,
 #                            sees the patched (mock) classes, never
 #                            touches real data/.
@@ -298,17 +298,17 @@ def _build_gcal_mock() -> MagicMock:
 # still get the real code paths.
 
 _class_patches = [
-    patch("data_processor.DataProcessor", return_value=_build_processor_mock()),
-    patch("google_calendar.GoogleCalendar", return_value=_build_gcal_mock()),
-    patch("cognitive_memory_engine.MemoryOS", return_value=_build_memory_engine_mock()),
-    patch("agentic_coach.AgenticCoach", return_value=_build_agent_mock()),
+    patch("backend.data_processor.DataProcessor", return_value=_build_processor_mock()),
+    patch("backend.google_calendar.GoogleCalendar", return_value=_build_gcal_mock()),
+    patch("backend.cognitive_memory_engine.MemoryOS", return_value=_build_memory_engine_mock()),
+    patch("backend.agentic_coach.AgenticCoach", return_value=_build_agent_mock()),
 ]
 for _p in _class_patches:
     _p.start()
 
 # Construct singletons under the mocked classes. After this import the
 # api_server module's globals reference our mock instances.
-import api_server  # noqa: E402
+import backend.api_server as api_server  # noqa: E402
 
 for _p in _class_patches:
     _p.stop()
