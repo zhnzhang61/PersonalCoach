@@ -219,13 +219,21 @@ def main() -> int:
         write_garth_compat(args.garth_dir)
 
     if args.run_sync:
-        root = Path(__file__).resolve().parent
-        sync_script = root / "garmin_sync.py"
-        if not sync_script.is_file():
-            print(f"❌ garmin_sync.py not found at {sync_script}", file=sys.stderr)
-            return 1
-        print("⬇️ Running garmin_sync.py ...", flush=True)
-        r = subprocess.run([sys.executable, str(sync_script)], cwd=root)
+        # Spawn garmin_sync as a module from the repo root so:
+        #   • DataProcessor's relative `data/` resolves to the project's
+        #     real data/ dir (the one api_server reads from), not a stray
+        #     backend/data/ that ends up out-of-sync.
+        #   • dotenv's upward search hits the root .env on the first try.
+        # Pre-PR-B reorg this used to set `cwd=root` where `root` *was*
+        # the repo root (because garmin_ticket_login.py lived there);
+        # after the move `__file__.parent` is `backend/`, so we walk up
+        # one more level for `cwd`.
+        repo_root = Path(__file__).resolve().parent.parent
+        print("⬇️ Running backend.garmin_sync ...", flush=True)
+        r = subprocess.run(
+            [sys.executable, "-m", "backend.garmin_sync"],
+            cwd=repo_root,
+        )
         return int(r.returncode)
 
     return 0
