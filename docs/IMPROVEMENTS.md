@@ -20,7 +20,7 @@ Order is rough priority. See discussion 2026-05-11 for context.
 | `api_server.py` | ~1100 | **0** | ~70 endpoints completely uncovered |
 | `agentic_coach.py` | ~1000 | **0** direct (PR-1 left tests dead) | Agent core |
 | `cognitive_memory_engine.py` | ~1300 | ✅ `test_cme_v2.py` + `test_cme_v2b.py` (41 tests) | Best-covered, skip |
-| `data_processor.py` | ~600 | **0** | Garmin .fit → derived JSON entirely by eye |
+| `data_processor.py` | ~600 | ✅ `test_data_processor.py` (81 tests) | Pass 1 done; Garmin-file paths deferred |
 | `llm_provider.py` | ~430 | ✅ `test_llm_provider.py` (13 tests after cleanup) | Just cleaned up |
 | `personal_coach_mcp.py` | ~700 | **0** | All 17 tools uncovered |
 | `garmin_sync.py` | — | **0** | External API, hard to test |
@@ -80,7 +80,7 @@ Can interleave — each module landing in its own focused PR.
 
 | Module | Test file | Focus |
 |---|---|---|
-| `data_processor.py` | `tests/test_data_processor.py` | Drop a fixture `.fit` in `tests/fixtures/`. Verify `RunActivity.from_fit`, `ManualActivity`, category_stats derivation, pace/HR/elev extraction. **This is the project's core data layer — running blind is the biggest risk.** |
+| `data_processor.py` | `tests/test_data_processor.py` ✅ pass-1 done 2026-05-12 | 81 tests covering: RunActivity from_garmin + derived props, ManualActivity round-trip, `_bucket_run_surface`, DataProcessor bootstrap on tmp_path, semantic memory CRUD, training blocks CRUD + date validation, manual activity CRUD, `calculate_category_stats` (perceived-stream derivation), `compute_telemetry_summary` (pandas pure fn). **Pass 2 (later)** to cover the Garmin-file-dependent paths: compile_health_ledger, get_hr_zones, get_athlete_profile_full, get_readiness, get_training_load, compute_cycle_and_week_stats. |
 | `agentic_coach.py` | `tests/test_agentic_coach.py` | Session lifecycle (chat → archive → list); idempotent archive; `delete_session` guards; `_started_at_from_thread_id`. Mock LangGraph agent. |
 | `personal_coach_mcp.py` | `tests/test_personal_coach_mcp.py` | All 17 tools, one case each. Mock httpx. Validate args, error paths, output shape. |
 | `api_server.py` | `tests/test_api_server_*.py` (split by domain) | TestClient + oauth/sync/runs/training/ai/memory groups. |
