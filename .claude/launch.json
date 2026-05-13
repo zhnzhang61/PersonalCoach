@@ -15,12 +15,6 @@
       "port": 8765
     },
     {
-      "name": "streamlit-dashboard",
-      "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "streamlit", "run", "dashboard.py"],
-      "port": 8501
-    },
-    {
       "name": "web",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "web", "run", "dev"],

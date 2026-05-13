@@ -310,7 +310,99 @@ become data, not gut.
 
 ---
 
-## (4 and beyond — open for additions)
+## 4. Repo layout reorg — group by role (frontend / backend / scripts)
+
+> **Status (2026-05-13)**: PR A landing now. PRs B + C scheduled
+> after.
+
+### Current pain
+
+Top-level is a flat dump of 9 backend `.py` files (api_server,
+agentic_coach, data_processor, …), 1 dead legacy (dashboard.py), a
+one-off CLI (migrate.py), a sibling `migrations/` dir of one-off
+schema scripts, a `deprecated/` dir of dead code, a `scripts/` dir
+with a single dev tool, and a stray `cme.db` test artifact at the
+repo root. There's no visual signal for "what's the agent vs what's
+the integration vs what's a CLI tool".
+
+### Target layout
+
+```
+PersonalCoach/
+├── web/                          # frontend (Next.js)
+│
+├── backend/                      # ← all server-side Python
+│   ├── api_server.py
+│   ├── agentic_coach.py
+│   ├── cognitive_memory_engine.py
+│   ├── data_processor.py
+│   ├── llm_provider.py
+│   ├── personal_coach_mcp.py
+│   ├── garmin_sync.py
+│   ├── garmin_ticket_login.py
+│   └── google_calendar.py
+│
+├── scripts/                      # ← CLI + one-off tools
+│   ├── manual_mcp_smoke.py       (already here)
+│   ├── migrate_garmin_token.py   (renamed from top-level migrate.py)
+│   └── migrations/               (moved from top-level migrations/)
+│       ├── v2_cme_schema.py
+│       ├── v3_dedupe_topics.py
+│       └── v4_link_episodes.py
+│
+├── tests/                        # unchanged
+├── docs/                         # unchanged
+├── data/                         # unchanged (runtime, gitignored)
+│
+├── pyproject.toml  uv.lock  README.md  LICENSE.TXT
+└── .env  .gitignore  .python-version
+```
+
+Plus removals: `deprecated/`, `dashboard.py`, `.streamlit/`, root
+`cme.db`, the `streamlit` dependency in pyproject.
+
+### Phased rollout — 3 PRs
+
+**PR A — Delete dead code (low risk, ~30 min)**
+- Remove `deprecated/` (3 unimported files)
+- Remove `dashboard.py` (1318 lines of legacy Streamlit, no
+  imports anywhere)
+- Remove `.streamlit/` config dir
+- Remove root `cme.db` (test artifact, never should have been
+  tracked) and add to `.gitignore`
+- Remove `streamlit==1.55.0` from pyproject deps
+- Refresh stale comments in `agentic_coach.py` that reference
+  "streamlit / dashboard" callers
+- Update `README.md` attribution that thanks Streamlit
+
+**PR B — Move backend Python under `backend/` (1 day, biggest risk)**
+- `git mv` 9 .py files into `backend/`
+- Add `backend/__init__.py`
+- Rewrite every `from data_processor import X` →
+  `from backend.data_processor import X` (in tests, scripts, MCP
+  prefetches, conftest, sibling backend modules)
+- Update subprocess invocations:
+  - `subprocess.run([sys.executable, "garmin_sync.py", ...])`
+    → `[..., "-m", "backend.garmin_sync", ...]`
+  - MCP spawn: `uv run python -m personal_coach_mcp` →
+    `uv run python -m backend.personal_coach_mcp`
+- Update `uvicorn api_server:app` → `uvicorn backend.api_server:app`
+  in `.claude/launch.json`, `docs/CI.md`, `README.md`
+- `pyproject.toml` — add `[tool.hatch.build]` packages = ["backend"]
+  if needed for the package install
+- CI gate from PRs #60–#62 catches anything that breaks
+
+**PR C — Move CLI + migrations to `scripts/` (~30 min)**
+- `git mv migrate.py scripts/migrate_garmin_token.py`
+- `git mv migrations/ scripts/migrations/`
+- Update `python -m migrations.v4_link_episodes` →
+  `python -m scripts.migrations.v4_link_episodes`
+- Update test imports in `test_cme_v2.py` / `test_cme_v2b.py` if
+  they import from `migrations`
+
+---
+
+## (5 and beyond — open for additions)
 
 Ideas not yet developed:
 

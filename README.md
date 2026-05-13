@@ -143,10 +143,11 @@ uv sync --reinstall-package pirate-garmin
 
 本项目站在巨人的肩膀上，感谢以下优秀开源项目提供的支持与灵感：
 
-- [Streamlit](https://github.com/streamlit/streamlit) (Apache 2.0) - 提供了极其优雅的仪表盘前端框架。
+- [Next.js](https://github.com/vercel/next.js) (MIT) - iPhone 前端框架，承担了 Coach / Health / Activity / Training / Setup 五个 tab。
+- [FastAPI](https://github.com/fastapi/fastapi) (MIT) - 后端 HTTP 层，所有数据访问的单一入口。
 - [LangGraph](https://github.com/langchain-ai/langgraph) (MIT) - 赋予了 AI 教练复杂的多智能体推理与记忆能力。
 - [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (MIT) - 提供了基础的 Garmin API 封装。
 - [pirate-garmin](https://github.com/petergardfjall/pirate-garmin) - 在攻克移动端鉴权逻辑上提供了关键的逆向思路。
-- [Pandas](https://github.com/pandas-dev/pandas) & [Altair](https://github.com/altair-viz/altair) - 支撑了底层强大的数据处理与可视化。
+- [Pandas](https://github.com/pandas-dev/pandas) - 支撑了底层强大的数据处理。
 
 *注：以上引用的第三方库其所有权归原作者所有，并分别遵循其各自的开源协议。*

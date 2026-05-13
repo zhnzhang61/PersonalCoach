@@ -472,8 +472,8 @@ class AgenticCoach:
         # connection" because aiosqlite's connection is dead. So we
         # own one daemon-thread loop and submit every coroutine to it
         # via run_coroutine_threadsafe — works whether the caller is
-        # sync (streamlit, tests) or async (FastAPI handlers can also
-        # submit). The loop survives until process exit.
+        # sync (tests, ad-hoc scripts) or async (FastAPI handlers can
+        # also submit). The loop survives until process exit.
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever,
@@ -525,8 +525,8 @@ class AgenticCoach:
 
     def _submit(self, coro):
         """Run a coroutine on the agent's background loop and block
-        until it completes. Safe to call from sync (streamlit) or sync
-        FastAPI handlers (which run on threadpool workers)."""
+        until it completes. Safe to call from sync (tests, ad-hoc
+        scripts) or FastAPI handlers (which run on threadpool workers)."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
@@ -553,9 +553,8 @@ class AgenticCoach:
             # Hard prereq: every MCP tool wraps an api_server endpoint.
             # If the FastAPI server isn't reachable, every tool call
             # will fail mid-conversation with a ToolException — really
-            # confusing for non-api callers (Streamlit dashboard, ad-hoc
-            # scripts). Probe once up front and bail with a message
-            # that points the user at the fix.
+            # confusing for ad-hoc-script callers. Probe once up front
+            # and bail with a message that points the user at the fix.
             #
             # Tests opt out via skip_api_probe=True — they typically
             # mock the agent's chat/action methods entirely and never
