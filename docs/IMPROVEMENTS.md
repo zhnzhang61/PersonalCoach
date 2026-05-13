@@ -17,12 +17,12 @@ Order is rough priority. See discussion 2026-05-11 for context.
 
 | Module | LOC | Existing tests | Verdict |
 |---|---:|---|---|
-| `api_server.py` | ~1100 | **0** | ~70 endpoints completely uncovered |
+| `api_server.py` | ~1100 | ✅ `test_endpoint_smoke.py` (65) + `test_api_server_behavior.py` (37) | Smoke no-500 + per-domain behavior on AI dispatch / mutations / memory CRUD |
 | `agentic_coach.py` | ~1000 | **0** direct (PR-1 left tests dead) | Agent core |
 | `cognitive_memory_engine.py` | ~1300 | ✅ `test_cme_v2.py` + `test_cme_v2b.py` (41 tests) | Best-covered, skip |
 | `data_processor.py` | ~600 | ✅ `test_data_processor.py` (81 tests) | Pass 1 done; Garmin-file paths deferred |
 | `llm_provider.py` | ~430 | ✅ `test_llm_provider.py` (13 tests after cleanup) | Just cleaned up |
-| `personal_coach_mcp.py` | ~700 | **0** | All 17 tools uncovered |
+| `personal_coach_mcp.py` | ~700 | ✅ `test_personal_coach_mcp.py` (48 tests) | All 17 tools + 4 helpers covered |
 | `garmin_sync.py` | — | **0** | External API, hard to test |
 | `garmin_ticket_login.py` | — | **0** | OAuth flow |
 | `google_calendar.py` | — | **0** | External API |
@@ -82,8 +82,8 @@ Can interleave — each module landing in its own focused PR.
 |---|---|---|
 | `data_processor.py` | `tests/test_data_processor.py` ✅ pass-1 done 2026-05-12 | 81 tests covering: RunActivity from_garmin + derived props, ManualActivity round-trip, `_bucket_run_surface`, DataProcessor bootstrap on tmp_path, semantic memory CRUD, training blocks CRUD + date validation, manual activity CRUD, `calculate_category_stats` (perceived-stream derivation), `compute_telemetry_summary` (pandas pure fn). **Pass 2 (later)** to cover the Garmin-file-dependent paths: compile_health_ledger, get_hr_zones, get_athlete_profile_full, get_readiness, get_training_load, compute_cycle_and_week_stats. |
 | `agentic_coach.py` | `tests/test_agentic_coach.py` | Session lifecycle (chat → archive → list); idempotent archive; `delete_session` guards; `_started_at_from_thread_id`. Mock LangGraph agent. |
-| `personal_coach_mcp.py` | `tests/test_personal_coach_mcp.py` | All 17 tools, one case each. Mock httpx. Validate args, error paths, output shape. |
-| `api_server.py` | `tests/test_api_server_*.py` (split by domain) | TestClient + oauth/sync/runs/training/ai/memory groups. |
+| `personal_coach_mcp.py` | `tests/test_personal_coach_mcp.py` ✅ done 2026-05-13 | 48 tests covering all 17 tools (path + params + return shape via mocked `_get`) and the 4 pure helpers (`_pace_str_from_dec`, `_format_duration`, `_split_pace_dec`, `_zones_time_min`). Pure async-via-`asyncio.run`; no pytest-asyncio dep needed. |
+| `api_server.py` | `tests/test_endpoint_smoke.py` + `tests/test_api_server_behavior.py` ✅ done 2026-05-13 | 37 behavior tests on the hot paths: 5-way action dispatch + error branches; chat + sessions wire shape (`role` not `type`); training blocks / manual activities / runs laps mutation contracts (kwargs forwarded correctly, None-valued fields stripped); memory topics + episodes + pending CRUD; Garmin sync 3-outcome classification (ok / token_expired / generic-error). Smoke layer (65 routes, no-500) stays as a backstop. Per-domain split out only if any one class exceeds ~10 tests. |
 | `garmin_sync.py` | `tests/test_garmin_sync.py` | Mock `garminconnect.Garmin`. Pagination, file writes, error retry. |
 | `google_calendar.py` | `tests/test_google_calendar.py` | Mock `googleapiclient`. Event mapping, timezone. |
 
