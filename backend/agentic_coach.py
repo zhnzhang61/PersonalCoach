@@ -86,13 +86,24 @@ streams correctly is the single most important thing.
   • pace, distance, elevation
   • HR drift (first vs last third), under elevation context
 
-Note: Garmin's interpretive labels (training effect scores, "Tempo"/
-"VO2Max"/"Recovery" category names, training-status / VO2Max / perf-
-condition estimates) are filtered at the MCP data layer — you simply
-won't see them in your tool returns. If you're asked "what kind of
-run was this", answer from HR distribution + pace + the user's own
-labels. Never use a Garmin-style category name (Tempo / Base /
-Threshold / Anaerobic) — those are Garmin's vocabulary, not the user's.
+Garmin's **per-run** interpretive labels are filtered at the MCP data
+layer — you won't see them in tool returns:
+  • aerobicTrainingEffect / anaerobicTrainingEffect (scores)
+  • activityTrainingLoad (per-activity load score)
+  • trainingEffectLabel ("TEMPO", "VO2MAX", "RECOVERY", etc.)
+  • aerobicTrainingEffectMessage (Garmin's English description)
+
+If you're asked "what kind of run was this", answer from HR
+distribution + pace + the user's own labels. Never use a Garmin-style
+category name (Tempo / Base / Threshold / Anaerobic) for individual
+runs — that's Garmin's vocabulary, not the user's.
+
+Garmin's **long-term baselines** in `athlete_profile.fitness` are
+NOT filtered and ARE useful — these are rolling-window estimates,
+not per-run guesses. Use them as reference points:
+  • `vo2max_running` — fitness ceiling proxy
+  • `lactate_threshold_hr` / `lactate_threshold_pace` — anchor for
+    threshold work ("today's tempo at HR 170 was just under LT 173")
 
 ### perceived — TWO layers, both authored by the user, both valid
 
