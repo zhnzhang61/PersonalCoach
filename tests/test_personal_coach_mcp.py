@@ -192,7 +192,44 @@ class TestGetAthleteProfile:
         fake_get.responses.append({"athlete": {"age": 30}})
         result = _run(mcp.get_athlete_profile())
         assert fake_get.calls == [("/api/athlete/profile", {})]
-        assert result == {"athlete": {"age": 30}}
+        # Non-fitness fields pass through untouched.
+        assert result["athlete"] == {"age": 30}
+
+    def test_renames_hr_zones_to_medium_term_hr_effort_map(self, fake_get):
+        """Per §2 of the reorg: the agent-facing key for "the user's
+        medium-term HR↔effort mapping" is explicitly named so the
+        prompt doesn't have to keep clarifying that hr_zones is one
+        of the perceived layers."""
+        fake_get.responses.append({
+            "athlete": {},
+            "fitness": {
+                "vo2max_running": 50,
+                "hr_zones": [
+                    {"name": "Steady", "rpe_label": "Steady Effort",
+                     "low": 145, "high": 162},
+                ],
+            },
+        })
+        result = _run(mcp.get_athlete_profile())
+        fit = result["fitness"]
+        # New name present, old name gone.
+        assert "medium_term_hr_effort_map" in fit
+        assert "hr_zones" not in fit
+        # Content unchanged — just a rename.
+        assert fit["medium_term_hr_effort_map"] == [
+            {"name": "Steady", "rpe_label": "Steady Effort",
+             "low": 145, "high": 162},
+        ]
+        # Other fitness fields untouched.
+        assert fit["vo2max_running"] == 50
+
+    def test_missing_hr_zones_no_error(self, fake_get):
+        """If the underlying profile has no hr_zones, the projection
+        should still produce a valid response (no spurious key)."""
+        fake_get.responses.append({"athlete": {}, "fitness": {}})
+        result = _run(mcp.get_athlete_profile())
+        assert "medium_term_hr_effort_map" not in result["fitness"]
+        assert "hr_zones" not in result["fitness"]
 
 
 class TestGetReadiness:
@@ -264,6 +301,40 @@ class TestListRuns:
         result = _run(mcp.list_runs("x", "y"))
         assert result["runs"] == []
 
+    def test_objective_block_excludes_garmin_interpretive_labels(self, fake_get):
+        """§2 contract: even if the api dumps aerobicTrainingEffect /
+        anaerobicTrainingEffect / activityTrainingLoad /
+        trainingEffectLabel in the raw run, the MCP projection drops
+        them so the agent never sees Garmin's derived guesses."""
+        fake_get.responses.append({
+            "start": "x", "end": "y",
+            "runs": [{
+                "activityId": 1, "activityName": "x",
+                "startTimeLocal": "2026-05-05T08:00:00",
+                "distance": 5000, "duration": 1800,
+                "averageHR": 150, "maxHR": 170,
+                # Garmin interpretive fields — should be filtered out.
+                "aerobicTrainingEffect": 4.5,
+                "anaerobicTrainingEffect": 1.2,
+                "activityTrainingLoad": 220,
+                "trainingEffectLabel": "TEMPO",
+                "manual_meta": {"category_stats": []},
+            }],
+        })
+        result = _run(mcp.list_runs("x", "y"))
+        obj = result["runs"][0]["objective"]
+        # What stays: raw HR.
+        assert obj["avg_hr"] == 150
+        assert obj["max_hr"] == 170
+        # What's filtered:
+        for forbidden in (
+            "training_effect_aerobic", "training_effect_anaerobic",
+            "training_load", "garmin_label",
+        ):
+            assert forbidden not in obj, (
+                f"{forbidden} should be filtered at the MCP boundary"
+            )
+
 
 class TestGetRunDetail:
     def test_makes_expected_api_calls_in_order(self, fake_get):
@@ -316,6 +387,43 @@ class TestGetRunDetail:
         assert "objective" in result
         assert "perceived" in result
         assert "planned" in result
+
+    def test_objective_drops_training_effect_block(self, fake_get):
+        """§2 contract: get_run_detail's `objective` block does NOT
+        ship Garmin's training_effect sub-dict, even though the raw
+        api response carries it."""
+        fake_get.responses.extend([
+            {  # /api/runs/{id}
+                "run": {
+                    "activityId": 1, "activityName": "x",
+                    "startTimeLocal": "2026-05-05T08:00:00",
+                    "distance": 5000, "duration": 1800,
+                    "averageHR": 150, "maxHR": 170,
+                    # Interpretive fields the projection should drop:
+                    "aerobicTrainingEffect": 4.5,
+                    "anaerobicTrainingEffect": 1.2,
+                    "activityTrainingLoad": 220,
+                    "trainingEffectLabel": "TEMPO",
+                    "aerobicTrainingEffectMessage": "Highly impacting tempo run",
+                    "manual_meta": {"category_stats": []},
+                },
+                "chat_history": [],
+            },
+            {"laps": [], "meta": {"category_stats": []}},
+            {  # weather
+                "temperature_f": 60, "apparent_temperature_f": 55,
+                "humidity_pct": 70, "dew_point_f": 45, "wind_mph": 8,
+            },
+            {"fitness": {"hr_zones": []}},
+            {"raw": [], "summary": {}},
+        ])
+        result = _run(mcp.get_run_detail(activity_id=1))
+        obj = result["objective"]
+        # Heart rate + drift + power + form + splits still present.
+        assert "heart_rate" in obj
+        assert "drift" in obj
+        # Whole interpretive block is gone.
+        assert "training_effect" not in obj
 
 
 class TestGetRunWeather:

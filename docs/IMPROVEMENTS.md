@@ -124,6 +124,31 @@ release/deploy story.
 
 ## 2. Move "what the agent sees" into data-layer filters, not prompt rules
 
+> **Status (2026-05-13)**: ✅ landed. Garmin interpretive labels are
+> now filtered at the MCP boundary, not by prompt rules. The
+> `_SYSTEM_PROMPT`'s "SILENTLY IGNORE..." block + the bullet-list of
+> field names is gone. `hr_zones` renamed to
+> `medium_term_hr_effort_map` at the MCP boundary so the agent's
+> prompt and tool outputs use the same explicit name. CME deliberately
+> untouched (it's about topics/episodes, not Garmin sensor shapes —
+> separate concern).
+>
+> Changes:
+>   • `_trim_run_summary` (list_runs output) — dropped
+>     training_effect_aerobic / _anaerobic / training_load / garmin_label
+>   • `get_run_detail` — dropped the `objective.training_effect` block
+>     (aerobic / anaerobic / load / garmin_label / garmin_message)
+>   • `get_athlete_profile` — projects `fitness.hr_zones` →
+>     `fitness.medium_term_hr_effort_map`
+>   • System prompt — "SILENTLY IGNORE" section removed; "Vocabulary
+>     Trap" + "Medium-term mapping" sections updated to the new key
+>   • review_workout instructions — final "not in Garmin labels"
+>     coda removed (no longer needed since the data doesn't carry
+>     them)
+>   • Tests — 4 new assertions in `test_personal_coach_mcp.py`
+>     pinning the projection contract (interpretive fields filtered,
+>     hr_zones renamed, missing-key fallback).
+
 **Symptom**
 
 The prompt currently contains rules like:
