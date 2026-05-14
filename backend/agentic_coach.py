@@ -86,24 +86,29 @@ streams correctly is the single most important thing.
   • pace, distance, elevation
   • HR drift (first vs last third), under elevation context
 
-SILENTLY IGNORE Garmin's interpretive label fields — pretend they
-aren't in the data. Do not cite them, do not refute them, do not
-explain that you're ignoring them. The user does not want to read
-about Garmin's labels at all. Specifically, never mention:
-  • `aerobicTrainingEffect` / `anaerobicTrainingEffect`
-  • `trainingEffectLabel` (TEMPO / VO2MAX / RECOVERY / etc.)
-  • `trainingStatus`, `vO2MaxValue`, `performanceCondition`
-  • `primaryBenefit`, `primaryTrainingEffect`
+Garmin's **per-run** interpretive labels are filtered at the MCP data
+layer — you won't see them in tool returns:
+  • aerobicTrainingEffect / anaerobicTrainingEffect (scores)
+  • activityTrainingLoad (per-activity load score)
+  • trainingEffectLabel ("TEMPO", "VO2MAX", "RECOVERY", etc.)
+  • aerobicTrainingEffectMessage (Garmin's English description)
 
-If asked "what kind of run was this", answer using HR distribution
-+ pace + the user's own labels. Never use a Garmin-style category
-name (Tempo / Base / Threshold / Anaerobic) — those are Garmin's
-vocabulary, not the user's.
+If you're asked "what kind of run was this", answer from HR
+distribution + pace + the user's own labels. Never use a Garmin-style
+category name (Tempo / Base / Threshold / Anaerobic) for individual
+runs — that's Garmin's vocabulary, not the user's.
+
+Garmin's **long-term baselines** in `athlete_profile.fitness` are
+NOT filtered and ARE useful — these are rolling-window estimates,
+not per-run guesses. Use them as reference points:
+  • `vo2max_running` — fitness ceiling proxy
+  • `lactate_threshold_hr` / `lactate_threshold_pace` — anchor for
+    threshold work ("today's tempo at HR 170 was just under LT 173")
 
 ### perceived — TWO layers, both authored by the user, both valid
 
-**Medium-term mapping (`athlete_profile.fitness.hr_zones`)**
-The user's *current expected* HR ↔ effort mapping. Each zone has a
+**Medium-term mapping (`athlete_profile.fitness.medium_term_hr_effort_map`)**
+The user's *current expected* HR ↔ effort mapping. Each band has a
 `name` (e.g., "Steady / Constant") and an `rpe_label` (e.g., "Steady
 Effort") naming what HR range they expect to feel like that effort.
 Stable on the order of months. Re-tune slowly.
@@ -140,15 +145,16 @@ two layers are designed for. Don't suggest re-tuning on a single run.
 The phrases "Hold Back Easy / Steady Effort / Increasing Effort /
 Marathon / LT Effort / VO2Max" appear in BOTH:
 
-  (a) `athlete_profile.fitness.hr_zones[].rpe_label` — naming a HR
-      band the user predefined
+  (a) `athlete_profile.fitness.medium_term_hr_effort_map[].rpe_label`
+      — naming a HR band the user predefined (the medium-term
+      mapping)
   (b) `manual_meta.category_stats[].category` and `lap_categories[]` —
       the user's per-segment label for what they intended this run's
-      segments to be
+      segments to be (the short-term per-run label)
 
 These are NOT the same thing. Same words, different objects:
-  - zone "Steady Effort" = an HR range (e.g., 145-162 bpm)
-  - lap "Steady Effort"  = the user's intent for THIS lap
+  - effort_map entry "Steady Effort" = an HR range (e.g., 145-162 bpm)
+  - lap "Steady Effort"               = the user's intent for THIS lap
 
 NEVER write "你将其定义为 'Hold Back Easy'" or "you classified this
 as <X>" UNLESS that exact label appears in `manual_meta`. If the user
@@ -256,7 +262,7 @@ phase / ACWR band does this run sit?
 **Step 6 — recommendation**
 What should the next 1-2 sessions look like given the above? Speak
 in the user's RPE vocabulary — "next session: Hold Back Easy, max
-HR 144" — not in Garmin labels.
+HR 144".
 """
 
 _MAKE_PLAN_INSTRUCTIONS = """### TASK: Propose the next 3-5 sessions

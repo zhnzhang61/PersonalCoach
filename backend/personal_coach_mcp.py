@@ -87,16 +87,32 @@ async def get_athlete_profile() -> dict:
     """Composite athlete profile for AI coaching.
 
     Returns identity (age / sex / weight_kg / height_cm), fitness
-    (vo2max_running, lactate_threshold_hr, lactate_threshold_pace, plus
-    RPE-named hr_zones from data/manual_inputs/user_zones.json), the
-    current cycle (block) with phase (base/build/peak/taper), and any
-    user preferences / medical notes from semantic memory.
+    (vo2max_running, lactate_threshold_hr, lactate_threshold_pace),
+    the user's `medium_term_hr_effort_map` (RPE-named HR bands from
+    data/manual_inputs/user_zones.json — the user's *expected* HR ↔
+    effort mapping over the current few months), the current cycle
+    (block) with phase (base/build/peak/taper), and preferences /
+    medical notes from semantic memory.
 
-    The hr_zones.rpe_label field matches the strings the user uses in
-    `manual_meta.lap_categories` (e.g. "Steady Effort", "LT Effort"),
-    so HR-zone time and per-lap RPE are directly cross-referenceable.
+    `medium_term_hr_effort_map[].rpe_label` is the SAME vocabulary the
+    user uses in `manual_meta.lap_categories` (e.g. "Steady Effort",
+    "LT Effort"). They are NOT the same data, just same words:
+      - effort_map entry = HR range for a band, stable for months
+      - lap_categories entry = the user's per-lap label for THIS run
+    The agent compares them: if the user's per-lap label says "Steady
+    Effort" but the lap's avg_hr fell in the "LT Effort" band on the
+    map, that's a coaching signal.
     """
-    return await _get("/api/athlete/profile")
+    raw = await _get("/api/athlete/profile")
+    # Project: rename `fitness.hr_zones` → `fitness.medium_term_hr_effort_map`
+    # so the agent's prompt + tool output share one explicit name for
+    # the same concept. The underlying api endpoint keeps the
+    # `hr_zones` key — frontend (Setup tab) reads it directly, and we
+    # don't want to ripple a rename out there.
+    fitness = dict(raw.get("fitness") or {})
+    if "hr_zones" in fitness:
+        fitness["medium_term_hr_effort_map"] = fitness.pop("hr_zones")
+    return {**raw, "fitness": fitness}
 
 
 # =============================================================================
@@ -171,12 +187,14 @@ def _trim_run_summary(r: dict) -> dict:
             "elevation_gain_ft": elev_ft,
         },
         "objective": {
+            # Raw sensor only. Garmin's interpretive label fields
+            # (aerobicTrainingEffect, anaerobicTrainingEffect,
+            # activityTrainingLoad, trainingEffectLabel) are filtered
+            # at this layer per docs/IMPROVEMENTS.md §2 — the agent
+            # reasons from HR + pace + the user's own perceived
+            # labels, not Garmin's derived guesses.
             "avg_hr": r.get("averageHR"),
             "max_hr": r.get("maxHR"),
-            "training_effect_aerobic": r.get("aerobicTrainingEffect"),
-            "training_effect_anaerobic": r.get("anaerobicTrainingEffect"),
-            "training_load": r.get("activityTrainingLoad"),
-            "garmin_label": r.get("trainingEffectLabel"),
         },
         "perceived": {
             "category_breakdown": perceived_breakdown,
@@ -383,13 +401,12 @@ async def get_run_detail(activity_id: int) -> dict:
                 "zones_min": _zones_time_min(tel_rows, zones),
             },
             "drift": _hr_drift(tel_rows),
-            "training_effect": {
-                "aerobic": run.get("aerobicTrainingEffect"),
-                "anaerobic": run.get("anaerobicTrainingEffect"),
-                "load": run.get("activityTrainingLoad"),
-                "garmin_label": run.get("trainingEffectLabel"),
-                "garmin_message": run.get("aerobicTrainingEffectMessage"),
-            },
+            # Garmin's training_effect block (aerobicTrainingEffect /
+            # anaerobicTrainingEffect / activityTrainingLoad /
+            # trainingEffectLabel / aerobicTrainingEffectMessage) used
+            # to ship here. Filtered at the MCP layer per §2: the
+            # agent reasons from HR zones + pace + the user's own
+            # perceived labels, not Garmin's interpretive guesses.
             "power": {
                 "avg": run.get("avgPower"),
                 "max": run.get("maxPower"),
