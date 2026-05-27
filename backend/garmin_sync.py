@@ -10,6 +10,64 @@ from dotenv import load_dotenv
 from garminconnect import Garmin
 load_dotenv()
 
+
+def _is_sleep_stub(data) -> bool:
+    """get_sleep_data returns an empty husk when the watch hasn't
+    finished uploading last night's data — dailySleepDTO is present but
+    sleepTimeSeconds is None/0."""
+    if not isinstance(data, dict):
+        return True
+    dto = data.get("dailySleepDTO") or {}
+    secs = dto.get("sleepTimeSeconds")
+    return secs is None or secs == 0
+
+
+def _is_hrv_stub(data) -> bool:
+    """get_hrv_data stub omits hrvSummary entirely (or returns it empty)."""
+    if not isinstance(data, dict):
+        return True
+    return not data.get("hrvSummary")
+
+
+def _is_rhr_stub(data) -> bool:
+    """get_rhr_day stub leaves the WELLNESS_RESTING_HEART_RATE list empty."""
+    if not isinstance(data, dict):
+        return True
+    metrics = (
+        (data.get("allMetrics") or {})
+        .get("metricsMap", {})
+        .get("WELLNESS_RESTING_HEART_RATE")
+    )
+    return not metrics
+
+
+_STUB_DETECTORS = {
+    "get_sleep_data": _is_sleep_stub,
+    "get_hrv_data": _is_hrv_stub,
+    "get_rhr_day": _is_rhr_stub,
+}
+
+
+def _is_stub(method: str, file_path: str) -> bool:
+    """Look at an existing on-disk file and decide whether it's the
+    empty-placeholder shape Garmin returns when you sync before the
+    watch has uploaded the day's data. Unknown methods default to False
+    (not a stub) — better to skip a refetch than to hammer the API for
+    file shapes we haven't characterized."""
+    detector = _STUB_DETECTORS.get(method)
+    if detector is None:
+        return False
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return True
+    try:
+        return detector(data)
+    except (KeyError, TypeError, AttributeError):
+        return True
+
+
 class GarminSync:
     def __init__(self, email, password, data_dir='data'):
         self.email = email
@@ -124,7 +182,7 @@ class GarminSync:
         with open(os.path.join(folder_path, filename), 'w') as f:
             json.dump(data, f, indent=4, default=str)
 
-    def run_sync(self, days_back=7, activity_limit=20):
+    def run_sync(self, days_back=30, activity_limit=20):
         today = datetime.date.today().isoformat()
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
 
@@ -161,8 +219,10 @@ class GarminSync:
         # Today's and yesterday's data is fluid — the watch can take hours to
         # finish uploading last night's sleep, HRV, readiness etc. Always
         # re-fetch those two days so we pick up data that wasn't ready when
-        # an earlier sync ran. Files older than that are stable; existence
-        # check is fine and saves API calls.
+        # an earlier sync ran. Files older than that get an existence check
+        # plus a stub check: if a previous sync wrote an empty-husk file
+        # (sleepTimeSeconds=None etc.) before the watch finished uploading,
+        # we want to refetch it instead of treating the placeholder as final.
         print(f"⬇️ Syncing Daily Data ({days_back} days)...")
         today_iso = datetime.date.today().isoformat()
         yesterday_iso = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
@@ -172,7 +232,12 @@ class GarminSync:
             for method, arg_name in self.daily_methods:
                 try:
                     file_path = os.path.join(self.data_dir, method, f"{d}.json")
-                    if d in always_refetch or not os.path.exists(file_path):
+                    needs_fetch = (
+                        d in always_refetch
+                        or not os.path.exists(file_path)
+                        or _is_stub(method, file_path)
+                    )
+                    if needs_fetch:
                         print(f"   > Calling: {method}({d})...")
                         self._save(getattr(self.client, method)(**{arg_name: d}), method, f"{d}.json")
                         time.sleep(0.05)
@@ -207,7 +272,7 @@ if __name__ == "__main__":
     # Email / Pass 可以留着做备用变量，虽然新逻辑下用不到了
     syncer = GarminSync(email, password)
     if syncer.connect(no_fallback=no_fallback):
-        syncer.run_sync(days_back=5, activity_limit=5)
+        syncer.run_sync(days_back=30, activity_limit=5)
     else:
         # connect() 已经把原因写到 stderr，用 exit code 区分:
         # 2 = token 过期/无效, 1 = 其他失败
