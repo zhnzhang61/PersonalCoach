@@ -1032,6 +1032,81 @@ class AgenticCoach:
         except Exception:
             return []
 
+    @staticmethod
+    def _message_content_text(msg: BaseMessage) -> str:
+        """Normalize LangChain message content into a plain str.
+        Some providers return content as a list of {type:'text', text:...}
+        blocks; flatten those. Matches the same shape /api/ai/history
+        and _chat_list_for_thread emit."""
+        content = msg.content
+        if isinstance(content, list):
+            return "".join(
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and "text" in b
+            )
+        return str(content)
+
+    def get_history_with_ts(self, thread_id: str) -> list[dict]:
+        """Return history with per-message first-seen timestamps.
+
+        Walks `checkpointer.list()` chronologically (oldest first) and
+        records the ts of the first checkpoint where each message
+        position appeared. Used by /api/ai/history to power the UI's
+        day-boundary dividers in long-running sessions that span
+        multiple calendar days.
+
+        Keyed by **list position**, not (type, content) — because users
+        ask the same question on different days (e.g. "请评估我今天的恢复
+        状态" each morning), so content-based keying would collapse
+        them to the first day's ts. The messages list is append-only
+        in this app (agent never trims), so position is stable across
+        checkpoints.
+
+        Missing ts (e.g. legacy checkpoint without `ts` field) falls
+        back to None; the UI treats null as "no day anchor", preserving
+        current behavior.
+
+        Returns [{role, content, ts}] in chronological order. Empty
+        list on any failure (matches `get_history` swallow-and-empty
+        contract)."""
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            tuples = list(self.checkpointer.list(config))
+        except Exception:
+            return []
+        if not tuples:
+            return []
+        # checkpointer.list returns newest-first; reverse for chronology
+        tuples.reverse()
+
+        ts_by_index: dict[int, str | None] = {}
+        max_seen = -1
+        for tup in tuples:
+            ckpt = tup.checkpoint or {}
+            ts = ckpt.get("ts")
+            channel = ckpt.get("channel_values", {}) or {}
+            msgs = channel.get("messages", []) or []
+            for i in range(max_seen + 1, len(msgs)):
+                ts_by_index[i] = ts
+            if len(msgs) - 1 > max_seen:
+                max_seen = len(msgs) - 1
+
+        # Source of truth for the final message list is the newest
+        # checkpoint — ensures we drop any messages that were rolled
+        # back / superseded.
+        last_msgs = (
+            (tuples[-1].checkpoint or {}).get("channel_values", {}) or {}
+        ).get("messages", []) or []
+        out: list[dict] = []
+        for i, m in enumerate(last_msgs):
+            out.append({
+                "role": m.type,
+                "content": self._message_content_text(m),
+                "ts": ts_by_index.get(i),
+            })
+        return out
+
     def _chat_list_for_thread(self, thread_id: str) -> list[dict]:
         """Adapter for memory_engine.consolidate_memory_background
         which wants [{role, content}] dicts."""

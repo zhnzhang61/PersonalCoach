@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Loader2 } from "lucide-react";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
@@ -17,6 +18,7 @@ import type {
 } from "@/lib/types";
 import { MessageBubble } from "./message-bubble";
 import { SessionDivider } from "./session-divider";
+import { DayDivider } from "./day-divider";
 import { ActionPills } from "./action-pills";
 import { ChatInput } from "./chat-input";
 
@@ -254,6 +256,26 @@ export function CoachThread() {
   const visible = (msgs: CoachMessage[]): CoachMessage[] =>
     msgs.filter((m) => m.role === "human" || m.role === "ai");
 
+  // Render a message stream with day-boundary dividers inserted at
+  // calendar-day transitions (local timezone). Without this, a session
+  // that spans multiple days reads as a flat wall with no temporal
+  // anchor — exactly the "中间是昨天问的问题" symptom this PR fixes.
+  // Messages without a ts (legacy data, pre-PR-A checkpoints) get no
+  // anchor and don't trigger a divider, preserving prior behavior.
+  const renderWithDayDividers = (msgs: CoachMessage[]) => {
+    const out: ReactNode[] = [];
+    let prevDay: string | null = null;
+    msgs.forEach((m, i) => {
+      const day = m.ts ? new Date(m.ts).toLocaleDateString() : null;
+      if (day && day !== prevDay) {
+        out.push(<DayDivider key={`day-${i}-${day}`} iso={m.ts!} />);
+        prevDay = day;
+      }
+      out.push(<MessageBubble key={`msg-${i}`} message={m} />);
+    });
+    return out;
+  };
+
   return (
     <div className="flex min-h-[calc(100vh-180px)] flex-col">
       {/* Header row: action pills + End & Save */}
@@ -294,9 +316,7 @@ export function CoachThread() {
                 onDelete={deleteArchivedSession}
               />
               <div className="space-y-3">
-                {visible(messages).map((m, i) => (
-                  <MessageBubble key={i} message={m} />
-                ))}
+                {renderWithDayDividers(visible(messages))}
               </div>
             </div>
           ))}
@@ -308,9 +328,7 @@ export function CoachThread() {
 
         {/* Active messages */}
         <div className="space-y-3">
-          {visible(activeMessages).map((m, i) => (
-            <MessageBubble key={i} message={m} />
-          ))}
+          {renderWithDayDividers(visible(activeMessages))}
         </div>
 
         {/* Empty state */}

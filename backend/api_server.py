@@ -1001,16 +1001,18 @@ def ai_session_delete(thread_id: str) -> dict[str, Any]:
 
 @app.get("/api/ai/history/{thread_id}")
 def ai_history(thread_id: str) -> dict[str, Any]:
-    messages = []
-    for msg in agent.get_history(thread_id):
-        content = msg.content
-        if isinstance(content, list):
-            content = "".join([block.get("text", "") for block in content if isinstance(block, dict)])
-        # NOTE: emit `role` (LangChain calls it `.type` internally —
-        # "human"/"ai"/"system"/"tool" — but the front-end TS type and
-        # filters key on `role`). Aligning the wire to `role` here is a
-        # one-line change vs. renaming three frontend files.
-        messages.append({"role": msg.type, "content": str(content)})
+    # get_history_with_ts walks all checkpoints for the thread and
+    # tags each message with the ts of its first-seen checkpoint.
+    # The front-end uses ts to insert day-boundary dividers in long
+    # sessions that span multiple calendar days. ts can be null for
+    # legacy checkpoints without the field — the UI treats null as
+    # "no anchor."
+    #
+    # NOTE: emit `role` (LangChain calls it `.type` internally —
+    # "human"/"ai"/"system"/"tool" — but the front-end TS type and
+    # filters key on `role`). The helper already aligns the wire on
+    # `role` so the response shape matches CoachMessage 1:1.
+    messages = agent.get_history_with_ts(thread_id)
     return {"thread_id": thread_id, "messages": messages}
 
 
