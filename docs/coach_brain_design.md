@@ -393,7 +393,8 @@ doc.
 | **P1** ✅ done 2026-05-27 | `models` table scaffolding. New CME `models` table (model_id PK + UNIQUE model_key + model_type/derivation_method/status/confidence CHECK enums + params_json + n_samples + evidence_json + timestamps) parallel to `episodes`. `topics.related_models` JSON column added via idempotent ALTER. `topic_decisions.kind` CHECK extended to include `'new_model'` via table-rebuild. MemoryOS helpers: `create_model`, `get_model`, `list_models`, `update_model_params`, `link_topic_to_model`. New `/api/memory/models[/{key}]` + `/api/memory/models/refit/{model_key}` endpoints. MCP tools `get_model` + `list_models` for the agent. Seed model: `recovery.hrv_14d_baseline` (mean_std) from `get_health_stats`. 22 new tests (migration idempotency, CRUD, validation, seed refit). | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
 | **P2** ✅ done 2026-05-27 | Episode → model generalize pipeline. `MemoryOS.propose_model_from_topic(topic_id, trigger='manual')` gathers a topic's linked episodes, LLM asks "parametrically generalizable?", parks `kind='new_model'` decision. `resolve_topic_decision` handles `'new_model'`: `create_new` → `create_model` (derivation='llm') + `link_topic_to_model`. Endpoints: `POST /api/memory/topics/{tid}/propose_model`, `GET /api/memory/decisions`, `POST /api/memory/decisions/{id}/resolve`. MCP tools `propose_model_from_topic` / `list_pending_decisions` / `resolve_decision` so the **agent drives confirm/reject in chat** (per design A — no separate UI page). LLM JSON parser strips markdown fences + leading prose. Tracer hooks via PR B (`kind='model_propose'`). 16 unit tests; side-fix `_SCHEMA_SQL` to canonically include `topic_episode_links` + episodes event-time columns (pre-existing schema gap that made fresh DBs crash on `get_topic_episodes`). | ~1-2 days | Makes models grow. Without P2, P1 is a passive store. |
 | **P3** ✅ done 2026-05-27 | Daily check-in widget on Health tab top. `data/manual_inputs/daily_checkins.json` (one row per date, upsert semantics). DataProcessor CRUD: `upsert_checkin` / `get_checkin_by_date` / `list_checkins_in_range` / `delete_checkin` with int-range validation. Endpoints: `GET/POST/DELETE /api/checkins`. POST dual-writes a `daily_checkin` episode into CME (best-effort; CME failure doesn't 500 the save). MCP tool `get_recent_checkins(days=7)`. Frontend: `<TodaysCheckin>` card with 4 ordinal scales (sleep_quality 1-5, soreness 0-5, mood 1-5, motivation 1-5) as tap-to-select rows + optional notes. Filled state = compact chip summary + Edit pencil. Key-reset pattern (not setState-in-effect) for draft refresh after save. 29 new tests. | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
-| **P4** | Planned workouts (intent layer §3): start with manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP tool `get_planned_workouts(start, end)` + plan-vs-actual deviation compute. Google Cal wiring deferred. | ~2 days | Unlocks 95% of coaching value (adherence + deviation). Manual JSON keeps scope tight. |
+| **P4a** | Planned workouts (intent layer §3) — agent → Cal → user-phone loop. JSON storage at `data/manual_inputs/planned_workouts.json` + CRUD endpoints. Google Cal `SCOPES` bumped from `calendar.readonly` to include `calendar.events` (write); existing users re-authorize once on next /api/calendar/connect (the OAuth `include_granted_scopes=true` flag was already wired for this Phase 2 step). New `GoogleCalendar` methods `insert_event` / `update_event` / `delete_event`. MCP tools `propose_workout_plan(workouts)` (agent calls after user confirms in chat; dual-writes JSON + Cal, captures `cal_event_id` for later edits) and `get_planned_workouts(start, end)` (merges local + Cal-tagged events). **No frontend list yet** — agent confirms in chat, user sees workouts on their phone via existing Google Cal sync. Cal-write failures degrade to JSON-only (don't 500 the save). | ~2.5 days | Closes the actual value loop: AI gives a plan, it lands on the user's phone Cal with reminders. Cal-read-only meant "AI proposes 5 workouts → user copy-pastes 30 fields into Google" — unworkable. |
+| **P4b** | Manual editing UI + plan-vs-actual deviation compute. Training tab list of next 2 weeks' planned workouts (display + edit/delete form). Edits sync back to Cal when the entry has a `cal_event_id`. New `get_plan_actual_deviation(activity_id)` MCP tool for post-run review (agent compares planned target_pace/HR to actual). | ~1.5 days | Polishes the user side — can manage plans without going through chat or Google Cal directly. Deviation compute powers the "did you do what we said?" coaching turn. |
 | **P5** | External context channels (§4): travel / illness / life-stress quick-add UI + new episode types + weather/menstrual MCP surface (already-synced data not exposed) | ~1-2 days | Closes "agent can't see why" gap. Mostly surfacing existing data + small UI for free-text events. |
 | **P6** | First batch of stat-derived models (§1, §5): aerobic decoupling per run, pace-HR table for tempos, cadence baseline, sleep debt, cycle-volume diff. Each follows P1+P2 stat-derivation path. | ~2-3 days | First real B-bucket payloads. Builds on P1 store + P2 pipeline. |
 
@@ -454,19 +455,26 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: P4** — Planned workouts (intent layer §3). Start with a
-manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP
-tool `get_planned_workouts(start, end)` + plan-vs-actual deviation
-compute. Google Cal wiring deferred. Unlocks the 95% of coaching
-value that's about adherence + plan deviation rather than raw
-sensor data.
+**Next PR: P4a** (in progress) — Planned workouts agent → Google
+Cal → user-phone loop. JSON storage + Cal write integration
+(`SCOPES` bump + insert/update/delete event methods) + 2 MCP
+tools (`propose_workout_plan` / `get_planned_workouts`). No
+frontend list in this PR — the value loop is "AI proposes,
+user confirms in chat, plan lands on phone Cal with reminders".
+**P4b** ships the manual editing UI + plan-vs-actual deviation
+compute as a follow-up.
 
-Suggested branch: `add-planned-workouts`.
+The split was the result of asking honestly: what's the minimum
+that gets a plan from agent's mouth to user's phone? Answer:
+JSON store + Cal write + 2 MCP tools. Frontend list is polish.
+
+Suggested branch: `add-planned-workouts-cal-write`.
 
 Phase 0 + Phase 1 + P1-P3 complete. Three of four agent input
 streams now live: objective (Garmin sensors), perceived
-(check-ins), patterns (models). P4 closes the planned-intent gap;
-P5 adds external-context channels (travel/illness/weather).
+(check-ins), patterns (models). P4a closes the planned-intent
+gap end-to-end; P5 adds external-context channels (travel /
+illness / weather).
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —

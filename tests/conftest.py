@@ -178,6 +178,15 @@ def _build_processor_mock(tmp_dir: str = "/tmp/personalcoach_test") -> MagicMock
         "updated_at": "2026-05-27T12:00:00Z",
     }
     m.delete_checkin.return_value = True
+    # PR P4a — planned workouts.
+    m.list_planned_workouts_in_range.return_value = []
+    m.get_planned_workout.return_value = None
+    m.upsert_planned_workout.return_value = {
+        "id": "plan_mock", "date": "2026-05-30", "type": "tempo",
+        "created_at": "2026-05-27T12:00:00Z",
+        "updated_at": "2026-05-27T12:00:00Z",
+    }
+    m.delete_planned_workout.return_value = True
     m.get_training_load.return_value = {
         "window_days": 28, "acute_load_mi": 0.0, "chronic_load_mi": 0.0,
         "acwr": None,
@@ -284,6 +293,21 @@ def _build_gcal_mock() -> MagicMock:
     m.list_events.return_value = []
     m.finish_flow.return_value = None
     m.disconnect.return_value = None
+    # PR P4a — Cal write methods. Default to "not connected" so any
+    # test exercising the write path must explicitly opt in by
+    # setting m.is_connected.return_value = True. Each write returns
+    # the same normalized shape list_events emits.
+    m.insert_event.return_value = {
+        "source": "google", "id": "evt_mock", "title": "mock",
+        "start": "2026-05-30T09:00:00", "end": "2026-05-30T10:00:00",
+        "all_day": False, "calendar_id": "primary",
+    }
+    m.update_event.return_value = {
+        "source": "google", "id": "evt_mock", "title": "mock",
+        "start": "2026-05-30T09:00:00", "end": "2026-05-30T10:00:00",
+        "all_day": False, "calendar_id": "primary",
+    }
+    m.delete_event.return_value = True
     return m
 
 

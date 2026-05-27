@@ -781,6 +781,199 @@ def delete_checkin(date_str: str) -> dict[str, Any]:
     return {"ok": True, "date": date_str}
 
 
+# ===========================================================================
+# Planned workouts (PR P4a — intent layer §3)
+# ===========================================================================
+#
+# Closes the "AI proposes a plan → it lands on user's phone" loop.
+# Storage is `data/manual_inputs/planned_workouts.json`; Google Cal
+# is the user-facing surface (reminders, mobile, etc.). The two are
+# kept in sync by dual-write on POST/PUT/DELETE.
+#
+# Cal failures (not connected, network blip, scope refused) degrade
+# gracefully — the JSON row is the canonical store, the Cal event is
+# the nice-to-have surface. Caller sees `cal_synced: false` on the
+# response when the Cal write didn't happen so the UI can hint to
+# reconnect.
+
+
+class PlannedWorkoutInput(BaseModel):
+    """Body for POST /api/planned-workouts. `date` + `type` required
+    on create. All targets optional (a casual "easy 5 mi" plan
+    doesn't need explicit pace/HR; a tempo plan probably does)."""
+    date: str  # YYYY-MM-DD
+    type: str
+    target_pace_min_mi: float | None = None
+    target_hr: int | None = None
+    distance_mi: float | None = None
+    duration_min: int | None = None
+    notes: str | None = None
+
+
+class PlannedWorkoutPatch(BaseModel):
+    """PUT body — every field optional. None clears optional fields
+    (target_pace_min_mi / target_hr / etc.) but not required ones
+    (date / type) — DataProcessor raises ValueError if a required
+    field is set to None, which the handler turns into 400."""
+    date: str | None = None
+    type: str | None = None
+    target_pace_min_mi: float | None = None
+    target_hr: int | None = None
+    distance_mi: float | None = None
+    duration_min: int | None = None
+    notes: str | None = None
+
+
+def _plan_to_cal_payload(plan: dict) -> dict[str, Any]:
+    """Turn a planned-workout row into the Google Cal event payload
+    we want to write. Title = workout type (capitalized);
+    description embeds the marker line + structured fields so the
+    read merge in /api/planned-workouts can recognize it. Time:
+    default to a 1-hour block at 09:00 local — better than all-day
+    for phone reminders, but not so specific that the user can't
+    drag it around in Google Cal."""
+    title = plan["type"].capitalize() + " workout"
+    desc_lines = [
+        "personalcoach.training=true",
+        f"type: {plan['type']}",
+    ]
+    for field in ("target_pace_min_mi", "target_hr", "distance_mi", "duration_min"):
+        v = plan.get(field)
+        if v is not None:
+            desc_lines.append(f"{field}: {v}")
+    if plan.get("notes"):
+        desc_lines.append("")
+        desc_lines.append(plan["notes"])
+    # Default 09:00–10:00 unless duration_min suggests something else.
+    duration = int(plan.get("duration_min") or 60)
+    start_dt = f"{plan['date']}T09:00:00"
+    # Compute end as start + duration; keep TZ-naive so Google uses
+    # the calendar's default tz (the user's primary calendar tz).
+    sh = 9
+    sm = 0
+    em_total = sm + duration
+    eh = sh + em_total // 60
+    em = em_total % 60
+    end_dt = f"{plan['date']}T{eh:02d}:{em:02d}:00"
+    return {
+        "summary": title,
+        "start": start_dt,
+        "end": end_dt,
+        "description": "\n".join(desc_lines),
+    }
+
+
+@app.get("/api/planned-workouts")
+def list_planned_workouts(
+    start: str = Query(...),
+    end: str = Query(...),
+) -> dict[str, Any]:
+    """Inclusive date-range planned workouts. JSON-stored rows only
+    for now — Cal-sourced events (those tagged
+    `personalcoach.training=true` but created outside our app) are
+    surfaced separately via /api/calendar/events. P4b will merge
+    the two views; this PR keeps the read side simple."""
+    return {
+        "start": start,
+        "end": end,
+        "planned_workouts": processor.list_planned_workouts_in_range(start, end),
+    }
+
+
+@app.get("/api/planned-workouts/{plan_id}")
+def get_planned_workout(plan_id: str) -> dict[str, Any]:
+    row = processor.get_planned_workout(plan_id)
+    if not row:
+        raise HTTPException(404, f"No planned workout {plan_id}")
+    return row
+
+
+@app.post("/api/planned-workouts")
+def create_planned_workout(body: PlannedWorkoutInput) -> dict[str, Any]:
+    """Create a planned workout. Dual-writes to Google Cal if
+    connected; the returned event_id lands on the JSON row as
+    `cal_event_id` so edits/deletes sync. Cal failure degrades to
+    JSON-only — response carries `cal_synced` so the caller can
+    decide whether to surface a "connect Google Cal" hint."""
+    payload = body.model_dump(exclude_none=True)
+    try:
+        plan = processor.upsert_planned_workout(plan_id=None, **payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    cal_synced = False
+    if gcal.is_connected():
+        try:
+            ev = gcal.insert_event(**_plan_to_cal_payload(plan))
+            plan = processor.upsert_planned_workout(
+                plan["id"], cal_event_id=ev["id"]
+            )
+            cal_synced = True
+        except Exception:
+            # Best-effort: JSON row is canonical. Frontend can show
+            # a degraded badge from the cal_synced flag.
+            pass
+
+    return {"ok": True, "cal_synced": cal_synced, "planned_workout": plan}
+
+
+@app.put("/api/planned-workouts/{plan_id}")
+def update_planned_workout(
+    plan_id: str, body: PlannedWorkoutPatch
+) -> dict[str, Any]:
+    """Patch fields. If the row carries a `cal_event_id`, mirror the
+    edit back to Google Cal. Cal failures degrade to JSON-only."""
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(400, "No fields to update")
+    try:
+        plan = processor.upsert_planned_workout(plan_id, **fields)
+    except KeyError:
+        raise HTTPException(404, f"No planned workout {plan_id}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    cal_synced = False
+    if plan.get("cal_event_id") and gcal.is_connected():
+        try:
+            cal_payload = _plan_to_cal_payload(plan)
+            gcal.update_event(
+                plan["cal_event_id"],
+                summary=cal_payload["summary"],
+                start=cal_payload["start"],
+                end=cal_payload["end"],
+                description=cal_payload["description"],
+            )
+            cal_synced = True
+        except Exception:
+            pass
+
+    return {"ok": True, "cal_synced": cal_synced, "planned_workout": plan}
+
+
+@app.delete("/api/planned-workouts/{plan_id}")
+def delete_planned_workout(plan_id: str) -> dict[str, Any]:
+    """Hard-delete the planned workout. If it has a `cal_event_id`,
+    delete the Cal event too — leaving an orphan event on the user's
+    calendar (when they explicitly cleared it from our side) would
+    be confusing."""
+    plan = processor.get_planned_workout(plan_id)
+    if not plan:
+        raise HTTPException(404, f"No planned workout {plan_id}")
+
+    cal_id = plan.get("cal_event_id")
+    cal_synced = False
+    if cal_id and gcal.is_connected():
+        try:
+            gcal.delete_event(cal_id)
+            cal_synced = True
+        except Exception:
+            pass
+
+    processor.delete_planned_workout(plan_id)
+    return {"ok": True, "cal_synced": cal_synced, "id": plan_id}
+
+
 @app.get("/api/runs")
 def runs(
     start: str | None = Query(default=None),
