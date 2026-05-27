@@ -466,8 +466,6 @@ Ideas not yet developed:
   profile all assume one user. Retrofit cost is high.
 - **i18n** — UI chrome English, AI Chinese. Works for current
   bilingual user but is a smell.
-- **Streaming SSE for /api/ai/chat** — deferred per Coach design
-  doc. Real value-add for long tool-using turns.
 - **Persist CME embeddings to SQLite** — at ~300 topics cold-start
   cost starts mattering (see cognitive_memory_engine.py comments).
 - **Failed agent turns invisible in Coach UI timeline** — observed
@@ -480,10 +478,14 @@ Ideas not yet developed:
   with no persisted record. Fix shape: persist failed turns as
   synthetic `ai` messages with `error: true` (or new role `error`)
   and a short reason string, and render them inline with a distinct
-  visual treatment (e.g., warning chip). Requires backend to capture
-  the failure path in the checkpointer or in a sidecar table; depends
-  on PR B's tracing layer if we want the failure rows to carry
-  prompt_version + trace_id.
+  visual treatment (e.g., warning chip). Now that PR B (#74) has
+  landed structured tracing, the natural integration is: when a
+  turn raises, its `trace_id` is already in `data/traces/`; the
+  failure-row sidecar (or `additional_kwargs.error` on the AI
+  message) just needs to carry that `trace_id` so the UI can deep-
+  link to the trace row. Backend captures the failure path either
+  in the checkpointer or in a sidecar table; either way the trace
+  row is the source of truth for "why."
 - **Multi-day Coach session can grow unbounded** — observed in same
   session: 4 calendar days, 23 messages, never archived. User has no
   cue to End & Save. Fix shape (defer until after PR A lands user-
