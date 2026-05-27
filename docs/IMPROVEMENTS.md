@@ -470,6 +470,29 @@ Ideas not yet developed:
   doc. Real value-add for long tool-using turns.
 - **Persist CME embeddings to SQLite** — at ~300 topics cold-start
   cost starts mattering (see cognitive_memory_engine.py comments).
+- **Failed agent turns invisible in Coach UI timeline** — observed
+  while debugging PR A (#71) on session `coach_20260511T150040Z`:
+  3 consecutive `human` messages on 5/13 with no `ai` reply between
+  them (the "Google那边坏了" failures the user mentioned 5/26).
+  Today these gaps are silent — the timeline jumps from one user
+  message to the next as if nothing happened. Currently `/api/ai/chat`
+  failures surface as a transient `errorMsg` toast that disappears,
+  with no persisted record. Fix shape: persist failed turns as
+  synthetic `ai` messages with `error: true` (or new role `error`)
+  and a short reason string, and render them inline with a distinct
+  visual treatment (e.g., warning chip). Requires backend to capture
+  the failure path in the checkpointer or in a sidecar table; depends
+  on PR B's tracing layer if we want the failure rows to carry
+  prompt_version + trace_id.
+- **Multi-day Coach session can grow unbounded** — observed in same
+  session: 4 calendar days, 23 messages, never archived. User has no
+  cue to End & Save. Fix shape (defer until after PR A lands user-
+  observable for a while): heuristic prompt — after N hours of
+  inactivity OR after the day-boundary divider has been crossed
+  ≥ 1 time, show a non-modal "wrap up?" hint near the input. Don't
+  auto-archive — user owns session boundaries (per
+  `docs/coach_chat_design.md` Q1=A) and surprises here would
+  feel like losing context.
 - **Non-running Garmin activities invisible on Activity tab** —
   observed 2026-05-26: two Garmin-recorded swims (Pool Swim
   5/22, Maui open water 5/21) sat on disk in
