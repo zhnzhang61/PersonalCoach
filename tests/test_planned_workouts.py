@@ -182,7 +182,6 @@ def gcal_with_creds(tmp_path):
         "client_id": "x", "client_secret": "y",
         "token_uri": "https://oauth2.googleapis.com/token",
         "scopes": [
-            "https://www.googleapis.com/auth/calendar.readonly",
             "https://www.googleapis.com/auth/calendar.events",
         ],
     }))
