@@ -327,6 +327,28 @@ explicit conflicts the agent owes the user.
 
 
 # ---------------------------------------------------------------------------
+# System-prompt builder — runs every turn so today's date is fresh.
+# ---------------------------------------------------------------------------
+
+def _build_prompt(state: dict) -> list[BaseMessage]:
+    """LangGraph create_react_agent `prompt` callable. Prepends a
+    SystemMessage that pins today's date in front of the persona
+    prompt, then returns the conversation history. Without this the
+    agent has no date anchor (the persona prompt is static and tool
+    results don't always include explicit dates) and ends up planning
+    workouts for whatever day its training data defaulted to."""
+    today_iso = date.today().isoformat()
+    weekday = date.today().strftime("%A")
+    header = (
+        f"Today is {today_iso} ({weekday}). When the user says \"today\", "
+        f"\"tomorrow\", \"this week\", etc., resolve relative to this date. "
+        f"Never schedule planned workouts in the past."
+    )
+    system = SystemMessage(content=f"{header}\n\n{_SYSTEM_PROMPT}")
+    return [system] + list(state.get("messages", []))
+
+
+# ---------------------------------------------------------------------------
 # Pre-fetch plans — tool name + arg dict per action. Run in parallel
 # with asyncio.gather, results JSON-injected into the system prompt.
 # ---------------------------------------------------------------------------
@@ -623,7 +645,15 @@ class AgenticCoach:
                 model=llm,
                 tools=self._mcp_tools,
                 checkpointer=self._aio_checkpointer,
-                prompt=_SYSTEM_PROMPT,
+                # Callable rather than the raw string so today's date is
+                # resolved fresh every turn — otherwise a long-lived
+                # server process would freeze "today" at startup time,
+                # and the agent (which has no other date anchor in its
+                # context) ends up planning workouts for the wrong day.
+                # Real repro 2026-05-27: user asked "排个今天40min easy
+                # run" → agent picked 2026-05-14 (started writing past
+                # events). See _build_prompt below for the wrapper.
+                prompt=_build_prompt,
             )
 
     def _cleanup_sync(self) -> None:

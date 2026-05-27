@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from backend.agentic_coach import AgenticCoach, _started_at_from_thread_id
+from backend.agentic_coach import (
+    AgenticCoach,
+    _build_prompt,
+    _started_at_from_thread_id,
+)
 
 
 class TestSkipApiProbe:
@@ -34,6 +38,37 @@ class TestSkipApiProbe:
         check in production."""
         coach = AgenticCoach(db_path=tmp_chat_db)
         assert coach._skip_api_probe is False
+
+
+class TestBuildPrompt:
+    """The LangGraph `prompt` callable. Has to:
+      1. Inject today's date so the agent doesn't plan workouts in
+         the past (real bug 2026-05-27: agent picked 2026-05-14 for
+         "排个今天的 easy run").
+      2. Preserve the conversation history that LangGraph already
+         accumulated in state["messages"].
+    """
+
+    def test_prepends_today_system_message(self):
+        from datetime import date
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        msgs = _build_prompt({"messages": [HumanMessage(content="hi")]})
+        assert isinstance(msgs[0], SystemMessage)
+        # ISO date appears in the system message.
+        assert date.today().isoformat() in msgs[0].content
+        # Plus an explicit anti-past-scheduling instruction.
+        assert "past" in msgs[0].content.lower()
+        # Original conversation still there, untouched.
+        assert isinstance(msgs[-1], HumanMessage)
+        assert msgs[-1].content == "hi"
+
+    def test_empty_messages_state_ok(self):
+        """First turn — state may not have messages yet."""
+        msgs = _build_prompt({})
+        assert len(msgs) == 1  # just the system message
+        assert "Today is" in msgs[0].content
 
 
 class TestStartedAtFromThreadId:
