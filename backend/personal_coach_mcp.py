@@ -853,6 +853,61 @@ async def get_recent_checkins(days: int = 7) -> dict:
 
 
 @mcp.tool()
+async def get_planned_workouts(start: str, end: str) -> dict:
+    """List planned workouts in [start, end] (YYYY-MM-DD inclusive).
+
+    Each row has: id, date, type (easy / tempo / interval / long /
+    run / swim / gym / other), optional target_pace_min_mi, target_hr,
+    distance_mi, duration_min, notes, cal_event_id (set when synced
+    to Google Cal — phone reminders fire from there).
+
+    Use to answer "what's on my schedule this week?" and to ground
+    the post-run "did you do what we said?" comparison."""
+    return await _get("/api/planned-workouts", start=start, end=end)
+
+
+@mcp.tool()
+async def propose_workout_plan(workouts: list[dict]) -> dict:
+    """Save a plan of N workouts to the user's calendar + local store.
+
+    Call ONLY after the user has confirmed the plan in chat — this
+    is a write operation and lands events on their Google Calendar
+    (visible on their phone with reminders). For drafting / showing
+    a plan to the user, just speak it in chat first; call this when
+    they say "yes, schedule them".
+
+    Each item in `workouts` is a dict with:
+      date:               YYYY-MM-DD (required)
+      type:               easy | tempo | interval | long | run | swim
+                          | gym | other (required)
+      target_pace_min_mi: minutes per mile, e.g. 7.5 (optional)
+      target_hr:          bpm, e.g. 160 (optional)
+      distance_mi:        miles, e.g. 5.0 (optional)
+      duration_min:       minutes (optional; determines Cal block length)
+      notes:              free text — workout description, cues, etc.
+                          (optional but recommended for tempos / intervals)
+
+    Returns `{ok: true, created: [...], cal_synced: bool, n_synced: int}`.
+    `cal_synced=false` means Google Cal wasn't connected; the workouts
+    still landed in our local store but the user won't see them on their
+    phone until they reconnect. Surface that explicitly if it happens."""
+    created: list[dict] = []
+    n_synced = 0
+    for w in workouts:
+        r = await _post("/api/planned-workouts", body=w)
+        created.append(r.get("planned_workout") or {})
+        if r.get("cal_synced"):
+            n_synced += 1
+    return {
+        "ok": True,
+        "created": created,
+        "cal_synced": n_synced == len(workouts) and len(workouts) > 0,
+        "n_synced": n_synced,
+        "n_total": len(workouts),
+    }
+
+
+@mcp.tool()
 async def get_pending_clarifications() -> dict:
     """Unresolved clarification questions the agent owes the user.
 

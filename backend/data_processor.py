@@ -3,6 +3,7 @@ import json
 import csv
 import datetime
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, ClassVar, Literal, Optional
@@ -178,6 +179,7 @@ class DataProcessor:
             'blocks': os.path.join(data_dir, 'blocks', 'training_blocks.json'),
             'aux': os.path.join(data_dir, 'blocks', 'auxiliary_log.json'),
             'daily_checkins': os.path.join(data_dir, 'manual_inputs', 'daily_checkins.json'),
+            'planned_workouts': os.path.join(data_dir, 'manual_inputs', 'planned_workouts.json'),
             'ledger': os.path.join(data_dir, 'derived', 'daily_health_metrics.csv'),
             'weather': os.path.join(data_dir, 'weather'),
             'user_zones': os.path.join(data_dir, 'manual_inputs', 'user_zones.json'),
@@ -209,6 +211,13 @@ class DataProcessor:
         # Empty list; users create one per day via the Health-tab card.
         if not os.path.exists(self.paths['daily_checkins']):
             with open(self.paths['daily_checkins'], 'w') as f: json.dump([], f)
+
+        # Initialize Planned Workouts (PR P4a — intent layer §3).
+        # Agent populates via propose_workout_plan after user confirms
+        # a plan in chat; backend dual-writes to Google Cal when
+        # connected (storing cal_event_id back on the JSON row).
+        if not os.path.exists(self.paths['planned_workouts']):
+            with open(self.paths['planned_workouts'], 'w') as f: json.dump([], f)
             
         # Initialize Semantic Memory (User Profile)
         if not os.path.exists(self.paths['semantic_memory']):
@@ -832,6 +841,165 @@ class DataProcessor:
         if len(remaining) == len(current):
             return False
         with open(self.paths['daily_checkins'], 'w') as f:
+            json.dump(remaining, f, indent=2, ensure_ascii=False)
+        return True
+
+    # ==========================================
+    # Planned workouts (PR P4a — intent layer §3)
+    # ==========================================
+    #
+    # Each row is one scheduled workout — what the user (or agent on
+    # their behalf) intends to do on a given date. Lives parallel to
+    # actuals (Garmin activities), and the post-run "did you do what
+    # we said?" coaching turn (P4b) compares the two.
+    #
+    # When the user is connected to Google Cal, the API layer
+    # dual-writes — the JSON row is the canonical store, the Cal
+    # event is the user-facing surface (phone reminders, etc.).
+    # `cal_event_id` on the JSON row links back so edits can sync.
+
+    _PLAN_WORKOUT_TYPES = (
+        "easy", "tempo", "interval", "long",  # running-specific
+        "run", "swim", "gym", "other",         # general
+    )
+    _PLAN_NULLABLE_FIELDS = {
+        "target_pace_min_mi", "target_hr", "distance_mi",
+        "duration_min", "notes", "cal_event_id",
+    }
+
+    @staticmethod
+    def _validate_plan_workout_fields(payload: dict) -> dict:
+        """Coerce + validate shape. None values pass through unchanged —
+        the upsert layer decides whether None means "clear this field"
+        (OK for optionals) or "tried to clear required" (rejected).
+        Numeric optionals get type-cast (str → float / int); notes
+        truncated to 1000 chars."""
+        out: dict = {}
+        if "date" in payload:
+            d = payload["date"]
+            if d is None:
+                out["date"] = None
+            elif not isinstance(d, str) or len(d) != 10 or d[4] != "-" or d[7] != "-":
+                raise ValueError(f"date must be YYYY-MM-DD, got {d!r}")
+            else:
+                out["date"] = d
+        if "type" in payload:
+            t = payload["type"]
+            if t is None:
+                out["type"] = None
+            else:
+                # Unknown types accepted as-is — coaches sometimes invent
+                # ("threshold-by-feel").
+                out["type"] = str(t)
+        # Numeric optionals
+        for fld, caster in [
+            ("target_pace_min_mi", float),
+            ("target_hr", int),
+            ("distance_mi", float),
+            ("duration_min", int),
+        ]:
+            if fld in payload:
+                v = payload[fld]
+                if v is None:
+                    out[fld] = None
+                else:
+                    try:
+                        out[fld] = caster(v)
+                    except (TypeError, ValueError):
+                        raise ValueError(f"{fld} must be a number, got {v!r}")
+        # String optionals
+        for fld in ("notes", "cal_event_id"):
+            if fld in payload:
+                v = payload[fld]
+                if v is None:
+                    out[fld] = None
+                elif not isinstance(v, str):
+                    raise ValueError(f"{fld} must be a string")
+                else:
+                    out[fld] = v.strip()[:1000] if fld == "notes" else v.strip()
+        return out
+
+    def list_planned_workouts_in_range(
+        self, start_str: str, end_str: str
+    ) -> list[dict]:
+        """Inclusive date-range; sorted by date ascending (earliest
+        first — opposite of check-ins because plans look forward)."""
+        current = self.load_json_safe(self.paths['planned_workouts']) or []
+        if isinstance(current, dict):
+            current = []
+        return sorted(
+            [p for p in current if start_str <= p.get("date", "") <= end_str],
+            key=lambda p: p.get("date", ""),
+        )
+
+    def get_planned_workout(self, plan_id: str) -> dict | None:
+        current = self.load_json_safe(self.paths['planned_workouts']) or []
+        if isinstance(current, dict):
+            return None
+        for p in current:
+            if p.get("id") == plan_id:
+                return p
+        return None
+
+    def upsert_planned_workout(
+        self, plan_id: str | None = None, **fields
+    ) -> dict:
+        """Create (plan_id=None) or patch (plan_id=existing) a planned
+        workout row. On create, `date` and `type` are required. On
+        patch, only the passed fields are touched — None clears
+        optionals; required fields can't be cleared."""
+        cleaned = self._validate_plan_workout_fields(fields)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        with open(self.paths['planned_workouts'], 'r') as f:
+            current = json.load(f)
+        if not isinstance(current, list):
+            current = []
+
+        if plan_id:
+            # Patch existing
+            for p in current:
+                if p.get("id") == plan_id:
+                    for k, v in cleaned.items():
+                        if v is None:
+                            if k not in self._PLAN_NULLABLE_FIELDS:
+                                raise ValueError(
+                                    f"Cannot clear required field '{k}'"
+                                )
+                            p.pop(k, None)
+                        else:
+                            p[k] = v
+                    p["updated_at"] = now
+                    with open(self.paths['planned_workouts'], 'w') as f:
+                        json.dump(current, f, indent=2, ensure_ascii=False)
+                    return p
+            raise KeyError(f"planned workout {plan_id!r} not found")
+
+        # Create
+        if "date" not in cleaned or "type" not in cleaned:
+            raise ValueError("create requires date + type")
+        new_id = f"plan_{uuid.uuid4().hex[:8]}"
+        entry: dict = {
+            "id": new_id,
+            **cleaned,
+            "created_at": now,
+            "updated_at": now,
+        }
+        current.append(entry)
+        current.sort(key=lambda p: (p.get("date", ""), p.get("id", "")))
+        with open(self.paths['planned_workouts'], 'w') as f:
+            json.dump(current, f, indent=2, ensure_ascii=False)
+        return entry
+
+    def delete_planned_workout(self, plan_id: str) -> bool:
+        with open(self.paths['planned_workouts'], 'r') as f:
+            current = json.load(f)
+        if not isinstance(current, list):
+            return False
+        remaining = [p for p in current if p.get("id") != plan_id]
+        if len(remaining) == len(current):
+            return False
+        with open(self.paths['planned_workouts'], 'w') as f:
             json.dump(remaining, f, indent=2, ensure_ascii=False)
         return True
 

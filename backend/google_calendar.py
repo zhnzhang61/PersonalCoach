@@ -1,12 +1,15 @@
-"""Google Calendar integration — OAuth flow + event fetch.
+"""Google Calendar integration — OAuth flow + event fetch + write.
 
 The Personal Coach app authenticates against the user's personal Google
-account and reads events from their primary calendar. This is single-user
-(the owner runs it locally), so we store the refresh token in a JSON file
-under data/oauth/ — sqlite would be overkill for one row.
+account and reads / writes events on their primary calendar. This is
+single-user (the owner runs it locally), so we store the refresh token
+in a JSON file under data/oauth/ — sqlite would be overkill for one row.
 
-Phase 1 is read-only (calendar.readonly). Phase 2 will add write scope
-for AI-driven workout scheduling.
+Phase 1 was read-only (calendar.readonly). PR P4a (2026-05-27) bumped
+SCOPES to include calendar.events so AI-proposed workout plans can be
+written directly to the user's calendar. Existing tokens re-authorize
+on next /api/calendar/connect — `include_granted_scopes=true` (already
+set) makes that an incremental-grant flow.
 """
 
 from __future__ import annotations
@@ -39,8 +42,22 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# Phase 1: read-only. Phase 2 will append "calendar.events" for write.
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# Phase 2 (PR P4a): added "calendar.events" so we can write AI-proposed
+# workout plans back to the user's calendar. .readonly is kept so we
+# can still fall back to the broader read scope if needed; in practice
+# "calendar.events" already grants read on events we own, but explicit
+# .readonly is harmless and clearer.
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+]
+
+# Marker line we prefix every AI-written event's description with so we
+# can (a) tell our events apart from the user's own when surfacing
+# planned workouts in /api/planned-workouts (read merge), and (b) round-
+# trip structured fields (target_pace, target_hr, etc.) through Google's
+# free-form description field. Convention: `key: value` per line.
+PLANNED_WORKOUT_MARKER = "personalcoach.training=true"
 
 
 def _client_config() -> dict[str, Any]:
@@ -217,3 +234,156 @@ class GoogleCalendar:
                 "calendar_id": calendar_id,
             })
         return out
+
+    # ---- Write (PR P4a) --------------------------------------------------
+    #
+    # `insert_event` / `update_event` / `delete_event` mirror the
+    # google.events.* API surface but with our normalized shape (start
+    # / end as ISO 8601 strings, description as plain str). Callers
+    # are expected to embed the PLANNED_WORKOUT_MARKER + key:value
+    # pairs in `description` themselves — this class doesn't know
+    # about workout schema, only about Calendar events.
+
+    def insert_event(
+        self,
+        *,
+        summary: str,
+        start: str,
+        end: str,
+        description: str | None = None,
+        calendar_id: str = "primary",
+    ) -> dict[str, Any]:
+        """Create a new event on the user's calendar. `start` / `end`
+        are ISO 8601: a date-only string (YYYY-MM-DD) creates an
+        all-day event, datetime with time creates a timed event.
+        Returns the normalized event dict (same shape list_events
+        emits) so callers can stash the returned id."""
+        creds = self._load_creds()
+        if creds is None:
+            raise RuntimeError("Google Calendar not connected")
+        body: dict[str, Any] = {"summary": summary}
+        if description:
+            body["description"] = description
+        body["start"] = _iso_to_event_time(start)
+        body["end"] = _iso_to_event_time(end)
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        try:
+            ev = (
+                service.events()
+                .insert(calendarId=calendar_id, body=body)
+                .execute()
+            )
+        except HttpError as e:
+            raise RuntimeError(f"Google Calendar insert error: {e}") from e
+        return _normalize_event(ev, calendar_id)
+
+    def update_event(
+        self,
+        event_id: str,
+        *,
+        summary: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        description: str | None = None,
+        calendar_id: str = "primary",
+    ) -> dict[str, Any]:
+        """Patch an existing event. Only the fields passed get
+        modified — None args leave the field as-is on Google's side."""
+        creds = self._load_creds()
+        if creds is None:
+            raise RuntimeError("Google Calendar not connected")
+        body: dict[str, Any] = {}
+        if summary is not None:
+            body["summary"] = summary
+        if description is not None:
+            body["description"] = description
+        if start is not None:
+            body["start"] = _iso_to_event_time(start)
+        if end is not None:
+            body["end"] = _iso_to_event_time(end)
+        if not body:
+            # Nothing to patch — return current state instead of a
+            # zero-field API call.
+            return self._get_event(event_id, calendar_id)
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        try:
+            ev = (
+                service.events()
+                .patch(calendarId=calendar_id, eventId=event_id, body=body)
+                .execute()
+            )
+        except HttpError as e:
+            raise RuntimeError(f"Google Calendar update error: {e}") from e
+        return _normalize_event(ev, calendar_id)
+
+    def delete_event(
+        self, event_id: str, calendar_id: str = "primary"
+    ) -> bool:
+        """Hard-delete an event. Returns True on success, False if the
+        event was already gone (404 is treated as idempotent — we
+        don't want a 404 to crash a cleanup sweep)."""
+        creds = self._load_creds()
+        if creds is None:
+            raise RuntimeError("Google Calendar not connected")
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        try:
+            service.events().delete(
+                calendarId=calendar_id, eventId=event_id
+            ).execute()
+            return True
+        except HttpError as e:
+            if e.resp and e.resp.status == 404:
+                return False
+            raise RuntimeError(f"Google Calendar delete error: {e}") from e
+
+    def _get_event(
+        self, event_id: str, calendar_id: str = "primary"
+    ) -> dict[str, Any]:
+        """Internal — fetch a single event by id, used as the no-op
+        return for update_event with no body."""
+        creds = self._load_creds()
+        if creds is None:
+            raise RuntimeError("Google Calendar not connected")
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        try:
+            ev = (
+                service.events()
+                .get(calendarId=calendar_id, eventId=event_id)
+                .execute()
+            )
+        except HttpError as e:
+            raise RuntimeError(f"Google Calendar get error: {e}") from e
+        return _normalize_event(ev, calendar_id)
+
+
+# Module helpers --------------------------------------------------------
+
+
+def _iso_to_event_time(iso: str) -> dict[str, str]:
+    """Convert an ISO 8601 string to the Google Calendar `start` /
+    `end` shape. Date-only ('2026-05-28') → all-day event. Full
+    datetime → timed event in the user's local TZ (Google figures
+    out the offset from the trailing Z or +HH:MM)."""
+    # YYYY-MM-DD is exactly 10 chars; longer strings carry time info.
+    if len(iso) == 10:
+        return {"date": iso}
+    return {"dateTime": iso}
+
+
+def _normalize_event(ev: dict[str, Any], calendar_id: str) -> dict[str, Any]:
+    """Same shape as list_events emits per event — kept in lockstep so
+    callers can pass write results through the same downstream
+    handlers."""
+    start_obj = ev.get("start", {}) or {}
+    end_obj = ev.get("end", {}) or {}
+    return {
+        "source": "google",
+        "id": ev.get("id"),
+        "title": ev.get("summary") or "(no title)",
+        "start": start_obj.get("dateTime") or start_obj.get("date"),
+        "end": end_obj.get("dateTime") or end_obj.get("date"),
+        "all_day": "date" in start_obj,
+        "location": ev.get("location"),
+        "description": ev.get("description"),
+        "calendar_id": calendar_id,
+    }
