@@ -143,6 +143,20 @@ class TestCheckinValidation:
         assert "mood" not in row
         assert "soreness" not in row
 
+    def test_upsert_can_clear_existing_notes(self, dp):
+        """Codex P2 catch on PR #80. User saves a note, then edits
+        the row to remove the note text — the upsert must accept
+        notes='' as a clear signal and overwrite the previous value.
+        Without this, cleared notes silently reappear after the
+        query refetches (field-level merge keeps the old value when
+        the request omits notes entirely)."""
+        dp.upsert_checkin("2026-05-27", sleep_quality=4, notes="had a thought")
+        # User clears the textarea → frontend sends notes=""
+        row = dp.upsert_checkin("2026-05-27", notes="")
+        assert row["notes"] == ""
+        # Sanity: other fields not affected by the clear
+        assert row["sleep_quality"] == 4
+
 
 # ---------------------------------------------------------------------------
 # API behavior — exercise the 4 endpoints via TestClient

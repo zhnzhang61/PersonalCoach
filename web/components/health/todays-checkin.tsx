@@ -108,10 +108,22 @@ function CheckinCard({ today, todaysRow }: CheckinCardProps) {
   const save = useMutation({
     mutationFn: () => {
       const body: Record<string, unknown> = { date: today };
+      // Scale fields: only send if the user has selected a value
+      // (null = "didn't capture"). Existing rows keep their old
+      // values for sliders the user didn't touch this turn, via
+      // upsert_checkin's field-level merge.
       for (const f of SCALE_FIELDS) {
         if (draft[f.key] !== null) body[f.key] = draft[f.key];
       }
-      if (draft.notes.trim()) body.notes = draft.notes.trim();
+      // Notes: ALWAYS send (even empty). Codex P2 catch on PR #80 —
+      // omitting empty notes meant "user cleared their saved note"
+      // got silently merged back to the previous value on disk,
+      // making cleared notes reappear after the query refetched.
+      // Empty string is the canonical "clear" signal; backend's
+      // _validate_checkin_fields stores `""` and the FilledSummary
+      // treats falsy notes as "nothing to render", so the round-trip
+      // is clean.
+      body.notes = draft.notes.trim();
       return apiPost<{ ok: boolean; checkin: DailyCheckin }>(
         "/api/checkins",
         body,
