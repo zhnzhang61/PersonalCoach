@@ -1,12 +1,11 @@
 """Unit tests for data_processor.py — the project's data layer.
 
-Per the Phase 3 plan in docs/IMPROVEMENTS.md: `data_processor.py` had
-zero direct tests despite being the layer everything else reads
-through (the agent's MCP tools all wrap api_server endpoints, which
-all delegate to DataProcessor). That's the project's biggest "running
-blind" risk; this file is the first sweep at it.
+Per the Phase 3 plan in docs/IMPROVEMENTS.md: `data_processor.py` is
+the layer everything else reads through (the agent's MCP tools all
+wrap api_server endpoints, which all delegate to DataProcessor). This
+file covers it in two passes.
 
-Scope of this PR:
+Pass 1 (✅ 2026-05-12):
   • RunActivity dataclass — Garmin-dict parsing + derived props
   • ManualActivity dataclass — round-trip serialization
   • _bucket_run_surface module helper
@@ -17,10 +16,17 @@ Scope of this PR:
   • calculate_category_stats — perceived-stream derivation
   • compute_telemetry_summary — pandas pure function
 
-Deliberately OUT of scope (later Phase 3 PRs):
-  • Garmin-file-dependent paths: compile_health_ledger, get_hr_zones,
-    get_athlete_profile_full, get_readiness, get_training_load,
-    compute_cycle_and_week_stats, telemetry/laps/route/weather IO
+Pass 2 (✅ 2026-05-27 — this PR):
+  • compile_health_ledger — joins sleep/rhr/hrv/stress/activity files
+  • get_hr_zones — user_zones.json parser + rpe_label projection
+  • get_athlete_profile_full — semantic-memory composite + LT pace
+  • get_readiness — green/yellow/red verdict + baseline deltas
+  • get_training_load — ACWR bands, weekly miles trend
+  • compute_cycle_and_week_stats — block/week aggregation
+
+Out of scope (no current need):
+  • telemetry/laps/route/weather IO — only the get_run_laps helper
+    used by compute_cycle_and_week_stats is exercised here.
 """
 
 from __future__ import annotations
@@ -608,3 +614,573 @@ class TestComputeTelemetrySummary:
         df = self._df(HeartRate=[150, np.nan, 160, np.nan], Pace=[8.0]*4)
         out = proc.compute_telemetry_summary(df)
         assert out["HeartRate"]["avg"] == 155.0
+
+
+# ===========================================================================
+# Pass 2 — Garmin-file-dependent paths
+# ===========================================================================
+#
+# All of these read JSON / CSV off disk under `proc.paths[*]`. The fixture
+# helpers below write fixtures into the right locations so each test starts
+# with a clean slate; tests opt-in to the data they need.
+
+
+def _write_json(path, payload):
+    """Write a JSON payload to `path`, creating parent dirs."""
+    import os
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f)
+
+
+def _write_sleep(proc, date_str: str, sleep_seconds, sleep_score):
+    """Drop a minimal sleep file under proc.paths['sleep']/<date>.json."""
+    path = f"{proc.paths['sleep']}/{date_str}.json"
+    _write_json(path, {
+        "dailySleepDTO": {
+            "calendarDate": date_str,
+            "sleepTimeSeconds": sleep_seconds,
+            "sleepScores": {"overall": {"value": sleep_score}},
+        },
+    })
+
+
+def _write_rhr(proc, date_str: str, value):
+    path = f"{proc.paths['rhr']}/{date_str}.json"
+    _write_json(path, {
+        "allMetrics": {"metricsMap": {
+            "WELLNESS_RESTING_HEART_RATE": [
+                {"value": value, "calendarDate": date_str}
+            ]
+        }},
+    })
+
+
+def _write_hrv(proc, date_str: str, weekly_avg):
+    path = f"{proc.paths['hrv']}/{date_str}.json"
+    _write_json(path, {
+        "hrvSummary": {"calendarDate": date_str, "weeklyAvg": weekly_avg},
+    })
+
+
+def _write_stress(proc, date_str: str, avg_stress):
+    path = f"{proc.paths['stress']}/{date_str}.json"
+    _write_json(path, {"avgStressLevel": avg_stress})
+
+
+def _write_activity_summary(proc, activity_id, date_str, **extra):
+    """Drop an activity-summary fixture under proc.paths['activities'].
+    Defaults are running-shaped; pass `activityType` to override (e.g.
+    swim/bike) for negative tests."""
+    payload = {
+        "activityId": activity_id,
+        "activityName": "Run",
+        "startTimeLocal": f"{date_str}T07:00:00",
+        "distance": 8000.0,         # ~5 mi in metres
+        "movingDuration": 2400.0,   # 40 min
+        "duration": 2410.0,
+        "averageHR": 150,
+        "elevationGain": 30.0,
+        "calories": 500,
+        "activityType": {"typeKey": "running", "subTypeKey": "road_running"},
+        "activityTrainingLoad": 90.0,
+        **extra,
+    }
+    _write_json(
+        f"{proc.paths['activities']}/{activity_id}_summary.json",
+        payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# compile_health_ledger
+# ---------------------------------------------------------------------------
+
+
+class TestCompileHealthLedger:
+    """Iterates `days_back` days backwards from today, joining per-day
+    sleep/rhr/hrv/stress files with same-day activity totals. Output is
+    both returned to the caller and persisted to `paths['ledger']`."""
+
+    def test_empty_data_dir_returns_skeleton(self, proc):
+        records = proc.compile_health_ledger(days_back=3)
+        assert len(records) == 3
+        # All fields None / zero since no fixtures exist.
+        assert all(r["sleep_score"] is None for r in records)
+        assert all(r["rhr"] is None for r in records)
+        assert all(r["hrv"] is None for r in records)
+        # Ascending by date.
+        assert records[0]["date"] < records[1]["date"] < records[2]["date"]
+
+    def test_joins_sleep_rhr_hrv(self, proc):
+        import datetime
+        today = datetime.date.today().isoformat()
+        _write_sleep(proc, today, sleep_seconds=28800, sleep_score=82)
+        _write_rhr(proc, today, 51.0)
+        _write_hrv(proc, today, 68)
+        _write_stress(proc, today, 22)
+
+        records = proc.compile_health_ledger(days_back=1)
+        assert len(records) == 1
+        r = records[0]
+        assert r["date"] == today
+        assert r["sleep_score"] == 82
+        assert r["sleep_hours"] == 8.0  # 28800/3600
+        assert r["rhr"] == 51.0
+        assert r["hrv"] == 68
+        assert r["stress"] == 22
+
+    def test_aggregates_activity_miles_and_minutes(self, proc):
+        import datetime
+        today = datetime.date.today().isoformat()
+        # Two activities same day: 8000 m + 5000 m = 13000 m ≈ 8.08 mi.
+        _write_activity_summary(proc, 100, today, distance=8000.0, duration=2400.0)
+        _write_activity_summary(proc, 101, today, distance=5000.0, duration=1800.0)
+        records = proc.compile_health_ledger(days_back=1)
+        r = records[0]
+        assert r["run_miles"] == round(13000 / 1609.34, 2)
+        assert r["run_mins"] == round((2400 + 1800) / 60, 1)
+
+    def test_persists_csv_to_ledger_path(self, proc):
+        """The ledger CSV is the source-of-truth for `get_health_stats`
+        and downstream `get_readiness`. Existence + readable schema are
+        load-bearing."""
+        import os
+        import datetime
+        today = datetime.date.today().isoformat()
+        _write_sleep(proc, today, 25200, 70)
+        proc.compile_health_ledger(days_back=2)
+        assert os.path.exists(proc.paths["ledger"])
+        # Re-read via the typed accessor.
+        stats = proc.get_health_stats()
+        assert len(stats) == 2
+        # Floats come back as floats (not strings) after the cast in
+        # get_health_stats.
+        today_row = next(r for r in stats if r["date"] == today)
+        assert today_row["sleep_hours"] == 7.0
+
+    def test_hrv_data_lastNight_overrides_summary_weeklyAvg(self, proc):
+        """The code path that prefers `hrvData.lastNightAvg` over the
+        weekly avg when both are present — pin it so a refactor can't
+        invert the precedence."""
+        import datetime
+        today = datetime.date.today().isoformat()
+        path = f"{proc.paths['hrv']}/{today}.json"
+        _write_json(path, {
+            "hrvSummary": {"weeklyAvg": 65},
+            "hrvData": {"lastNightAvg": 71},
+        })
+        records = proc.compile_health_ledger(days_back=1)
+        assert records[0]["hrv"] == 71
+
+
+# ---------------------------------------------------------------------------
+# get_hr_zones
+# ---------------------------------------------------------------------------
+
+
+class TestGetHrZones:
+    """Parses `<data>/manual_inputs/user_zones.json` — a dict of zone
+    name → bpm range — into a sorted list of {name, low, high,
+    rpe_label} dicts. The rpe_label projection unifies vocab with
+    `manual_meta.lap_categories`; the chart UI and the AI both consume
+    this shape."""
+
+    def test_returns_empty_when_file_missing(self, proc):
+        assert proc.get_hr_zones() == []
+
+    def test_parses_and_sorts_standard_zones(self, proc):
+        _write_json(proc.paths["user_zones"], {
+            "VO2 Max":              "175-185 bpm",
+            "Lactate Threshold":    "165-175 bpm",
+            "Marathon Pace":        "155-165 bpm",
+            "Steady / Constant":    "140-155 bpm",
+            "Hold Back / Recovery": "120-140 bpm",
+        })
+        zones = proc.get_hr_zones()
+        # Sorted ascending by `low`.
+        assert [z["low"] for z in zones] == [120, 140, 155, 165, 175]
+        # rpe_label maps to the EFFORT_CATEGORIES vocabulary.
+        first = zones[0]
+        assert first["name"] == "Hold Back / Recovery"
+        assert first["rpe_label"] == "Hold Back Easy"
+        # VO2 Max maps to "VO2Max" (no space).
+        last = zones[-1]
+        assert last["rpe_label"] == "VO2Max"
+
+    def test_open_ended_ranges(self, proc):
+        """`<NNN bpm` and `>NNN bpm` are sentinel-clamped to 0 and 220."""
+        _write_json(proc.paths["user_zones"], {
+            "Recovery": "<120 bpm",
+            "Topped Out": ">185 bpm",
+        })
+        zones = proc.get_hr_zones()
+        recovery = next(z for z in zones if z["name"] == "Recovery")
+        assert recovery["low"] == 0
+        assert recovery["high"] == 119
+        topped = next(z for z in zones if z["name"] == "Topped Out")
+        assert topped["low"] == 186
+        assert topped["high"] == 220
+
+    def test_unparseable_zone_silently_skipped(self, proc):
+        """A bad value (typo, missing unit) shouldn't poison the rest of
+        the list — the UI should still see the valid zones."""
+        _write_json(proc.paths["user_zones"], {
+            "VO2 Max": "175-185 bpm",
+            "Junk":    "not a range",
+        })
+        zones = proc.get_hr_zones()
+        names = [z["name"] for z in zones]
+        assert "VO2 Max" in names
+        assert "Junk" not in names
+
+    def test_unknown_zone_name_keeps_literal_rpe_label(self, proc):
+        """If a user adds a custom zone name we don't have in
+        `_ZONE_TO_RPE_LABEL`, fall back to the zone name itself rather
+        than dropping the entry."""
+        _write_json(proc.paths["user_zones"], {
+            "Tempo": "150-160 bpm",
+        })
+        zones = proc.get_hr_zones()
+        assert zones[0]["rpe_label"] == "Tempo"
+
+
+# ---------------------------------------------------------------------------
+# get_athlete_profile_full
+# ---------------------------------------------------------------------------
+
+
+class TestGetAthleteProfileFull:
+    """Composite profile for the AI coach. Pulls from semantic memory
+    (`user_profile.json` `garmin_profile.userData`), training blocks
+    store, and user_zones. Surfaces age, weight_kg, vo2max, LT pace,
+    current block + phase."""
+
+    def _seed_profile(self, proc, user_data: dict, preferences=None, medical=None):
+        with open(proc.paths["semantic_memory"], "w") as f:
+            json.dump({
+                "garmin_profile": {"userData": user_data},
+                "preferences": preferences or [],
+                "medical_notes": medical or [],
+            }, f)
+
+    def test_empty_userData(self, proc):
+        self._seed_profile(proc, {})
+        out = proc.get_athlete_profile_full()
+        assert out["athlete"]["age"] is None
+        assert out["athlete"]["weight_kg"] is None
+        assert out["fitness"]["vo2max_running"] is None
+        assert out["fitness"]["lactate_threshold_pace"] is None
+        assert out["current_block"] is None
+        assert out["preferences"] == []
+
+    def test_weight_grams_to_kg(self, proc):
+        self._seed_profile(proc, {"weight": 72400})  # grams
+        out = proc.get_athlete_profile_full()
+        assert out["athlete"]["weight_kg"] == 72.4
+
+    def test_age_computed_from_birth_date(self, proc):
+        """Age is "completed years" — birthday-not-yet-this-year shaves
+        a year off."""
+        import datetime
+        today = datetime.date.today()
+        # Pick a birthday a month AFTER today so age is year-diff - 1.
+        future_month = today + datetime.timedelta(days=60)
+        birth = f"1990-{future_month.month:02d}-{min(future_month.day, 28):02d}"
+        self._seed_profile(proc, {"birthDate": birth})
+        out = proc.get_athlete_profile_full()
+        assert out["athlete"]["age"] == today.year - 1990 - 1
+
+    def test_lt_pace_from_decimetre_per_sec(self, proc):
+        """Garmin's `lactateThresholdSpeed` < 1.0 is empirically dm/s.
+        0.369 dm/s × 10 → 3.69 m/s → ~7:16/mi. Verify the conversion
+        comes out within the sanity range."""
+        self._seed_profile(proc, {"lactateThresholdSpeed": 0.369})
+        out = proc.get_athlete_profile_full()
+        pace = out["fitness"]["lactate_threshold_pace"]
+        assert pace is not None
+        assert pace.endswith("/mi")
+        # 1609.34 / 3.69 / 60 ≈ 7.27 → "7:16/mi"
+        assert pace.startswith("7:")
+
+    def test_lt_pace_from_mps(self, proc):
+        """When the value is >= 1.0 it's treated as plain m/s, not
+        decimetre/s — that path lets a user with a different storage
+        convention still get a sane pace."""
+        self._seed_profile(proc, {"lactateThresholdSpeed": 3.69})
+        out = proc.get_athlete_profile_full()
+        pace = out["fitness"]["lactate_threshold_pace"]
+        assert pace is not None
+        assert pace.startswith("7:")
+
+    def test_lt_pace_outside_sanity_range_returns_none(self, proc):
+        """If the conversion yields something outside 4-14 min/mi the
+        sanity clamp drops it rather than emitting nonsense like
+        72 min/mi."""
+        self._seed_profile(proc, {"lactateThresholdSpeed": 50.0})  # absurd
+        out = proc.get_athlete_profile_full()
+        assert out["fitness"]["lactate_threshold_pace"] is None
+
+    def test_current_block_phase(self, proc):
+        import datetime
+        self._seed_profile(proc, {})
+        today = datetime.date.today()
+        # 8-week block, today = week 4 of 8 → 50% → "build".
+        start = (today - datetime.timedelta(weeks=4)).isoformat()
+        end = (today + datetime.timedelta(weeks=4)).isoformat()
+        proc.create_block("Test Block", start, end)
+
+        out = proc.get_athlete_profile_full()
+        cb = out["current_block"]
+        assert cb is not None
+        assert cb["name"] == "Test Block"
+        assert cb["phase"] == "build"
+        assert cb["weeks_elapsed"] == 4
+
+    def test_hr_zones_threaded_through(self, proc):
+        """`get_athlete_profile_full` calls `get_hr_zones()` directly so
+        the AI prompt + chart UI share one source. Pin the wiring."""
+        self._seed_profile(proc, {})
+        _write_json(proc.paths["user_zones"], {
+            "VO2 Max": "175-185 bpm",
+        })
+        out = proc.get_athlete_profile_full()
+        zones = out["fitness"]["hr_zones"]
+        assert len(zones) == 1
+        assert zones[0]["name"] == "VO2 Max"
+
+
+# ---------------------------------------------------------------------------
+# get_readiness
+# ---------------------------------------------------------------------------
+
+
+def _seed_ledger(proc, rows):
+    """Write a ledger CSV directly so get_readiness can read it without
+    going through compile_health_ledger's per-day JSON crawl."""
+    import csv
+    import os
+    os.makedirs(os.path.dirname(proc.paths["ledger"]), exist_ok=True)
+    with open(proc.paths["ledger"], "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "date", "sleep_score", "sleep_hours", "rhr", "hrv",
+                "stress", "run_miles", "run_mins",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+class TestGetReadiness:
+    @staticmethod
+    def _row(date, *, rhr=None, hrv=None, sleep_hours=None, stress=None):
+        return {
+            "date": date, "sleep_score": "",
+            "sleep_hours": sleep_hours if sleep_hours is not None else "",
+            "rhr": rhr if rhr is not None else "",
+            "hrv": hrv if hrv is not None else "",
+            "stress": stress if stress is not None else "",
+            "run_miles": "", "run_mins": "",
+        }
+
+    def test_empty_ledger_returns_unknown(self, proc):
+        """target_date far in the past = no rows at-or-before it →
+        early-out branch returning {"score": "unknown"}.
+
+        (Using today's date here would land in the "no signals" branch
+        which scores `red` because sleep_hours=0 trips the <5 floor.
+        That's the right rule for the actual signal-bearing case but
+        it's not what this test is pinning.)"""
+        out = proc.get_readiness(target_date="2020-01-01")
+        assert out["readiness"]["score"] == "unknown"
+        assert out["today"] is None
+        assert out["history_7d"] == []
+
+    def test_green_when_deltas_in_band_and_sleep_ok(self, proc):
+        rows = []
+        # 7 baseline days w/ stable signals.
+        for i in range(7, 0, -1):
+            rows.append(self._row(
+                f"2026-05-{20 + (7 - i):02d}",
+                rhr=50, hrv=70, sleep_hours=7.5,
+            ))
+        # Today: same numbers, sleep 7.5 → all deltas 0%.
+        rows.append(self._row("2026-05-27", rhr=50, hrv=70, sleep_hours=7.5))
+        _seed_ledger(proc, rows)
+
+        out = proc.get_readiness(target_date="2026-05-27")
+        assert out["readiness"]["score"] == "green"
+        assert out["baseline_7d"]["rhr"] == 50.0
+        assert out["baseline_7d"]["hrv"] == 70.0
+
+    def test_red_when_hrv_drops_more_than_ten_percent(self, proc):
+        rows = [
+            self._row(f"2026-05-{20 + i:02d}", rhr=50, hrv=70, sleep_hours=8)
+            for i in range(7)
+        ]
+        # HRV 55 vs baseline 70 → -21.4% → red.
+        rows.append(self._row("2026-05-27", rhr=50, hrv=55, sleep_hours=8))
+        _seed_ledger(proc, rows)
+        out = proc.get_readiness(target_date="2026-05-27")
+        assert out["readiness"]["score"] == "red"
+
+    def test_red_when_rhr_spikes_more_than_ten_percent(self, proc):
+        rows = [
+            self._row(f"2026-05-{20 + i:02d}", rhr=50, hrv=70, sleep_hours=8)
+            for i in range(7)
+        ]
+        # RHR 60 vs baseline 50 → +20% → red.
+        rows.append(self._row("2026-05-27", rhr=60, hrv=70, sleep_hours=8))
+        _seed_ledger(proc, rows)
+        out = proc.get_readiness(target_date="2026-05-27")
+        assert out["readiness"]["score"] == "red"
+
+    def test_red_when_sleep_under_five_hours(self, proc):
+        rows = [
+            self._row(f"2026-05-{20 + i:02d}", rhr=50, hrv=70, sleep_hours=8)
+            for i in range(7)
+        ]
+        rows.append(self._row("2026-05-27", rhr=50, hrv=70, sleep_hours=4.5))
+        _seed_ledger(proc, rows)
+        out = proc.get_readiness(target_date="2026-05-27")
+        assert out["readiness"]["score"] == "red"
+
+    def test_yellow_when_in_between(self, proc):
+        rows = [
+            self._row(f"2026-05-{20 + i:02d}", rhr=50, hrv=70, sleep_hours=8)
+            for i in range(7)
+        ]
+        # HRV -7% (not in band, not >10%), RHR 0%, sleep 6.5 (not <5, not ≥7).
+        rows.append(self._row("2026-05-27", rhr=50, hrv=65, sleep_hours=6.5))
+        _seed_ledger(proc, rows)
+        out = proc.get_readiness(target_date="2026-05-27")
+        assert out["readiness"]["score"] == "yellow"
+
+
+# ---------------------------------------------------------------------------
+# get_training_load
+# ---------------------------------------------------------------------------
+
+
+class TestGetTrainingLoad:
+    def test_no_runs_returns_empty_state(self, proc):
+        out = proc.get_training_load(window_days=28)
+        assert out["acute_7d"]["miles"] == 0
+        assert out["chronic_28d"]["miles"] == 0
+        assert out["acwr"] is None
+        assert out["acwr_band"] == "unknown"
+        assert out["weekly_miles_trend"] == []
+
+    def test_filters_non_running_activities(self, proc):
+        """A swim summary in the activities dir must NOT contribute to
+        run miles. The filter is `RunActivity.is_run_dict`."""
+        import datetime
+        today = datetime.date.today().isoformat()
+        _write_activity_summary(proc, 1, today, distance=8000.0)
+        _write_activity_summary(
+            proc, 2, today,
+            distance=2000.0,
+            activityType={"typeKey": "lap_swimming", "subTypeKey": "pool_swimming"},
+        )
+        out = proc.get_training_load(window_days=7)
+        # Only the run (8000 m → ~5.0 mi) should count.
+        assert out["acute_7d"]["miles"] == round(8000 / 1609.34, 1)
+        assert out["acute_7d"]["session_count"] == 1
+
+    def test_acwr_sweet_band(self, proc):
+        """ACWR ≈ 1.0 → "sweet" band. The acute window is
+        `today − 7 days` (inclusive), so to keep acute_avg ≈ chronic_avg
+        we put one run in acute and three more strictly outside it.
+        Total load 400 over 28 days, single 100-load run inside the
+        last 7 → 14.29 ≈ 14.29 → ACWR 1.0."""
+        import datetime
+        today = datetime.date.today()
+        # Offsets: 0 in acute (today), 8/14/21 in chronic-only (all
+        # strictly older than `today - 7`).
+        for i, days_ago in enumerate([0, 8, 14, 21]):
+            d = (today - datetime.timedelta(days=days_ago)).isoformat()
+            _write_activity_summary(
+                proc, 1000 + i, d,
+                distance=8000.0,
+                activityTrainingLoad=100.0,
+            )
+        out = proc.get_training_load(window_days=28)
+        assert out["acwr"] == 1.0
+        assert out["acwr_band"] == "sweet"
+
+    def test_weekly_miles_trend_bucketed_by_monday(self, proc):
+        """Each run's date snaps to that week's Monday for trend
+        bucketing. Two runs in the same Mon-Sun should land in one
+        bucket."""
+        # Pick a Wednesday and a Friday of the same ISO week.
+        # 2026-05-20 is a Wed, 2026-05-22 is a Fri.
+        _write_activity_summary(proc, 1, "2026-05-20", distance=8000.0)
+        _write_activity_summary(proc, 2, "2026-05-22", distance=5000.0)
+        # And one in a different week.
+        _write_activity_summary(proc, 3, "2026-05-27", distance=3000.0)
+        # Window has to cover both weeks.
+        out = proc.get_training_load(window_days=14)
+        trend = out["weekly_miles_trend"]
+        # Two buckets total. Mondays of those weeks: 2026-05-18 and
+        # 2026-05-25.
+        buckets = {row["week_start"]: row["miles"] for row in trend}
+        assert "2026-05-18" in buckets
+        assert "2026-05-25" in buckets
+        # First bucket sums the Wed+Fri runs.
+        assert buckets["2026-05-18"] == round((8000 + 5000) / 1609.34, 1)
+
+
+# ---------------------------------------------------------------------------
+# compute_cycle_and_week_stats
+# ---------------------------------------------------------------------------
+
+
+class TestComputeCycleAndWeekStats:
+    def test_unknown_block_id_returns_none(self, proc):
+        assert proc.compute_cycle_and_week_stats(
+            "block_999", "2026-05-25", "2026-05-31"
+        ) is None
+
+    def test_empty_block_zero_stats(self, proc):
+        """A block with no runs in range still returns the dict shape
+        (the UI relies on the keys being present, not on the values)."""
+        proc.create_block("Empty Block", "2026-05-01", "2026-05-31")
+        blocks = proc.get_blocks()
+        block_id = blocks[0]["id"]
+        out = proc.compute_cycle_and_week_stats(
+            block_id, "2026-05-25", "2026-05-31"
+        )
+        assert out is not None
+        assert out["cycle"]["total_runs"] == 0
+        assert out["cycle"]["total_miles"] == 0
+        assert out["week"]["runs"] == 0
+        assert isinstance(out["weekly_miles"], list)
+        # weeks generated by get_weeks_for_block — non-empty for a
+        # one-month block.
+        assert len(out["weekly_miles"]) > 0
+
+    def test_aggregates_runs_in_block(self, proc):
+        """One run inside the block, inside the selected week, surfaces
+        in BOTH the cycle totals and the week totals."""
+        proc.create_block("Test Block", "2026-05-01", "2026-05-31")
+        block_id = proc.get_blocks()[0]["id"]
+        # 2026-05-27 is a Wed; week 2026-05-25 (Mon) → 2026-05-31 (Sun).
+        _write_activity_summary(
+            proc, 9001, "2026-05-27",
+            distance=16093.4,    # 10 mi
+            movingDuration=3600, # 60 min
+            averageHR=150,
+            elevationGain=50.0,
+            calories=900,
+        )
+        out = proc.compute_cycle_and_week_stats(
+            block_id, "2026-05-25", "2026-05-31"
+        )
+        assert out["cycle"]["total_runs"] == 1
+        assert out["cycle"]["total_miles"] == 10.0
+        assert out["cycle"]["longest_run"] == 10.0
+        assert out["week"]["runs"] == 1
+        assert out["week"]["miles"] == 10.0
+        assert out["week"]["avg_hr"] == 150
