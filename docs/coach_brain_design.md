@@ -371,7 +371,7 @@ doc.
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **B** | Structured tracing MVP (JSONL per-turn traces + `PROMPT_VERSION` constant + `docs/PROMPT_CHANGELOG.md`) | ~1 day | **Blocking for P2**: P2 introduces async LLM proposal → confirm flow. Without traces we'll be flying blind when proposals don't fire / parse / land. |
+| **B** ✅ done 2026-05-27 | Structured tracing MVP. New `backend/trace_logger.py` with `Trace` dataclass + `TraceLogger` class (daily JSONL rotation under `data/traces/YYYY-MM-DD.jsonl`, swallow-and-continue on disk errors). `PROMPT_VERSION="v7"` constant + sha1-truncated `prompt_hash` in `agentic_coach.py`. Hooks in `_run_turn` (chat), `_action_turn` (actions, with `kind` param), `chat_stream`'s producer, and `consolidate_memory_background` in CME — covers all 4 LLM-turn paths. `docs/PROMPT_CHANGELOG.md` seeded with v6/v7. 17 unit tests including the "never raise on disk failure" contract. | ~1 day | **Blocking for P2**: P2 introduces async LLM proposal → confirm flow. Without traces we'll be flying blind when proposals don't fire / parse / land. |
 
 > **Removed from earlier roadmap draft**: a "D — CME tests" PR. CME is
 > already well-covered: `tests/test_cme_v2.py` (9 tests) +
@@ -454,18 +454,28 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: D** ~~(removed)~~ — see Phase 1 note about CME tests already
-covered. The next actionable item is **B** (Structured tracing MVP)
-before any P-series PR.
+**Next PR: P1** — `models` table scaffolding. Adds new table parallel
+to `episodes`, `topics.related_models` column, `topic_decisions.kind='new_model'`
+enum value, helper fns, 2 MCP tools (`get_model` + `list_models`), and
+1 seed stat-derived model (e.g. `recovery.hrv_14d_baseline`). Includes
+3–5 migration-safety tests in the same PR (idempotency, new enum
+round-trip, new column round-trip).
 
-Phase 0 complete.
+Suggested branch: `add-cme-models-store`.
+
+Phase 0 + Phase 1 complete. Foundations laid: per-message ts on
+chat history (PR A) + streaming chat (PR C) + structured tracing
+on every LLM turn (PR B). P-series can build on top.
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
   per-message ts + DayDivider for multi-day sessions.
-- **C** ✅ 2026-05-27 — SSE streaming for `/api/ai/chat` via
-  `astream_events`; frontend renders accumulating AI bubble during
-  stream.
+- **C** ✅ 2026-05-27 ([#73](https://github.com/zhnzhang61/PersonalCoach/pull/73)) —
+  SSE streaming for `/api/ai/chat` via `astream_events`; frontend
+  renders accumulating AI bubble during stream. Cross-loop bridge
+  through `self._loop` after codex P1 catch.
+- **B** ✅ 2026-05-27 — Structured tracing MVP (JSONL traces +
+  `PROMPT_VERSION` + `docs/PROMPT_CHANGELOG.md`).
 
 ---
 
