@@ -387,6 +387,40 @@ class TestPlannedWorkoutsAPI:
         assert second_call.args[0] == "plan_new"
         assert second_call.kwargs["cal_event_id"] == "evt_xyz"
 
+    def test_cal_payload_carries_timezone_offset(self, client):
+        """Google Cal's dateTime field requires either a UTC offset or
+        an explicit timeZone. A naked '2026-05-30T09:00:00' is rejected
+        with HTTP 400 and silently flips cal_synced=false. Regression
+        guard: the payload we hand insert_event must include an offset
+        like '-04:00' or '+09:00' on both start and end."""
+        import re
+        import backend.api_server as api_server
+        api_server.gcal.is_connected.return_value = True
+        api_server.gcal.insert_event.return_value = {"id": "evt_tz"}
+        api_server.processor.upsert_planned_workout.side_effect = [
+            {"id": "plan_tz", "date": "2026-05-30", "type": "tempo",
+             "duration_min": 45},
+            {"id": "plan_tz", "date": "2026-05-30", "type": "tempo",
+             "duration_min": 45, "cal_event_id": "evt_tz"},
+        ]
+        resp = client.post(
+            "/api/planned-workouts",
+            json={"date": "2026-05-30", "type": "tempo", "duration_min": 45},
+        )
+        assert resp.status_code == 200
+        kwargs = api_server.gcal.insert_event.call_args.kwargs
+        offset_re = re.compile(r"[+-]\d{2}:\d{2}$")
+        assert offset_re.search(kwargs["start"]), (
+            f"start lacks tz offset: {kwargs['start']!r}"
+        )
+        assert offset_re.search(kwargs["end"]), (
+            f"end lacks tz offset: {kwargs['end']!r}"
+        )
+        # Date and start hour should still be 09:00 local.
+        assert kwargs["start"].startswith("2026-05-30T09:00:00")
+        # End = start + 45min = 09:45 local.
+        assert kwargs["end"].startswith("2026-05-30T09:45:00")
+
     def test_create_cal_failure_falls_back_to_json_only(self, client):
         """Network blip or Cal API error — JSON row was saved, Cal
         wasn't. Response says cal_synced=false but ok=true. Frontend

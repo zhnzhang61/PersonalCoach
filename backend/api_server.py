@@ -845,20 +845,22 @@ def _plan_to_cal_payload(plan: dict) -> dict[str, Any]:
         desc_lines.append("")
         desc_lines.append(plan["notes"])
     # Default 09:00–10:00 unless duration_min suggests something else.
+    # Google Cal's `dateTime` field requires either a UTC offset embedded
+    # in the string OR an explicit `start.timeZone`/`end.timeZone`. A
+    # naked `"2026-05-30T09:00:00"` is rejected with HTTP 400, which
+    # would silently flip cal_synced=false. Build a tz-aware local
+    # datetime so .isoformat() emits the offset (e.g.
+    # "2026-05-30T09:00:00-04:00").
     duration = int(plan.get("duration_min") or 60)
-    start_dt = f"{plan['date']}T09:00:00"
-    # Compute end as start + duration; keep TZ-naive so Google uses
-    # the calendar's default tz (the user's primary calendar tz).
-    sh = 9
-    sm = 0
-    em_total = sm + duration
-    eh = sh + em_total // 60
-    em = em_total % 60
-    end_dt = f"{plan['date']}T{eh:02d}:{em:02d}:00"
+    date_obj = datetime.datetime.strptime(plan["date"], "%Y-%m-%d").date()
+    start_local = datetime.datetime.combine(
+        date_obj, datetime.time(9, 0)
+    ).astimezone()
+    end_local = start_local + datetime.timedelta(minutes=duration)
     return {
         "summary": title,
-        "start": start_dt,
-        "end": end_dt,
+        "start": start_local.isoformat(),
+        "end": end_local.isoformat(),
         "description": "\n".join(desc_lines),
     }
 
