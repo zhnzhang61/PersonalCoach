@@ -47,28 +47,117 @@ class TestBuildPrompt:
          "排个今天的 easy run").
       2. Preserve the conversation history that LangGraph already
          accumulated in state["messages"].
+      3. Keep the persona body (`_SYSTEM_PROMPT`) intact so a refactor
+         that drops it from the f-string can't slip through.
     """
 
     def test_prepends_today_system_message(self):
-        from datetime import date
+        import datetime
+        from zoneinfo import ZoneInfo
 
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        from backend.agentic_coach import _SYSTEM_PROMPT, _user_tz
+
         msgs = _build_prompt({"messages": [HumanMessage(content="hi")]})
         assert isinstance(msgs[0], SystemMessage)
-        # ISO date appears in the system message.
-        assert date.today().isoformat() in msgs[0].content
-        # Plus an explicit anti-past-scheduling instruction.
-        assert "past" in msgs[0].content.lower()
+        # ISO date appears in the system message — and it's the date
+        # in the USER's tz, not the server's. Compute the expected
+        # date the same way _build_prompt does so the test passes
+        # regardless of where it runs (UTC CI, local dev, etc.).
+        expected_today = datetime.datetime.now(_user_tz()).date().isoformat()
+        assert expected_today in msgs[0].content
+        # Pin the exact anti-past-scheduling clause — a softer
+        # phrasing like "be careful about past dates" would still
+        # contain the word "past" but defeats the actual fix.
+        assert (
+            "Never schedule planned workouts in the past."
+            in msgs[0].content
+        )
+        # Persona body survives the concatenation. Without this,
+        # a refactor that swaps `content=f"{header}\n\n{_SYSTEM_PROMPT}"`
+        # to `content=header` would still pass every other assertion
+        # and leave the agent with no persona prompt at all.
+        assert _SYSTEM_PROMPT in msgs[0].content
         # Original conversation still there, untouched.
         assert isinstance(msgs[-1], HumanMessage)
         assert msgs[-1].content == "hi"
+
+    def test_chinese_relative_time_words_covered(self):
+        """Repro that motivated the PR was Chinese ("今天40min easy
+        run"). The header has to enumerate Chinese relative-time words
+        too — a literalist LLM may not generalize from "today" to
+        "今天"."""
+        msgs = _build_prompt({})
+        content = msgs[0].content
+        for word in ("今天", "明天", "后天", "这周"):
+            assert word in content, f"header missing {word!r}"
 
     def test_empty_messages_state_ok(self):
         """First turn — state may not have messages yet."""
         msgs = _build_prompt({})
         assert len(msgs) == 1  # just the system message
         assert "Today is" in msgs[0].content
+
+    def test_create_react_agent_receives_callable_not_list(self):
+        """The fix only works if LangGraph re-invokes _build_prompt
+        every turn. Pin that the `prompt=` arg in `_ensure_agent` is
+        the function object, not its eagerly-evaluated result — a
+        future refactor that swaps `prompt=_build_prompt,` to
+        `prompt=_build_prompt({}),` would silently freeze "today" at
+        agent construction (back to the v7-era bug)."""
+        import inspect
+
+        from backend import agentic_coach
+
+        src = inspect.getsource(agentic_coach.AgenticCoach._ensure_agent)
+        assert "prompt=_build_prompt," in src
+        assert "prompt=_build_prompt(" not in src
+
+    def test_user_tz_override_via_env(self, monkeypatch):
+        """PERSONAL_COACH_TZ env var overrides process-local tz. A
+        UTC server with a Shanghai user needs this to avoid putting
+        the agent in a different day than the user."""
+        from zoneinfo import ZoneInfo
+
+        from backend.agentic_coach import _user_tz
+
+        monkeypatch.setenv("PERSONAL_COACH_TZ", "Asia/Shanghai")
+        assert _user_tz() == ZoneInfo("Asia/Shanghai")
+
+    def test_user_tz_bad_override_falls_back(self, monkeypatch):
+        """An unparseable IANA name shouldn't crash the agent — fall
+        back to process-local rather than raising at every turn."""
+        from backend.agentic_coach import _user_tz
+
+        monkeypatch.setenv("PERSONAL_COACH_TZ", "Not/A_Real_Zone")
+        tz = _user_tz()
+        # Anything truthy is fine — we just don't want a raise.
+        assert tz is not None
+
+    def test_prompt_hash_covers_wrapper(self, tmp_chat_db):
+        """The recorded `self._prompt_hash` has to move when the
+        wrapper template changes — otherwise PROMPT_CHANGELOG can
+        drift from what the LLM actually saw. Verify by comparing to
+        the hash of the sentinel-rendered template."""
+        from backend.agentic_coach import (
+            _HEADER_TEMPLATE,
+            _SYSTEM_PROMPT,
+        )
+        from backend.trace_logger import prompt_hash
+
+        coach = AgenticCoach(db_path=tmp_chat_db, skip_api_probe=True)
+        expected = prompt_hash(
+            _HEADER_TEMPLATE.format(
+                today_iso="0000-00-00", weekday="Sentinel"
+            )
+            + "\n\n"
+            + _SYSTEM_PROMPT
+        )
+        assert coach._prompt_hash == expected
+        # And just to make sure the hash is NOT the persona-only hash —
+        # the regression we're guarding against.
+        assert coach._prompt_hash != prompt_hash(_SYSTEM_PROMPT)
 
 
 class TestStartedAtFromThreadId:
