@@ -39,6 +39,12 @@ interface EditWorkoutModalProps {
   mode: "create" | "edit";
   initial: PlannedWorkout | null;
   defaultDate: string;
+  // Bounds for the date picker — matches the parent card's 14-day
+  // window. Without these, saving for a date outside the window
+  // makes the row silently disappear from the list (it's still
+  // stored, but the UpcomingWorkouts query won't pull it).
+  minDate: string;
+  maxDate: string;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -70,6 +76,8 @@ export function EditWorkoutModal({
   mode,
   initial,
   defaultDate,
+  minDate,
+  maxDate,
   onClose,
   onSaved,
 }: EditWorkoutModalProps) {
@@ -85,6 +93,30 @@ export function EditWorkoutModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Parse a target-pace input that may be either decimal min/mi
+  // ("7.5") or mm:ss ("7:30"). Runners naturally read pace as mm:ss
+  // so the UI accepts both. Returns null on unparseable input — the
+  // caller treats null the same as empty for "drop this field" /
+  // "clear this field" semantics.
+  function parsePace(raw: string): number | null {
+    const s = raw.trim();
+    if (s === "") return null;
+    const colon = s.indexOf(":");
+    if (colon !== -1) {
+      const m = Number(s.slice(0, colon));
+      const sec = Number(s.slice(colon + 1));
+      if (
+        !Number.isFinite(m) || !Number.isFinite(sec) ||
+        m < 0 || sec < 0 || sec >= 60
+      ) {
+        return null;
+      }
+      return m + sec / 60;
+    }
+    const n = Number(s);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
   function buildBody(): Record<string, unknown> {
     // Numeric optional fields: empty string → null (clear-on-save
     // semantics on the backend's optional fields). Required fields
@@ -93,13 +125,11 @@ export function EditWorkoutModal({
       date: form.date,
       type: form.type,
     };
-    const numericFields = [
-      "target_pace_min_mi",
-      "target_hr",
-      "distance_mi",
-      "duration_min",
-    ] as const;
-    for (const k of numericFields) {
+    // target_pace_min_mi handled separately — it accepts mm:ss
+    // syntax alongside decimal. Other numerics are plain non-
+    // negative numbers.
+    const plainNumeric = ["target_hr", "distance_mi", "duration_min"] as const;
+    for (const k of plainNumeric) {
       const raw = form[k].trim();
       if (raw === "") {
         // On edit, send null to explicitly clear. On create, just
@@ -108,14 +138,34 @@ export function EditWorkoutModal({
         if (mode === "edit") out[k] = null;
       } else {
         const n = Number(raw);
-        if (Number.isFinite(n)) out[k] = n;
+        // Reject negatives — backend now enforces this too but
+        // client-side gate gives instant feedback via the
+        // disabled-Save state below.
+        if (Number.isFinite(n) && n >= 0) out[k] = n;
       }
+    }
+    // Pace: try mm:ss first, fall back to decimal. parsePace
+    // collapses "7:30" → 7.5 client-side so the backend only ever
+    // sees the canonical decimal form.
+    const paceRaw = form.target_pace_min_mi.trim();
+    if (paceRaw === "") {
+      if (mode === "edit") out.target_pace_min_mi = null;
+    } else {
+      const parsed = parsePace(paceRaw);
+      if (parsed !== null) out.target_pace_min_mi = parsed;
     }
     // Notes ALWAYS sent (even empty) so users can clear a saved
     // note — same pattern as TodaysCheckin (codex P2 lesson from #80).
     out.notes = form.notes.trim();
     return out;
   }
+
+  // Block save when pace input is non-empty but unparseable — the
+  // silent-clear case. Without this, typing "7:30:foo" in pace and
+  // hitting Save would clear a previously-pinned target.
+  const paceParseError =
+    form.target_pace_min_mi.trim() !== "" &&
+    parsePace(form.target_pace_min_mi) === null;
 
   const save = useMutation({
     mutationFn: () => {
@@ -171,6 +221,8 @@ export function EditWorkoutModal({
             <input
               type="date"
               value={form.date}
+              min={minDate}
+              max={maxDate}
               onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40"
             />
@@ -214,15 +266,39 @@ export function EditWorkoutModal({
                 step="1"
               />
             </Field>
-            <Field label="Target pace (min/mi)">
-              <NumInput
+            {/* Pace: accept either decimal min/mi or mm:ss. type=text
+                rather than number so the colon survives — runners
+                read pace as "7:30/mi", and `<input type="number">`
+                would either strip the colon (Chrome) or quietly
+                produce an empty value (Firefox), which buildBody
+                then maps to "clear this field" → silent data loss
+                on edit. Parse client-side back to decimal in
+                parsePace(). */}
+            <Field label="Target pace (mm:ss or min/mi)">
+              <input
+                type="text"
+                inputMode="decimal"
                 value={form.target_pace_min_mi}
-                onChange={(v) =>
-                  setForm((f) => ({ ...f, target_pace_min_mi: v }))
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    target_pace_min_mi: e.target.value,
+                  }))
                 }
-                placeholder="—"
-                step="0.1"
+                placeholder="7:30  or  7.5"
+                aria-invalid={paceParseError}
+                className={cn(
+                  "w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40",
+                  paceParseError
+                    ? "border-rose-500"
+                    : "border-border",
+                )}
               />
+              {paceParseError && (
+                <p className="mt-1 text-[10px] text-rose-600 dark:text-rose-400">
+                  Use mm:ss (7:30) or decimal min/mi (7.5).
+                </p>
+              )}
             </Field>
             <Field label="Target HR (bpm)">
               <NumInput
@@ -249,8 +325,15 @@ export function EditWorkoutModal({
 
         {(save.isError || del.isError) && (
           <p className="mt-3 text-xs text-rose-600 dark:text-rose-400">
-            {(save.error as Error | null)?.message ??
-              (del.error as Error | null)?.message}
+            {/* Show BOTH errors when both fired (the race the
+                disabled-state below now prevents — but defensive in
+                case the guard ever regresses). */}
+            {[
+              (save.error as Error | null)?.message,
+              (del.error as Error | null)?.message,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </p>
         )}
 
@@ -259,7 +342,11 @@ export function EditWorkoutModal({
             <button
               type="button"
               onClick={() => del.mutate()}
-              disabled={del.isPending}
+              // Disable when EITHER mutation is in flight. Without
+              // this, tapping Delete then Save (or vice-versa) races:
+              // PUT lands on a deleted row, or DELETE wins after PUT
+              // and orphans the cal_event_id on disk.
+              disabled={del.isPending || save.isPending}
               className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/40 px-3 py-1.5 text-xs font-medium text-rose-600 transition-colors hover:bg-rose-500/10 disabled:opacity-50 dark:text-rose-400"
             >
               {del.isPending ? (
@@ -281,7 +368,10 @@ export function EditWorkoutModal({
           <button
             type="button"
             onClick={() => save.mutate()}
-            disabled={save.isPending}
+            // Mirror of the Delete-button guard above: block Save
+            // when EITHER mutation is in flight, plus when pace is
+            // unparseable (would silently clear a stored target).
+            disabled={save.isPending || del.isPending || paceParseError}
             className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-xs font-medium text-background transition-opacity disabled:opacity-50"
           >
             {save.isPending && <Loader2 className="size-3 animate-spin" />}
@@ -325,6 +415,7 @@ function NumInput({
     <input
       type="number"
       inputMode="decimal"
+      min="0"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}

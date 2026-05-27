@@ -159,6 +159,36 @@ class TestPlannedWorkoutValidation:
         p = dp.upsert_planned_workout(date="2026-05-30", type="threshold-by-feel")
         assert p["type"] == "threshold-by-feel"
 
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("target_hr", -5),
+            ("target_pace_min_mi", -1.0),
+            ("distance_mi", -2.0),
+            ("duration_min", -10),
+        ],
+    )
+    def test_negative_numeric_rejected(self, dp, field, value):
+        """Physical quantities can't be negative. A negative target_hr
+        would corrupt plan-vs-actual deviation: an avg_hr of 155 minus
+        target_hr=-5 would surface as +160 bpm, telling the agent the
+        easy run was a max-effort blowout."""
+        with pytest.raises(ValueError, match=">= 0"):
+            dp.upsert_planned_workout(
+                date="2026-05-30", type="easy", **{field: value}
+            )
+
+    def test_zero_is_valid_numeric(self, dp):
+        """`0` is a legitimate value (e.g. user means "don't care
+        about HR — overrides the default"). Distinct from None which
+        clears the field. Pin this so a future >= 0 → > 0 typo
+        regresses visibly."""
+        p = dp.upsert_planned_workout(
+            date="2026-05-30", type="easy", target_hr=0, distance_mi=0.0
+        )
+        assert p["target_hr"] == 0
+        assert p["distance_mi"] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # Google Calendar write methods (mocked googleapiclient)
@@ -799,6 +829,109 @@ class TestPlanDeviation:
         assert body["actual"]["pace_min_mi"] is None
         # No KeyError on missing pace + still no crash.
 
+    def test_plan_with_only_date_and_type_returns_empty_deltas(self, client):
+        """Plan that pinned no targets (just date+type, e.g. user said
+        'easy run today' without specifying pace/HR) → matched=True,
+        deltas={}. Agent then has to lean on qualitative cues (type,
+        notes, completion) rather than numeric comparison. Regression
+        guard against a future refactor that swaps `is not None` for
+        truthiness — would break this case AND target_hr=0 / pace=0."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 7,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 150,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [{
+            "id": "p", "date": "2026-05-28", "type": "easy",
+            "updated_at": "2026-05-27T10:00:00+00:00",
+        }]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/7/plan-deviation")
+        body = resp.json()
+        assert body["matched"] is True
+        assert body["deltas"] == {}
+
+    def test_hr_delta_rounds_not_truncates(self, client):
+        """int() truncates toward zero (`int(-1.6) == -1`), biasing
+        the magnitude toward zero. round() returns the closer integer.
+        158 vs target 160 → -2, not -1."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 8,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 158,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [{
+            "id": "p", "date": "2026-05-28", "type": "easy",
+            "target_hr": 160,
+            "updated_at": "2026-05-27T10:00:00+00:00",
+        }]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/8/plan-deviation")
+        # 158 - 160 = -2 (int subtraction here is exact; the bias
+        # surfaces with fractional avg_hr which Garmin doesn't emit,
+        # but the symbolic shape is what we're pinning).
+        assert resp.json()["deltas"]["hr"] == -2
+
+    def test_tiebreak_when_updated_at_identical(self, client):
+        """Two plans with identical `updated_at` (batch
+        propose_workout_plan upserts in the same second). max() returns
+        the first by primary key; secondary key on `id` makes the choice
+        deterministic. Without this, the agent gets a different plan
+        depending on whatever order list_planned_workouts_in_range
+        happened to return."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 9,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 150,
+        }
+        same = "2026-05-27T10:00:00+00:00"
+        api_server.processor.list_planned_workouts_in_range.return_value = [
+            {"id": "plan_a", "date": "2026-05-28", "type": "easy",
+             "target_hr": 140, "updated_at": same},
+            {"id": "plan_b", "date": "2026-05-28", "type": "tempo",
+             "target_hr": 165, "updated_at": same},
+        ]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/9/plan-deviation")
+        # Secondary key: id. max("plan_a", "plan_b") → "plan_b".
+        assert resp.json()["planned"]["id"] == "plan_b"
+
+    def test_tiebreak_handles_mixed_tz_formats(self, client):
+        """Two plans, one stored with `+00:00`, one Z-suffixed, one
+        naive — all representing the same wall-clock minute. Without
+        parsing they sort lexicographically (`+` < digit < `Z`) and
+        the wrong one wins. Parsing yields tz-aware datetimes that
+        compare correctly. Pin the latest tz-aware instant wins."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 10,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 150,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [
+            {"id": "plan_old", "date": "2026-05-28", "type": "easy",
+             "target_hr": 140, "updated_at": "2026-05-27T10:00:00+00:00"},
+            {"id": "plan_naive", "date": "2026-05-28", "type": "tempo",
+             "target_hr": 160, "updated_at": "2026-05-28T11:00:00"},
+            {"id": "plan_z", "date": "2026-05-28", "type": "interval",
+             "target_hr": 170, "updated_at": "2026-05-28T12:00:00Z"},
+        ]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/10/plan-deviation")
+        # Z (= +00:00) at 12:00 is the latest instant.
+        assert resp.json()["planned"]["id"] == "plan_z"
+
     def test_missing_avg_hr_no_hr_delta(self, client):
         """HRM not worn → averageHR is None. We should NOT compare
         None against the plan's target_hr — `hr` simply not emitted."""
@@ -889,15 +1022,27 @@ class TestPlannedWorkoutsMCP:
         assert r["cal_synced"] is False
 
     def test_get_plan_actual_deviation_forwards_activity_id(self):
-        """MCP tool wraps `/api/runs/{id}/plan-deviation`. Just a thin
-        forward — endpoint logic is covered by TestPlanDeviation."""
+        """MCP tool wraps `/api/runs/{id}/plan-deviation`. Pin both
+        the forwarded path AND that the backend response passes
+        through unchanged — otherwise a future wrapper that mangled
+        the result (e.g. injected extra meta, dropped a key) would
+        still pass an only-path assertion."""
         from backend import personal_coach_mcp as mcp
+        backend_payload = {
+            "matched": True,
+            "planned": {"id": "p", "type": "easy"},
+            "actual": {"distance_mi": 5.0, "avg_hr": 150},
+            "deltas": {"hr": -10},
+        }
         with patch(
             "backend.personal_coach_mcp._get",
-            new=AsyncMock(return_value={"matched": False}),
+            new=AsyncMock(return_value=backend_payload),
         ) as get_rec:
-            asyncio.run(mcp.get_plan_actual_deviation(activity_id=12345))
+            result = asyncio.run(
+                mcp.get_plan_actual_deviation(activity_id=12345)
+            )
         get_rec.assert_called_once_with("/api/runs/12345/plan-deviation")
+        assert result == backend_payload
 
     def test_propose_workout_plan_empty_returns_cal_synced_false(self):
         """Edge case: agent calls with [] — `len == 0` and

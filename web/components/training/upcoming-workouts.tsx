@@ -94,6 +94,16 @@ export function UpcomingWorkouts() {
         <CardContent>
           {query.isLoading && !query.data ? (
             <Skeleton className="h-24 w-full" />
+          ) : query.isError ? (
+            // Distinguish a real fetch failure from the legit empty
+            // state. Without this, a 500 / network blip would show
+            // the "ask the coach to draft one" prompt — user adds
+            // duplicate workouts thinking their existing plan was
+            // wiped. (Codex P3 lesson from #80.)
+            <p className="py-4 text-center text-sm text-rose-600 dark:text-rose-400">
+              Couldn&rsquo;t load your plan —{" "}
+              {(query.error as Error | null)?.message ?? "please retry."}
+            </p>
           ) : sorted.length === 0 ? (
             <p className="py-4 text-center text-sm text-muted-foreground">
               No planned workouts in the next 2 weeks. Ask the coach to
@@ -121,6 +131,14 @@ export function UpcomingWorkouts() {
           mode={editing === "new" ? "create" : "edit"}
           initial={editing === "new" ? null : editing}
           defaultDate={today}
+          // Pass the same window the card queries so a saved/edited
+          // workout can't land outside the visible range and silently
+          // disappear from the list. Long-range plans (race-day prep
+          // 5 weeks out) should go through the agent chat flow
+          // instead; this manual UI is intentionally scoped to the
+          // next 2 weeks.
+          minDate={today}
+          maxDate={end}
           onClose={() => setEditing(null)}
           onSaved={() => {
             qc.invalidateQueries({ queryKey: ["planned-workouts"] });

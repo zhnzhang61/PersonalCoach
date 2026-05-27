@@ -524,9 +524,11 @@ def calendar_events(
             # Re-classify AI-authored planned workouts so the UI can
             # dye them distinctly from generic life events. We detect
             # them by the marker line we embed in the description
-            # during _plan_to_cal_payload — that's the same heuristic
-            # /api/planned-workouts uses for the read merge, so the
-            # two surfaces stay consistent.
+            # during _plan_to_cal_payload. /api/planned-workouts
+            # currently returns JSON-only rows (the Cal-side merge
+            # was punted to a future PR per its own docstring); if
+            # that merge lands, it should reuse this exact heuristic
+            # so the two surfaces stay consistent.
             for ev in google_events:
                 desc = ev.get("description") or ""
                 if PLANNED_WORKOUT_MARKER in desc:
@@ -975,6 +977,29 @@ def update_planned_workout(
     return {"ok": True, "cal_synced": cal_synced, "planned_workout": plan}
 
 
+def _parse_updated_at(ts: str | None) -> datetime.datetime:
+    """Parse a stored `updated_at` / `created_at` ISO string to a
+    tz-aware datetime for sound comparison. Accepts `+00:00` suffix
+    (what `upsert_planned_workout` writes today), `Z` suffix (Google
+    Cal format), and naive strings (legacy / hand-edited data). Falls
+    back to `datetime.min` (UTC) on parse failure so a malformed row
+    sorts to the bottom of `max()` rather than crashing the request."""
+    if not ts:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    try:
+        # fromisoformat doesn't accept "Z" until Python 3.11+; cover
+        # the case explicitly so we don't depend on interpreter version.
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    if dt.tzinfo is None:
+        # Legacy naive timestamps: assume UTC (that's what
+        # upsert_planned_workout has always written; only manually
+        # edited rows might be naive).
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 def _compute_plan_deviation_for_summary(summary: dict[str, Any]) -> dict[str, Any]:
     """Plan-vs-actual deviation for a given run summary (P4b).
 
@@ -1023,9 +1048,22 @@ def _compute_plan_deviation_for_summary(summary: dict[str, Any]) -> dict[str, An
     if not plans:
         return {"matched": False, "planned": None, "actual": actual, "deltas": None}
 
+    # Multiple plans same day (AM/PM doubles, re-issued plan). Pick
+    # the most-recently-touched. Two reasons to parse rather than
+    # lexicographic-compare the raw strings:
+    #   1. Mixed tz formats (`+00:00`, `Z`, naive) compare wrong as
+    #      strings — `+` (0x2B) < `Z` (0x5A) < digits, so a naive
+    #      stamp would beat a `+00:00` stamp for the same instant.
+    #   2. Ties on identical timestamps fall through to a stable
+    #      secondary key (`id`) so the choice doesn't depend on
+    #      whatever order list_planned_workouts_in_range happened to
+    #      return.
     plan = max(
         plans,
-        key=lambda p: p.get("updated_at") or p.get("created_at") or "",
+        key=lambda p: (
+            _parse_updated_at(p.get("updated_at") or p.get("created_at")),
+            p.get("id") or "",
+        ),
     )
 
     deltas: dict[str, Any] = {}
@@ -1034,7 +1072,11 @@ def _compute_plan_deviation_for_summary(summary: dict[str, Any]) -> dict[str, An
             actual["pace_min_mi"] - plan["target_pace_min_mi"], 2
         )
     if plan.get("target_hr") is not None and actual["avg_hr"] is not None:
-        deltas["hr"] = int(actual["avg_hr"] - plan["target_hr"])
+        # round() — not int(). int() truncates toward zero, biasing
+        # the delta toward zero in magnitude: actual 158.4 vs target
+        # 160 would report -1 instead of -2. round() returns int when
+        # called without ndigits so the wire shape stays integer.
+        deltas["hr"] = round(actual["avg_hr"] - plan["target_hr"])
     if plan.get("distance_mi") is not None:
         deltas["distance_mi"] = round(actual["distance_mi"] - plan["distance_mi"], 2)
     if plan.get("duration_min") is not None:
