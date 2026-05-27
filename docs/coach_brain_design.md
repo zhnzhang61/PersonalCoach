@@ -364,8 +364,8 @@ doc.
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **A** | Investigate + fix Coach UI multi-day timeline confusion (user observation 2026-05-26: yesterday's question mid-stream, Google-failed reply, today's batched answers all rendered together) | ~½ day | User-flagged felt pain. Isolated UI/session-boundary issue, no deps. |
-| **C** | SSE streaming for `/api/ai/chat` (currently dumps full reply after 10s+) | ~1 day | Felt every chat turn. Independent of coach-brain buildout. |
+| **A** ✅ done 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) | Fix Coach UI multi-day timeline confusion. Backend `get_history_with_ts` walks `checkpointer.list()` to tag each message with first-seen ts; `/api/ai/history` emits ts. Frontend `<DayDivider>` inserted at calendar-day transitions (local TZ) in both active + closed session streams. 8 new unit tests + 2 new API behavior tests. | ~½ day | User-flagged felt pain. Isolated UI/session-boundary issue, no deps. |
+| **C** ← next | SSE streaming for `/api/ai/chat` (currently dumps full reply after 10s+) | ~1 day | Felt every chat turn. Independent of coach-brain buildout. |
 
 ### Phase 1 — Foundation before P2
 
@@ -454,11 +454,17 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**First PR: A** — Coach UI multi-day timeline confusion (observation
-2026-05-26: yesterday's question mid-stream, Google-failed reply,
-today's batched answers all rendered together).
+**Next PR: C** — SSE streaming for `/api/ai/chat`. Currently the chat
+endpoint blocks until the full agent reply lands (~10s+ on tool-using
+turns), then dumps the whole thing at once. Streaming gives the user
+the "live typing" feel and surfaces partial output if a turn errors
+mid-flight.
 
-Suggested branch: `fix-coach-multi-day-timeline`.
+Suggested branch: `add-chat-sse-streaming`.
+
+**Previously landed**:
+- **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
+  per-message ts + DayDivider for multi-day sessions.
 
 ---
 
