@@ -512,7 +512,7 @@ Ideas not yet developed:
   `/api/runs` alone, add a `/api/garmin-activities?type=...`
   endpoint and a separate "Cross-training" section in the
   Activity tab. (B) is the cleanest UX.
-- ~~**Garmin sync gap-resilience**~~ ✅ shipped in #PR_NUMBER —
+- ~~**Garmin sync gap-resilience**~~ ✅ shipped in #77 —
   two failure modes observed 2026-05-26 (PR #68 era).
   (a) `run_sync(days_back=5)` window: if app isn't opened for
   >5d, missing days fall outside the window forever; chart
