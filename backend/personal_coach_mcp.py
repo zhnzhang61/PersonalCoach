@@ -716,8 +716,20 @@ async def get_model(model_key: str) -> dict | None:
       - 'adherence.planned_vs_actual' → rate by workout_type
 
     Returns null if the model doesn't exist yet (not enough data).
-    Use list_models to discover available keys."""
-    return await _get(f"/api/memory/models/{model_key}")
+    Use list_models to discover available keys.
+
+    The underlying API returns 404 when a model_key isn't found —
+    semantically correct REST but turns a normal discovery path
+    ("does recovery.hrv_curve_post_long_run exist yet?") into an
+    exception. We catch the 404 here so agents can branch on `is
+    None` instead of try/except. Other HTTP errors (5xx, network)
+    still propagate."""
+    try:
+        return await _get(f"/api/memory/models/{model_key}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
 
 
 @mcp.tool()
