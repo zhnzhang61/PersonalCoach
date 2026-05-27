@@ -879,17 +879,53 @@ class TestGetAthleteProfileFull:
         out = proc.get_athlete_profile_full()
         assert out["athlete"]["weight_kg"] == 72.4
 
-    def test_age_computed_from_birth_date(self, proc):
+    def test_age_birthday_not_yet_this_year(self, proc):
         """Age is "completed years" — birthday-not-yet-this-year shaves
-        a year off."""
+        a year off (year_diff - 1).
+
+        codex P2 on PR #81 — the original `today + 60 days` shortcut
+        rolled into the next calendar year for late-Nov/Dec runs,
+        flipping the assertion. Pick a date a few days later this year
+        (always in same calendar year unless today is in the last few
+        days of December, in which case skip — the inverse-branch test
+        below covers that case)."""
         import datetime
         today = datetime.date.today()
-        # Pick a birthday a month AFTER today so age is year-diff - 1.
-        future_month = today + datetime.timedelta(days=60)
-        birth = f"1990-{future_month.month:02d}-{min(future_month.day, 28):02d}"
+        future = today + datetime.timedelta(days=5)
+        if future.year != today.year:
+            pytest.skip(
+                "Year-end edge: no future date stays in the current "
+                "calendar year. The "
+                "test_age_birthday_already_passed_this_year companion "
+                "covers the inverse branch."
+            )
+        # Clamp day to 28 to avoid invalid (Feb 29 etc.) constructed
+        # dates; the chosen day is always > today.day after the +5,
+        # before the clamp, so the (month, day) < (month, clamped_day)
+        # comparison still resolves True (since today.day must be
+        # smaller than 28 if the constructed day was >28).
+        birth = f"1990-{future.month:02d}-{min(future.day, 28):02d}"
         self._seed_profile(proc, {"birthDate": birth})
         out = proc.get_athlete_profile_full()
         assert out["athlete"]["age"] == today.year - 1990 - 1
+
+    def test_age_birthday_already_passed_this_year(self, proc):
+        """Inverse branch: birthday earlier this year → no subtraction
+        (age == year_diff). Adds robustness to late-Dec runs where the
+        not-yet-this-year branch skips."""
+        import datetime
+        today = datetime.date.today()
+        past = today - datetime.timedelta(days=5)
+        if past.year != today.year:
+            pytest.skip(
+                "Year-start edge: 5 days ago is the prior year. The "
+                "test_age_birthday_not_yet_this_year companion covers "
+                "the inverse branch."
+            )
+        birth = f"1990-{past.month:02d}-{min(past.day, 28):02d}"
+        self._seed_profile(proc, {"birthDate": birth})
+        out = proc.get_athlete_profile_full()
+        assert out["athlete"]["age"] == today.year - 1990
 
     def test_lt_pace_from_decimetre_per_sec(self, proc):
         """Garmin's `lactateThresholdSpeed` < 1.0 is empirically dm/s.
@@ -1113,23 +1149,41 @@ class TestGetTrainingLoad:
     def test_weekly_miles_trend_bucketed_by_monday(self, proc):
         """Each run's date snaps to that week's Monday for trend
         bucketing. Two runs in the same Mon-Sun should land in one
-        bucket."""
-        # Pick a Wednesday and a Friday of the same ISO week.
-        # 2026-05-20 is a Wed, 2026-05-22 is a Fri.
-        _write_activity_summary(proc, 1, "2026-05-20", distance=8000.0)
-        _write_activity_summary(proc, 2, "2026-05-22", distance=5000.0)
-        # And one in a different week.
-        _write_activity_summary(proc, 3, "2026-05-27", distance=3000.0)
-        # Window has to cover both weeks.
+        bucket.
+
+        Dates are generated relative to `today` so the test stays
+        valid year-round (codex P2 on PR #81 — fixed-2026-05 dates
+        rolled out of the 14-day window once the calendar advanced).
+        """
+        import datetime
+        today = datetime.date.today()
+        # Last week (Mon + Wed) — same bucket.
+        last_monday = today - datetime.timedelta(days=today.weekday() + 7)
+        last_wednesday = last_monday + datetime.timedelta(days=2)
+        # This week's Monday (today snapped back) — different bucket.
+        this_monday = today - datetime.timedelta(days=today.weekday())
+
+        _write_activity_summary(
+            proc, 1, last_monday.isoformat(), distance=8000.0,
+        )
+        _write_activity_summary(
+            proc, 2, last_wednesday.isoformat(), distance=5000.0,
+        )
+        _write_activity_summary(
+            proc, 3, today.isoformat(), distance=3000.0,
+        )
+        # window_days=14 covers both `last_monday` (≤13 days ago, even
+        # when today is Sunday) and today.
         out = proc.get_training_load(window_days=14)
-        trend = out["weekly_miles_trend"]
-        # Two buckets total. Mondays of those weeks: 2026-05-18 and
-        # 2026-05-25.
-        buckets = {row["week_start"]: row["miles"] for row in trend}
-        assert "2026-05-18" in buckets
-        assert "2026-05-25" in buckets
-        # First bucket sums the Wed+Fri runs.
-        assert buckets["2026-05-18"] == round((8000 + 5000) / 1609.34, 1)
+        buckets = {
+            row["week_start"]: row["miles"] for row in out["weekly_miles_trend"]
+        }
+        assert last_monday.isoformat() in buckets
+        assert this_monday.isoformat() in buckets
+        # Two same-week runs collapse into one bucket.
+        assert buckets[last_monday.isoformat()] == round(
+            (8000 + 5000) / 1609.34, 1
+        )
 
 
 # ---------------------------------------------------------------------------
