@@ -677,6 +677,110 @@ def delete_manual_activity_endpoint(activity_id: str) -> dict[str, Any]:
     return {"ok": True, "id": activity_id}
 
 
+# ===========================================================================
+# Daily check-ins (PR P3 — perceived layer §2)
+# ===========================================================================
+#
+# One row per calendar date. The 4 ordinal fields (sleep_quality /
+# soreness / mood / motivation, each 0-5) plus optional notes give the
+# agent its first window into "how does the user feel today?" — until
+# now everything was Garmin sensors (objective) or per-lap RPE
+# (perceived but post-hoc + workout-bound). Each upsert also writes a
+# `daily_checkin` episode into CME so search_episodes / consolidate
+# pick up the signal.
+
+
+class DailyCheckinInput(BaseModel):
+    """Body for POST /api/checkins. All scale fields optional — the
+    UI may submit only what changed since the user's last save.
+    Validation (0-5 range, int type) happens in DataProcessor."""
+    date: str  # YYYY-MM-DD; treated as the row key (upsert semantics)
+    sleep_quality: int | None = None
+    soreness: int | None = None
+    mood: int | None = None
+    motivation: int | None = None
+    notes: str | None = None
+
+
+@app.get("/api/checkins")
+def list_checkins(
+    days: int = Query(14, ge=1, le=365),
+) -> dict[str, Any]:
+    """Return last `days` calendar days of check-ins, newest first.
+    Used by both the Health-tab card (today only) and the agent (via
+    MCP get_recent_checkins)."""
+    today = datetime.date.today()
+    start = (today - datetime.timedelta(days=days - 1)).isoformat()
+    end = today.isoformat()
+    return {
+        "days": days,
+        "start": start,
+        "end": end,
+        "checkins": processor.list_checkins_in_range(start, end),
+    }
+
+
+@app.get("/api/checkins/{date_str}")
+def get_checkin(date_str: str) -> dict[str, Any]:
+    row = processor.get_checkin_by_date(date_str)
+    if not row:
+        raise HTTPException(404, f"No check-in for {date_str}")
+    return row
+
+
+@app.post("/api/checkins")
+def upsert_checkin(body: DailyCheckinInput) -> dict[str, Any]:
+    """Create or update a check-in by date. Same-day re-submit
+    overrides (no version history). Also dual-writes a 'daily_checkin'
+    episode into CME so the agent can search/cluster perceived state
+    over time."""
+    payload = body.model_dump(exclude={"date"}, exclude_none=True)
+    try:
+        entry = processor.upsert_checkin(body.date, **payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    # CME dual-write: capture this check-in as an episode so it lands
+    # in search_episodes results + consolidate_memory_background can
+    # cluster perceived-state patterns into models down the line.
+    # Best-effort: a CME write failure must not 500 the check-in
+    # save (the canonical store is the JSON file).
+    try:
+        memory_engine.create_episode(
+            event_type="daily_checkin",
+            context={
+                "what": "daily check-in",
+                "when": body.date,
+                "sleep_quality": entry.get("sleep_quality"),
+                "soreness": entry.get("soreness"),
+                "mood": entry.get("mood"),
+                "motivation": entry.get("motivation"),
+                "notes": entry.get("notes"),
+            },
+            lesson_learned=entry.get("notes") or None,
+            timestamp=entry.get("updated_at"),
+        )
+    except Exception:
+        # Tracing this would be nice (PR B) but tracer lives on the
+        # AgenticCoach, not memory_engine itself. Silent here matches
+        # the "tracing never breaks a turn" contract.
+        pass
+
+    return {"ok": True, "checkin": entry}
+
+
+@app.delete("/api/checkins/{date_str}")
+def delete_checkin(date_str: str) -> dict[str, Any]:
+    """Drop the check-in row. Does NOT delete the corresponding CME
+    episode — that's evidence the agent already used; deleting it
+    after the fact would falsify history. The check-in row goes,
+    the episode stays."""
+    ok = processor.delete_checkin(date_str)
+    if not ok:
+        raise HTTPException(404, f"No check-in for {date_str}")
+    return {"ok": True, "date": date_str}
+
+
 @app.get("/api/runs")
 def runs(
     start: str | None = Query(default=None),

@@ -392,7 +392,7 @@ doc.
 |---|---|---|---|
 | **P1** ✅ done 2026-05-27 | `models` table scaffolding. New CME `models` table (model_id PK + UNIQUE model_key + model_type/derivation_method/status/confidence CHECK enums + params_json + n_samples + evidence_json + timestamps) parallel to `episodes`. `topics.related_models` JSON column added via idempotent ALTER. `topic_decisions.kind` CHECK extended to include `'new_model'` via table-rebuild. MemoryOS helpers: `create_model`, `get_model`, `list_models`, `update_model_params`, `link_topic_to_model`. New `/api/memory/models[/{key}]` + `/api/memory/models/refit/{model_key}` endpoints. MCP tools `get_model` + `list_models` for the agent. Seed model: `recovery.hrv_14d_baseline` (mean_std) from `get_health_stats`. 22 new tests (migration idempotency, CRUD, validation, seed refit). | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
 | **P2** ✅ done 2026-05-27 | Episode → model generalize pipeline. `MemoryOS.propose_model_from_topic(topic_id, trigger='manual')` gathers a topic's linked episodes, LLM asks "parametrically generalizable?", parks `kind='new_model'` decision. `resolve_topic_decision` handles `'new_model'`: `create_new` → `create_model` (derivation='llm') + `link_topic_to_model`. Endpoints: `POST /api/memory/topics/{tid}/propose_model`, `GET /api/memory/decisions`, `POST /api/memory/decisions/{id}/resolve`. MCP tools `propose_model_from_topic` / `list_pending_decisions` / `resolve_decision` so the **agent drives confirm/reject in chat** (per design A — no separate UI page). LLM JSON parser strips markdown fences + leading prose. Tracer hooks via PR B (`kind='model_propose'`). 16 unit tests; side-fix `_SCHEMA_SQL` to canonically include `topic_episode_links` + episodes event-time columns (pre-existing schema gap that made fresh DBs crash on `get_topic_episodes`). | ~1-2 days | Makes models grow. Without P2, P1 is a passive store. |
-| **P3** | Daily check-in (perceived layer §2): UI widget on Health/Coach tab + `/api/checkins` CRUD + episode integration + MCP tool `get_recent_checkins(days)` | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
+| **P3** ✅ done 2026-05-27 | Daily check-in widget on Health tab top. `data/manual_inputs/daily_checkins.json` (one row per date, upsert semantics). DataProcessor CRUD: `upsert_checkin` / `get_checkin_by_date` / `list_checkins_in_range` / `delete_checkin` with int-range validation. Endpoints: `GET/POST/DELETE /api/checkins`. POST dual-writes a `daily_checkin` episode into CME (best-effort; CME failure doesn't 500 the save). MCP tool `get_recent_checkins(days=7)`. Frontend: `<TodaysCheckin>` card with 4 ordinal scales (sleep_quality 1-5, soreness 0-5, mood 1-5, motivation 1-5) as tap-to-select rows + optional notes. Filled state = compact chip summary + Edit pencil. Key-reset pattern (not setState-in-effect) for draft refresh after save. 29 new tests. | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
 | **P4** | Planned workouts (intent layer §3): start with manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP tool `get_planned_workouts(start, end)` + plan-vs-actual deviation compute. Google Cal wiring deferred. | ~2 days | Unlocks 95% of coaching value (adherence + deviation). Manual JSON keeps scope tight. |
 | **P5** | External context channels (§4): travel / illness / life-stress quick-add UI + new episode types + weather/menstrual MCP surface (already-synced data not exposed) | ~1-2 days | Closes "agent can't see why" gap. Mostly surfacing existing data + small UI for free-text events. |
 | **P6** | First batch of stat-derived models (§1, §5): aerobic decoupling per run, pace-HR table for tempos, cadence baseline, sleep debt, cycle-volume diff. Each follows P1+P2 stat-derivation path. | ~2-3 days | First real B-bucket payloads. Builds on P1 store + P2 pipeline. |
@@ -454,17 +454,19 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: P3** — Daily check-in (perceived layer §2). UI widget on
-Health/Coach tab + `/api/checkins` CRUD + episode integration + MCP
-tool `get_recent_checkins(days)`. First C-bucket user-visible feature.
+**Next PR: P4** — Planned workouts (intent layer §3). Start with a
+manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP
+tool `get_planned_workouts(start, end)` + plan-vs-actual deviation
+compute. Google Cal wiring deferred. Unlocks the 95% of coaching
+value that's about adherence + plan deviation rather than raw
+sensor data.
 
-Suggested branch: `add-daily-checkin-widget`.
+Suggested branch: `add-planned-workouts`.
 
-Phase 0 + Phase 1 + P1 + P2 complete. The pattern-store pipeline is
-now live end-to-end: episodes accumulate under topics → user asks
-agent to scan a topic → LLM proposes a parameterized model → user
-confirms in chat → model lands in CME with link back. P3 moves to
-the next missing input layer — subjective check-in data.
+Phase 0 + Phase 1 + P1-P3 complete. Three of four agent input
+streams now live: objective (Garmin sensors), perceived
+(check-ins), patterns (models). P4 closes the planned-intent gap;
+P5 adds external-context channels (travel/illness/weather).
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
@@ -479,9 +481,12 @@ the next missing input layer — subjective check-in data.
 - **P1** ✅ 2026-05-27 ([#76](https://github.com/zhnzhang61/PersonalCoach/pull/76)) —
   `models` table + helpers + `get_model` / `list_models` MCP tools +
   seed `recovery.hrv_14d_baseline` model.
-- **P2** ✅ 2026-05-27 — Episode → model generalize pipeline:
-  `propose_model_from_topic` + `resolve_topic_decision` extended for
-  `new_model` kind + MCP tools for chat-driven confirm/reject.
+- **P2** ✅ 2026-05-27 ([#78](https://github.com/zhnzhang61/PersonalCoach/pull/78)) —
+  Episode → model generalize pipeline: `propose_model_from_topic` +
+  `resolve_topic_decision` extended for `new_model` kind + MCP
+  tools for chat-driven confirm/reject.
+- **P3** ✅ 2026-05-27 — Daily check-in widget + `/api/checkins`
+  CRUD + CME episode dual-write + `get_recent_checkins` MCP tool.
 
 ---
 

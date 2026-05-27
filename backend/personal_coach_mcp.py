@@ -834,6 +834,25 @@ async def resolve_decision(
 
 
 @mcp.tool()
+async def get_recent_checkins(days: int = 7) -> dict:
+    """Recent daily check-ins from the user (PR P3 — perceived layer).
+
+    Each row carries 0–5 ordinal scales for sleep_quality, soreness,
+    mood, motivation, plus optional free-text notes — the user's own
+    answer to "how do you feel today?". Use to ground recovery /
+    readiness reasoning in subjective state, not just Garmin
+    objective sensors.
+
+    Returns `{days, start, end, checkins: [...]}` — checkins newest
+    first. Missing days (user didn't check in) simply aren't in the
+    list; don't treat absence as a signal.
+
+    `days` defaults to 7 (week-recall window). Use larger windows
+    when looking for patterns across a training block."""
+    return await _get("/api/checkins", days=days)
+
+
+@mcp.tool()
 async def get_pending_clarifications() -> dict:
     """Unresolved clarification questions the agent owes the user.
 

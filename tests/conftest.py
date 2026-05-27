@@ -167,6 +167,17 @@ def _build_processor_mock(tmp_dir: str = "/tmp/personalcoach_test") -> MagicMock
     m.add_manual_activity.return_value = {"id": "manual_mock", "ok": True}
     m.update_manual_activity.return_value = {"id": "manual_mock", "ok": True}
     m.delete_manual_activity.return_value = True
+    # PR P3 — daily check-ins. Empty list by default → GET returns
+    # nothing, GET /{date} returns None → handler 404s. Tests that
+    # care override inline.
+    m.list_checkins_in_range.return_value = []
+    m.get_checkin_by_date.return_value = None
+    m.upsert_checkin.return_value = {
+        "date": "2026-05-27", "sleep_quality": 4,
+        "created_at": "2026-05-27T12:00:00Z",
+        "updated_at": "2026-05-27T12:00:00Z",
+    }
+    m.delete_checkin.return_value = True
     m.get_training_load.return_value = {
         "window_days": 28, "acute_load_mi": 0.0, "chronic_load_mi": 0.0,
         "acwr": None,
