@@ -470,3 +470,33 @@ Ideas not yet developed:
   doc. Real value-add for long tool-using turns.
 - **Persist CME embeddings to SQLite** — at ~300 topics cold-start
   cost starts mattering (see cognitive_memory_engine.py comments).
+- **Non-running Garmin activities invisible on Activity tab** —
+  observed 2026-05-26: two Garmin-recorded swims (Pool Swim
+  5/22, Maui open water 5/21) sat on disk in
+  `data/get_activities/*_summary.json` with proper
+  `typeKey=lap_swimming` / `open_water_swimming`, but never
+  appeared in the UI. Root cause: `/api/runs`
+  (backend/api_server.py:689-692) explicitly filters
+  `"running" in typeKey`, and `/api/manual-activities` only
+  reads the manual JSON store — so any Garmin swim/bike falls
+  through both. Fix shape (pick one): (A) drop the typeKey
+  filter in `/api/runs`, leave frontend as-is (will render
+  swims via RunCard with garbled pace); (B) drop filter +
+  add type-aware ActivityCard + make stats card (RUNS/MILES/
+  PACE) running-only at the component layer; (C) leave
+  `/api/runs` alone, add a `/api/garmin-activities?type=...`
+  endpoint and a separate "Cross-training" section in the
+  Activity tab. (B) is the cleanest UX.
+- **Garmin sync gap-resilience** — two failure modes observed
+  2026-05-26 (PR #68 era). (a) `run_sync(days_back=5)` window:
+  if app isn't opened for >5d, missing days fall outside the
+  window forever; chart `/api/health/timeline` returned 8 nulls
+  for 5/14–5/21. (b) Stub-file trap: existence check treats any
+  on-disk JSON as "done," but Garmin returns an empty
+  `dailySleepDTO` (`sleepTimeSeconds=None`, score=None) if you
+  sync before the watch finishes uploading last night's data —
+  the stub then sticks forever. Fix shape: enlarge default
+  `days_back` (or detect last-good-day → backfill to it) AND
+  add stub-detection to the existence check (treat
+  `sleepTimeSeconds is None` / missing `hrvSummary` as
+  needs-refetch).
