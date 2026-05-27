@@ -24,6 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from backend.llm_provider import call_embedding, call_llm, cosine_similarity
+from backend.trace_logger import TraceLogger
+
+
+# Version label for the CME consolidate prompt. Bump when
+# consolidate_memory_background's prompt template changes. Embedded in
+# every trace row so we can grep "all consolidates on v2b" or detect
+# behavior regressions across prompt edits.
+CME_CONSOLIDATE_VERSION = "v2b"
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +137,11 @@ class MemoryOS:
         # (PRIMARY KEY (provider, topic_id), columns signature + vec_blob)
         # — at that scale the cold-start latency starts to matter.
         self._topic_embeddings: dict[tuple[str, str], tuple[str, list[float]]] = {}
+
+        # Structured tracing. Same JSONL store as AgenticCoach
+        # (data/traces/YYYY-MM-DD.jsonl); we just emit different
+        # `kind` values so grep can filter agent vs memory turns.
+        self.tracer = TraceLogger()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1036,6 +1049,33 @@ class MemoryOS:
         if not chat_history:
             return
 
+        # Wrap the whole consolidate body so the trace row captures
+        # total duration + before/after row counts (the closest thing
+        # to a "result" this background job has). Trace context exits
+        # at function return; the with-block spans the entire method.
+        before_stats = self.stats()
+
+        with self.tracer.turn(
+            kind="consolidate",
+            thread_id=thread_id,
+            prompt_version=CME_CONSOLIDATE_VERSION,
+            prompt_hash="cme_consolidate_v2b",
+            user_input=f"<{len(chat_history)} chat messages>",
+        ) as trace:
+            self._consolidate_inner(thread_id, chat_history)
+            after_stats = self.stats()
+            trace.final_answer = (
+                f"topics_added={after_stats['topics'] - before_stats['topics']} "
+                f"episodes_added={after_stats['episodes'] - before_stats['episodes']} "
+                f"pending_delta={after_stats['pending_unresolved'] - before_stats['pending_unresolved']}"
+            )
+
+    def _consolidate_inner(
+        self, thread_id: str, chat_history: list[dict]
+    ) -> None:
+        """The actual consolidation work. Extracted so the public
+        method can wrap it in a tracer.turn() context without
+        indentation gymnastics on a ~300 line body."""
         chat_text = "\n".join(
             f"{msg.get('role', msg.get('type', 'unknown'))}: {msg.get('content', '')}"
             for msg in chat_history
