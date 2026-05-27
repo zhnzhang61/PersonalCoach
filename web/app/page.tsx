@@ -4,6 +4,7 @@ import { ReadinessCard } from "@/components/health/readiness-card";
 import { RecoveryChart } from "@/components/health/recovery-chart";
 import { SleepChart } from "@/components/health/sleep-chart";
 import { SnapshotCards } from "@/components/health/snapshot-cards";
+import { TodaysCheckin } from "@/components/health/todays-checkin";
 
 export default function HealthPage() {
   const today = format(new Date(), "EEEE, MMMM d");
@@ -11,6 +12,10 @@ export default function HealthPage() {
     <div className="mx-auto w-full max-w-4xl">
       <PageHeader eyebrow={today} title="Health" />
       <div className="space-y-6 px-5 pb-8 sm:px-8">
+        {/* Today's check-in goes ABOVE the objective Garmin cards —
+          * subjective state is the first thing the user reflects on,
+          * and surfacing the question primes them to answer it. */}
+        <TodaysCheckin />
         <SnapshotCards />
         <ReadinessCard />
         <RecoveryChart days={30} />

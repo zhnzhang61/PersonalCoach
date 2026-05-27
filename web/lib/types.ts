@@ -382,6 +382,33 @@ export interface ManualActivitiesResponse {
 }
 
 // ==========================================
+// Daily check-ins (PR P3 — perceived layer)
+// ==========================================
+//
+// One row per calendar date. The 4 scale fields are 0–5 ordinals
+// (0 = "didn't capture" or "none" for soreness); the agent
+// interprets `null` as "user didn't answer this slider". Notes are
+// optional free text — preserved verbatim for both the agent and
+// the user's later self-review.
+export interface DailyCheckin {
+  date: string; // YYYY-MM-DD
+  sleep_quality?: number | null;
+  soreness?: number | null;
+  mood?: number | null;
+  motivation?: number | null;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CheckinsResponse {
+  days: number;
+  start: string;
+  end: string;
+  checkins: DailyCheckin[];
+}
+
+// ==========================================
 // Unified calendar events (Training tab → Plan calendar)
 // ==========================================
 // After server-side normalisation, Google Calendar events + ManualActivity

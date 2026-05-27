@@ -177,6 +177,7 @@ class DataProcessor:
             'manual': os.path.join(data_dir, 'manual_inputs'),
             'blocks': os.path.join(data_dir, 'blocks', 'training_blocks.json'),
             'aux': os.path.join(data_dir, 'blocks', 'auxiliary_log.json'),
+            'daily_checkins': os.path.join(data_dir, 'manual_inputs', 'daily_checkins.json'),
             'ledger': os.path.join(data_dir, 'derived', 'daily_health_metrics.csv'),
             'weather': os.path.join(data_dir, 'weather'),
             'user_zones': os.path.join(data_dir, 'manual_inputs', 'user_zones.json'),
@@ -203,6 +204,11 @@ class DataProcessor:
         # Initialize Aux
         if not os.path.exists(self.paths['aux']):
             with open(self.paths['aux'], 'w') as f: json.dump([], f)
+
+        # Initialize Daily Check-ins (PR P3 — perceived layer §2).
+        # Empty list; users create one per day via the Health-tab card.
+        if not os.path.exists(self.paths['daily_checkins']):
+            with open(self.paths['daily_checkins'], 'w') as f: json.dump([], f)
             
         # Initialize Semantic Memory (User Profile)
         if not os.path.exists(self.paths['semantic_memory']):
@@ -718,6 +724,115 @@ class DataProcessor:
             return False
         with open(self.paths['aux'], 'w') as f:
             json.dump(remaining, f, indent=4)
+        return True
+
+    # ==========================================
+    # Daily check-ins (PR P3 — perceived layer §2)
+    # ==========================================
+    #
+    # One row per calendar date. Fields are 1–5 ordinal scales the
+    # user picks via sliders (sleep_quality, soreness, mood,
+    # motivation) plus an optional free-text `notes`. Upsert by date —
+    # same-day re-submit overrides the row in place (no version
+    # history; the agent uses the latest snapshot, and PR B traces
+    # capture turn-time anyway).
+
+    _CHECKIN_SCALE_FIELDS = ("sleep_quality", "soreness", "mood", "motivation")
+    _CHECKIN_SCALE_RANGE = (0, 5)  # 0 means "didn't capture" / "none" (soreness)
+
+    @staticmethod
+    def _validate_checkin_fields(payload: dict) -> dict:
+        """Coerce + validate a check-in row. Returns the cleaned dict.
+        Raises ValueError on bad shape so the API layer can 400."""
+        if not isinstance(payload, dict):
+            raise ValueError("check-in payload must be a dict")
+        out = {}
+        for field in DataProcessor._CHECKIN_SCALE_FIELDS:
+            v = payload.get(field)
+            if v is None:
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{field} must be an int")
+            lo, hi = DataProcessor._CHECKIN_SCALE_RANGE
+            if not (lo <= v <= hi):
+                raise ValueError(f"{field}={v} out of range [{lo}, {hi}]")
+            out[field] = v
+        notes = payload.get("notes")
+        if notes is not None:
+            if not isinstance(notes, str):
+                raise ValueError("notes must be a string")
+            out["notes"] = notes.strip()[:1000]  # truncate to keep row sane
+        return out
+
+    def list_checkins_in_range(
+        self, start_str: str, end_str: str
+    ) -> list[dict]:
+        """Inclusive [start, end] date range, sorted newest first."""
+        current = self.load_json_safe(self.paths['daily_checkins'])
+        if isinstance(current, dict):
+            current = []
+        return sorted(
+            [
+                c for c in current
+                if start_str <= c.get("date", "") <= end_str
+            ],
+            key=lambda c: c.get("date", ""),
+            reverse=True,
+        )
+
+    def get_checkin_by_date(self, date_str: str) -> dict | None:
+        """Return the check-in for `date_str` (YYYY-MM-DD) or None."""
+        current = self.load_json_safe(self.paths['daily_checkins']) or []
+        if isinstance(current, dict):
+            return None
+        for c in current:
+            if c.get("date") == date_str:
+                return c
+        return None
+
+    def upsert_checkin(self, date_str: str, **fields) -> dict:
+        """Create or update the check-in for `date_str`. Validates field
+        shape (1–5 ints, optional notes). Sets created_at on insert,
+        updated_at on every write. Returns the row."""
+        cleaned = self._validate_checkin_fields(fields)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with open(self.paths['daily_checkins'], 'r') as f:
+            current = json.load(f)
+        if not isinstance(current, list):
+            current = []
+        # Look up existing
+        for c in current:
+            if c.get("date") == date_str:
+                c.update(cleaned)
+                c["updated_at"] = now
+                break
+        else:
+            entry = {
+                "date": date_str,
+                **cleaned,
+                "created_at": now,
+                "updated_at": now,
+            }
+            current.append(entry)
+        # Sort by date ascending on write so file is grep-friendly.
+        current.sort(key=lambda c: c.get("date", ""))
+        with open(self.paths['daily_checkins'], 'w') as f:
+            json.dump(current, f, indent=2, ensure_ascii=False)
+        # Return the canonical row from disk so the API echoes what's stored.
+        return self.get_checkin_by_date(date_str) or {}
+
+    def delete_checkin(self, date_str: str) -> bool:
+        with open(self.paths['daily_checkins'], 'r') as f:
+            current = json.load(f)
+        if not isinstance(current, list):
+            return False
+        remaining = [c for c in current if c.get("date") != date_str]
+        if len(remaining) == len(current):
+            return False
+        with open(self.paths['daily_checkins'], 'w') as f:
+            json.dump(remaining, f, indent=2, ensure_ascii=False)
         return True
 
     def get_monthly_activity_stats(self, activity_type: str = "all") -> list[dict]:
