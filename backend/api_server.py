@@ -1179,6 +1179,23 @@ def run_weather(activity_id: int) -> dict[str, Any]:
     return w
 
 
+@app.get("/api/runs/{activity_id}/route-profile")
+def run_route_profile(activity_id: int) -> dict[str, Any]:
+    """Grade distribution + terrain summary (P5 — external context §4).
+
+    Powers the agent's "this run was 60% rolling-up terrain — your HR
+    drift makes sense" line. Distinct from /route (which returns raw
+    GPS points for the map) — this one collapses to a 5-band
+    distribution + scalar climb/loss/grade-range, AI-friendly shape.
+    """
+    profile = processor.compute_route_profile(activity_id)
+    if profile is None:
+        raise HTTPException(
+            404, "Route profile unavailable (treadmill / no GPS / not synced)"
+        )
+    return profile
+
+
 @app.get("/api/runs/{activity_id}/route")
 def run_route(
     activity_id: int,
@@ -1588,6 +1605,77 @@ def create_episode(body: EpisodeCreate) -> dict[str, Any]:
         timestamp=body.timestamp,
     )
     return {"ok": True, "episode_id": eid}
+
+
+class ExternalEventCreate(BaseModel):
+    """Quick-add payload for travel / illness / life_stress (P5 §4).
+
+    `event_type` MUST be one of `MemoryOS.EXTERNAL_EVENT_TYPES`. Dates
+    are inclusive YYYY-MM-DD. `description` is free text that the
+    agent will see verbatim — keep it short and specific
+    ("stomach bug, low energy", "demo prep crunch", "Tokyo 13h ahead").
+    """
+    event_type: str
+    start_date: str
+    end_date: str
+    description: str
+
+
+@app.get("/api/memory/external-events")
+def list_external_events(
+    start: str = Query(..., description="YYYY-MM-DD inclusive"),
+    end: str = Query(..., description="YYYY-MM-DD inclusive"),
+) -> dict[str, Any]:
+    """Travel / illness / life_stress episodes overlapping [start, end].
+    Feeds both the Health-tab `<ExternalEvents>` card and the agent's
+    `get_external_events` MCP tool — single source of truth."""
+    events = memory_engine.list_external_events(start, end)
+    return {"start": start, "end": end, "events": events}
+
+
+@app.post("/api/memory/external-events")
+def create_external_event(body: ExternalEventCreate) -> dict[str, Any]:
+    """Create a travel / illness / life_stress episode. Same CME row
+    shape as other episodes — context carries {start_date, end_date,
+    description} so list_external_events can range-filter without
+    parsing prose."""
+    from backend.cognitive_memory_engine import MemoryOS as _MO
+    if body.event_type not in _MO.EXTERNAL_EVENT_TYPES:
+        raise HTTPException(
+            400,
+            f"event_type must be one of {_MO.EXTERNAL_EVENT_TYPES}",
+        )
+    # Light validation — match planned_workouts._validate
+    for fld, val in [("start_date", body.start_date), ("end_date", body.end_date)]:
+        if not (isinstance(val, str) and len(val) == 10
+                and val[4] == "-" and val[7] == "-"):
+            raise HTTPException(400, f"{fld} must be YYYY-MM-DD")
+    if body.end_date < body.start_date:
+        raise HTTPException(400, "end_date must be >= start_date")
+    if not body.description.strip():
+        raise HTTPException(400, "description required")
+    eid = memory_engine.create_episode(
+        event_type=body.event_type,
+        context={
+            "start_date": body.start_date,
+            "end_date": body.end_date,
+            "description": body.description.strip(),
+        },
+        # lesson_learned mirrors description so search_episodes
+        # (keyword grep over context_json + lesson_learned) finds it
+        # whether the agent searches by phrase or by event_type.
+        lesson_learned=body.description.strip(),
+    )
+    return {"ok": True, "episode_id": eid}
+
+
+@app.delete("/api/memory/external-events/{episode_id}")
+def delete_external_event(episode_id: str) -> dict[str, Any]:
+    """Hard-delete an external event. Idempotent — re-clicking
+    delete returns ok=true even when nothing remained (matches
+    delete_planned_workout's UX)."""
+    removed = memory_engine.delete_episode(episode_id)
+    return {"ok": True, "removed": removed, "episode_id": episode_id}
 
 
 @app.get("/api/memory/episodes/search")

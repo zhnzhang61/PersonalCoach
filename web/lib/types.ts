@@ -409,6 +409,39 @@ export interface CheckinsResponse {
 }
 
 // ==========================================
+// External context events (PR P5 — external context §4)
+// ==========================================
+//
+// User-logged events that contextualize sensor data: travel days
+// (jet lag), illness ranges, life-stress windows. Saved as CME
+// episodes with event_type ∈ {travel, illness, life_stress}; the
+// context dict carries start_date / end_date / description so the
+// list endpoint can range-filter without parsing prose.
+export type ExternalEventType = "travel" | "illness" | "life_stress";
+
+export interface ExternalEvent {
+  episode_id: string;
+  event_type: ExternalEventType;
+  start_date: string; // YYYY-MM-DD inclusive
+  end_date: string;
+  context: {
+    start_date?: string;
+    end_date?: string;
+    description?: string;
+    [key: string]: unknown;
+  };
+  lesson_learned?: string | null;
+  timestamp?: string;
+  related_topic_ids?: string[];
+}
+
+export interface ExternalEventsResponse {
+  start: string;
+  end: string;
+  events: ExternalEvent[];
+}
+
+// ==========================================
 // Planned workouts (PR P4a — intent layer §3, P4b — UI)
 // ==========================================
 //

@@ -187,6 +187,8 @@ def _build_processor_mock(tmp_dir: str = "/tmp/personalcoach_test") -> MagicMock
         "updated_at": "2026-05-27T12:00:00Z",
     }
     m.delete_planned_workout.return_value = True
+    # PR P5 — route profile + external events.
+    m.compute_route_profile.return_value = None
     m.get_training_load.return_value = {
         "window_days": 28, "acute_load_mi": 0.0, "chronic_load_mi": 0.0,
         "acwr": None,
@@ -278,6 +280,9 @@ def _build_memory_engine_mock() -> MagicMock:
     m.create_episode.return_value = "epi_mock"
     m.list_pending.return_value = []
     m.resolve_pending_question.return_value = True
+    # PR P5 — external context events (§4).
+    m.list_external_events.return_value = []
+    m.delete_episode.return_value = True
     return m
 
 

@@ -1678,6 +1678,122 @@ class DataProcessor:
                 return laps
         except Exception: return []
 
+    def compute_route_profile(self, activity_id: int) -> dict | None:
+        """Grade distribution + terrain summary for a single run (P5).
+
+        Reads the raw telemetry file directly (not the downsampled
+        bucket frame that the UI uses) so per-sample elevation deltas
+        stay sharp. Walks sample-to-sample, computes per-segment
+        grade (= delta_elev / delta_dist), and buckets distance into
+        5 grade bands. Net climb / max grade are scalars; the band
+        distribution is what the agent uses to reason about
+        terrain ("that was 60% rolling-up terrain — your HR drift
+        makes sense").
+
+        Returns None when the activity has no telemetry on disk
+        (treadmill / no GPS / not yet synced) or when we can't pull
+        elevation samples. Callers (the MCP tool + endpoint) treat
+        None as 404.
+        """
+        file_path = os.path.join(self.paths['details'], f"{activity_id}.json")
+        if not os.path.exists(file_path):
+            return None
+        try:
+            with open(file_path, 'r') as f:
+                raw_data = json.load(f)
+        except Exception:
+            return None
+
+        metrics_desc = raw_data.get('metricDescriptors', [])
+        metric_map = {m['key']: m['metricsIndex'] for m in metrics_desc}
+        elev_idx = metric_map.get('directElevation')
+        dist_idx = metric_map.get('sumDistance')
+        if elev_idx is None or dist_idx is None:
+            return None
+
+        details = raw_data.get('activityDetailMetrics', [])
+        if len(details) < 2:
+            return None
+
+        # 5 grade bands. Cutoffs picked empirically (running coach
+        # vocabulary, not road-bike): <-6% = "steep down", -6 to -2 =
+        # "rolling down", -2 to 2 = "flat", 2-6 = "rolling up", >6 =
+        # "steep up". Boundary at ±2% matches the threshold below
+        # which most runners can't feel the grade with their legs.
+        bands = [
+            ("steep_down", "<-6%", -float("inf"), -0.06),
+            ("rolling_down", "-6% to -2%", -0.06, -0.02),
+            ("flat", "-2% to 2%", -0.02, 0.02),
+            ("rolling_up", "2% to 6%", 0.02, 0.06),
+            ("steep_up", ">6%", 0.06, float("inf")),
+        ]
+        band_dist_m = {b[0]: 0.0 for b in bands}
+
+        gain_m = 0.0
+        loss_m = 0.0
+        max_grade = -float("inf")
+        min_grade = float("inf")
+        total_dist_m = 0.0
+
+        prev = None
+        for row in details:
+            m = row.get('metrics') or []
+            if elev_idx >= len(m) or dist_idx >= len(m):
+                continue
+            elev = m[elev_idx]
+            dist = m[dist_idx]
+            if elev is None or dist is None:
+                continue
+            if prev is not None:
+                d_elev = elev - prev[0]
+                d_dist = dist - prev[1]
+                if d_dist > 0.5:  # ignore sub-half-meter "noise" samples
+                    grade = d_elev / d_dist
+                    total_dist_m += d_dist
+                    if d_elev > 0:
+                        gain_m += d_elev
+                    else:
+                        loss_m += -d_elev
+                    if grade > max_grade:
+                        max_grade = grade
+                    if grade < min_grade:
+                        min_grade = grade
+                    for band_key, _, lo, hi in bands:
+                        if lo <= grade < hi:
+                            band_dist_m[band_key] += d_dist
+                            break
+            prev = (elev, dist)
+
+        if total_dist_m <= 0:
+            return None
+
+        meters_per_mile = 1609.34
+        feet_per_meter = 3.281
+
+        distribution = []
+        for band_key, label, _, _ in bands:
+            d_m = band_dist_m[band_key]
+            distribution.append({
+                "band": band_key,
+                "range": label,
+                "distance_mi": round(d_m / meters_per_mile, 2),
+                "pct": round(100 * d_m / total_dist_m, 1),
+            })
+
+        return {
+            "activity_id": activity_id,
+            "total_distance_mi": round(total_dist_m / meters_per_mile, 2),
+            "elevation_gain_ft": int(gain_m * feet_per_meter),
+            "elevation_loss_ft": int(loss_m * feet_per_meter),
+            "net_climb_ft": int((gain_m - loss_m) * feet_per_meter),
+            # Grades as percentages for AI readability ("8.4%" reads
+            # better than "0.084"). One decimal — the sub-tenth digit
+            # is GPS noise.
+            "max_grade_pct": round(max_grade * 100, 1),
+            "min_grade_pct": round(min_grade * 100, 1),
+            "grade_distribution": distribution,
+        }
+
     def get_activity_telemetry(self, activity_id, laps=None, downsample_sec=10):
         """Unchanged downsampling logic for the UI/Charts."""
         file_path = os.path.join(self.paths['details'], f"{activity_id}.json")

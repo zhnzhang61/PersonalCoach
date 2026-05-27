@@ -1,5 +1,6 @@
 import { format } from "date-fns";
 import { PageHeader } from "@/components/page-header";
+import { ExternalEvents } from "@/components/health/external-events";
 import { ReadinessCard } from "@/components/health/readiness-card";
 import { RecoveryChart } from "@/components/health/recovery-chart";
 import { SleepChart } from "@/components/health/sleep-chart";
@@ -16,6 +17,11 @@ export default function HealthPage() {
           * subjective state is the first thing the user reflects on,
           * and surfacing the question primes them to answer it. */}
         <TodaysCheckin />
+        {/* Context events (travel / illness / life stress) sit below
+          * the check-in but above the sensor cards. The agent reads
+          * these together with HRV/RHR to decide whether a number
+          * means something or is a known degraded-data day. */}
+        <ExternalEvents />
         <SnapshotCards />
         <ReadinessCard />
         <RecoveryChart days={30} />

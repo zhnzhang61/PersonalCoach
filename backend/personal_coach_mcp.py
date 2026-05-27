@@ -585,6 +585,71 @@ async def get_run_weather(activity_id: int) -> dict:
     }
 
 
+@mcp.tool()
+async def get_external_events(start: str, end: str) -> dict:
+    """List travel / illness / life_stress events overlapping
+    [start, end] (YYYY-MM-DD inclusive). P5 — external context §4.
+
+    The user logs these via the Health-tab quick-add card; they show
+    up here so the agent can explain "why does this week's HRV look
+    low?" with context the sensors can't see ("you flew to Tokyo
+    Tuesday — that's about 1 day of jet lag still in flight" or
+    "stomach bug 5/10-5/12 — discount HRV for a week").
+
+    Each event has:
+      • event_id (str)         — for delete via UI
+      • event_type             — travel | illness | life_stress
+      • start_date / end_date  — YYYY-MM-DD, inclusive
+      • description            — free text (verbatim from user)
+      • timestamp              — when the user logged it (not the
+                                 event date — for audit trail)
+
+    Use this routinely on review_workout and make_plan turns —
+    external context changes the meaning of objective numbers.
+    Empty list when nothing applies; don't treat that as an error,
+    just means the user has no logged externalities for that range."""
+    return await _get("/api/memory/external-events", start=start, end=end)
+
+
+@mcp.tool()
+async def get_run_route_profile(activity_id: int) -> dict:
+    """Terrain / grade-distribution summary for a run (P5 §4).
+
+    Returns total climb/loss in feet, max & min grade (%), and a
+    5-band distribution of distance by grade:
+      • steep_down  (<-6%)
+      • rolling_down (-6% to -2%)
+      • flat         (-2% to 2%)
+      • rolling_up   (2% to 6%)
+      • steep_up     (>6%)
+
+    Use this to ground terrain-related coaching ("60% of that run
+    was rolling-up — your HR drift makes sense" / "you cruised the
+    descents instead of working them"). Distinct from
+    `get_run_telemetry` which returns per-bucket time-series — this
+    is the AI-friendly collapsed shape, no histogram to interpret.
+
+    Returns a 404-ish empty dict when the run lacks GPS (treadmill,
+    no-sync, etc.) — check the returned `total_distance_mi`."""
+    try:
+        return await _get(f"/api/runs/{activity_id}/route-profile")
+    except Exception:
+        # Caller should branch on missing fields; surfacing the
+        # HTTPStatusError directly would force every consumer to
+        # try/except a 404 they're already expecting.
+        return {
+            "activity_id": activity_id,
+            "total_distance_mi": 0,
+            "elevation_gain_ft": 0,
+            "elevation_loss_ft": 0,
+            "net_climb_ft": 0,
+            "max_grade_pct": 0.0,
+            "min_grade_pct": 0.0,
+            "grade_distribution": [],
+            "note": "No GPS data — treadmill, untracked, or not yet synced.",
+        }
+
+
 # =============================================================================
 # 4. Training cycle / blocks / monthly
 # =============================================================================

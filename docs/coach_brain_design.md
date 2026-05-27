@@ -395,7 +395,7 @@ doc.
 | **P3** ✅ done 2026-05-27 | Daily check-in widget on Health tab top. `data/manual_inputs/daily_checkins.json` (one row per date, upsert semantics). DataProcessor CRUD: `upsert_checkin` / `get_checkin_by_date` / `list_checkins_in_range` / `delete_checkin` with int-range validation. Endpoints: `GET/POST/DELETE /api/checkins`. POST dual-writes a `daily_checkin` episode into CME (best-effort; CME failure doesn't 500 the save). MCP tool `get_recent_checkins(days=7)`. Frontend: `<TodaysCheckin>` card with 4 ordinal scales (sleep_quality 1-5, soreness 0-5, mood 1-5, motivation 1-5) as tap-to-select rows + optional notes. Filled state = compact chip summary + Edit pencil. Key-reset pattern (not setState-in-effect) for draft refresh after save. 29 new tests. | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
 | **P4a** ✅ done 2026-05-27 | Planned workouts (intent layer §3) — agent → Cal → user-phone loop. JSON storage at `data/manual_inputs/planned_workouts.json` + CRUD endpoints. Google Cal `SCOPES` switched to `calendar.events` (read+write); existing users re-authorize once on next /api/calendar/connect. New `GoogleCalendar` methods `insert_event` / `update_event` / `delete_event` (events are silent — `reminders.useDefault=False`). MCP tools `propose_workout_plan(workouts)` and `get_planned_workouts(start, end)`. Today-date pinned into the system prompt via `_build_prompt` callable (agent had no date anchor and was scheduling in the past). Cal-write failures degrade to JSON-only. | ~2.5 days + 4 follow-up fix PRs | Closes the actual value loop: AI gives a plan, it lands on the user's phone Cal. Cal-read-only meant copy-paste 30 fields — unworkable. |
 | **P4b** ✅ done 2026-05-27 | Manual editing UI + plan-vs-actual deviation compute. Training tab gets `<UpcomingWorkouts>` (next 14 days, each row taps into an `<EditWorkoutModal>`). "+ Add" button creates plans manually outside the chat flow. Edit/delete sync to Google Cal via P4a's PUT/DELETE endpoints. Backend gains `_compute_plan_deviation_for_summary` + `GET /api/runs/{id}/plan-deviation`; MCP tool `get_plan_actual_deviation(activity_id)` returns `{matched, planned, actual, deltas}` (only fields the plan pinned get a delta; `actual - planned` convention). `/api/calendar/events` server-side reclassifies Google events whose description carries `personalcoach.training=true` from `source: "google"` to `source: "planned_workout"`, dyed amber on `PlanCalendar` (vs slate for life events, green for completed runs). 9 new tests. | ~1 day | Polishes the user side — manage plans without going through chat or Google Cal. Deviation compute powers the "did you do what we said?" coaching turn. |
-| **P5** | External context channels (§4): travel / illness / life-stress quick-add UI + new episode types + weather/menstrual MCP surface (already-synced data not exposed) | ~1-2 days | Closes "agent can't see why" gap. Mostly surfacing existing data + small UI for free-text events. |
+| **P5** ✅ done 2026-05-27 | External context channels (§4). Backend: new `compute_route_profile(activity_id)` returns 5-band grade distribution + climb/loss/min-max grade; `GET /api/runs/{id}/route-profile` + MCP tool `get_run_route_profile` (404 → safe-empty payload). CME gains `EXTERNAL_EVENT_TYPES` (`travel`/`illness`/`life_stress`), `list_external_events(start, end)` with date-range overlap + ASC ordering + timestamp fallback, and `delete_episode(id)` (idempotent, also cleans `topic_episode_links`). New endpoints `GET/POST/DELETE /api/memory/external-events` with whitelist+range+description validation. MCP tool `get_external_events(start, end)`. Frontend: `<ExternalEvents>` card on Health tab with type-colored chips (travel=sky, illness=rose, life_stress=amber) + add modal (type pills, date range with `min={start}` guard on end picker, description with type-specific placeholder, save blocked when description empty or range inverted). Weather was already inlined on `get_run_detail` (no work needed). Menstrual MCP surface deferred — user's `get_menstrual_calendar_data` files are all empty for this profile, no point shipping an empty tool. 26 new tests. | ~1 day | Closes the "agent can't see why" gap. Three new user-supplied context channels + terrain awareness on every run. |
 | **P6** | First batch of stat-derived models (§1, §5): aerobic decoupling per run, pace-HR table for tempos, cadence baseline, sleep debt, cycle-volume diff. Each follows P1+P2 stat-derivation path. | ~2-3 days | First real B-bucket payloads. Builds on P1 store + P2 pipeline. |
 
 ### Phase 3 — Trace upgrade
@@ -455,21 +455,30 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: P5** — External context channels (§4). Travel / illness
-/ life-stress quick-add UI on the Health tab + new episode types
-(`travel`, `illness`, `life_event`) on the CME side so the agent
-can correlate them with HRV/recovery. Plus surfacing already-synced
-weather/menstrual data through new MCP tools (data is there, the
-agent just can't see it).
+**Next PR: P6** — First batch of stat-derived models (§1, §5). Each
+follows the P1+P2 path: derivation function reads from data_processor,
+computes a parameterized observation, persists via `create_model`,
+agent surfaces via `get_model`/`list_models`. Candidates from the
+roadmap:
+- `aerobic.decoupling_per_run` (linear_trend) — pace/HR drift across
+  the second half vs first half of an aerobic run
+- `tempo.pace_hr_table` (lookup) — typical pace at each HR band on
+  tempo days
+- `cadence.baseline` (mean_std) — steady-state cadence at easy effort
+- `sleep.debt_14d` (rolling) — running 14-day sleep deficit
+- `cycle.weekly_volume_diff` — diff vs last week's mileage
 
-Suggested branch: `add-external-context-channels`.
+Pick 2 to ship together so each model gets exercised end-to-end
+(derivation + persist + retrieval + agent prompt) before chaining 5.
 
-Phase 0 + Phase 1 + P1–P4b complete. All four agent input streams
-now live: objective (Garmin sensors), perceived (check-ins),
-planned (Cal-synced workouts with edit UI + deviation compute),
-patterns (models). P5 adds external-context channels (travel /
-illness / weather); P6 lands the first batch of stat-derived
-models.
+Suggested branch: `add-stat-derived-models-batch1`.
+
+Phase 0 + Phase 1 + P1–P5 complete. All four agent input streams
+now live: objective (Garmin sensors + weather + terrain), perceived
+(check-ins), planned (Cal-synced workouts with deviation compute),
+external (travel/illness/life-stress episodes), patterns (model
+store, but only the HRV baseline so far). P6 fills in real
+B-bucket model payloads.
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
