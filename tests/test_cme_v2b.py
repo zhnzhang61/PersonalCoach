@@ -48,6 +48,16 @@ def mem(tmp_path):
         db_path=str(tmp_path / "cme.db"),
         semantic_profile_path=str(tmp_path / "sem.json"),
     )
+    # Rebuild `topics` to add Conflicting status + open_question +
+    # conflict_context. As of PR P2 (2026-05-27) _SCHEMA_SQL canonically
+    # includes related_models / event_timestamp columns + topic_episode_links,
+    # and MemoryOS.__init__ runs the matching migrations, so the v2b
+    # fixture only needs to handle the topics rebuild — the rest is
+    # now base init.
+    #
+    # TODO: a future PR should add a `_migrate_topics_conflict_columns`
+    # migration so this fixture becomes empty too. Logged in
+    # IMPROVEMENTS §5 ("CME schema completeness in _SCHEMA_SQL").
     m.conn.executescript(
         """
         BEGIN;
@@ -61,30 +71,17 @@ def mem(tmp_path):
             open_question TEXT,
             conflict_context TEXT,
             related_episodes TEXT DEFAULT '[]',
+            related_models TEXT DEFAULT '[]',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
         INSERT INTO topics_new SELECT topic_id, root_category, name, status,
-            working_conclusion, NULL, NULL, related_episodes, created_at, updated_at
+            working_conclusion, NULL, NULL, related_episodes, related_models,
+            created_at, updated_at
         FROM topics;
         DROP TABLE topics;
         ALTER TABLE topics_new RENAME TO topics;
         CREATE INDEX idx_topics_status ON topics(status);
-
-        ALTER TABLE episodes ADD COLUMN event_timestamp TEXT;
-        ALTER TABLE episodes ADD COLUMN event_date_text TEXT;
-        ALTER TABLE episodes ADD COLUMN timestamp_source TEXT;
-
-        CREATE TABLE topic_episode_links (
-            topic_id TEXT NOT NULL,
-            episode_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (topic_id, episode_id),
-            FOREIGN KEY (topic_id) REFERENCES topics(topic_id) ON DELETE CASCADE,
-            FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
-        );
-        CREATE INDEX idx_tel_episode ON topic_episode_links(episode_id);
-        CREATE INDEX idx_tel_topic ON topic_episode_links(topic_id);
         COMMIT;
         """
     )

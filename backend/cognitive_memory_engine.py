@@ -53,12 +53,15 @@ CREATE TABLE IF NOT EXISTS topics (
 
 CREATE TABLE IF NOT EXISTS episodes (
     episode_id        TEXT PRIMARY KEY,
-    timestamp         TEXT NOT NULL,
+    timestamp         TEXT NOT NULL,       -- when row was created
     event_type        TEXT NOT NULL,
     context_json      TEXT NOT NULL,       -- full 5W1H+E JSON
     lesson_learned    TEXT,
-    related_topic_ids TEXT DEFAULT '[]',   -- JSON array
-    created_at        TEXT NOT NULL
+    related_topic_ids TEXT DEFAULT '[]',   -- JSON array (legacy; canonical is junction)
+    created_at        TEXT NOT NULL,
+    event_timestamp   TEXT,                -- ISO date the event actually happened (≠ row creation)
+    event_date_text   TEXT,                -- user's original date phrase ("上周三" etc.)
+    timestamp_source  TEXT                 -- 'user_explicit' | 'caller' | 'unknown'
 );
 
 CREATE TABLE IF NOT EXISTS pending_clarifications (
@@ -94,6 +97,25 @@ CREATE TABLE IF NOT EXISTS topic_decisions (
     created_at      TEXT NOT NULL,
     resolved_at     TEXT
 );
+
+-- Junction: topic ↔ episode (v2 canonical, replaces the legacy
+-- JSON array on topics.related_episodes + episodes.related_topic_ids).
+-- This table has existed in production cognition.db since the v2
+-- migration but was never added to _SCHEMA_SQL, which meant fresh
+-- DBs (tests, ad-hoc scripts) had to bootstrap it manually. Added
+-- here in PR P2 since propose_model_from_topic / get_topic_episodes
+-- now exercise it from fresh DBs in tests. Idempotent CREATE IF NOT
+-- EXISTS so existing DBs (which have it) aren't affected.
+CREATE TABLE IF NOT EXISTS topic_episode_links (
+    topic_id   TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (topic_id, episode_id),
+    FOREIGN KEY (topic_id)   REFERENCES topics(topic_id)   ON DELETE CASCADE,
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tel_episode ON topic_episode_links(episode_id);
+CREATE INDEX IF NOT EXISTS idx_tel_topic   ON topic_episode_links(topic_id);
 
 -- Pattern store (PR P1). Parallel to `episodes`: each row is a
 -- parameterized observation about the user — "your HRV recovery
@@ -157,6 +179,7 @@ class MemoryOS:
         self.conn.commit()
         self._migrate_topic_decisions_check()
         self._migrate_topics_related_models()
+        self._migrate_episodes_event_timestamp_columns()
 
         # In-memory topic-embedding cache.
         #
@@ -248,6 +271,27 @@ class MemoryOS:
         self.conn.execute(
             "ALTER TABLE topics ADD COLUMN related_models TEXT DEFAULT '[]'"
         )
+        self.conn.commit()
+
+    def _migrate_episodes_event_timestamp_columns(self) -> None:
+        """PR P2: episodes carry event_timestamp / event_date_text /
+        timestamp_source (the LLM-derived event-time tracking). These
+        existed in production cognition.db from a prior ALTER but
+        were never added to _SCHEMA_SQL, so fresh DBs hit
+        sqlite3.OperationalError on get_topic_episodes (which JOINs
+        ORDER BY COALESCE(event_timestamp, timestamp)). Idempotent:
+        skip any column already present."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(episodes)")}
+        additions = [
+            ("event_timestamp", "TEXT"),
+            ("event_date_text", "TEXT"),
+            ("timestamp_source", "TEXT"),
+        ]
+        for name, type_ in additions:
+            if name not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE episodes ADD COLUMN {name} {type_}"
+                )
         self.conn.commit()
 
     def _now(self) -> str:
@@ -721,6 +765,257 @@ class MemoryOS:
         return True
 
     # ------------------------------------------------------------------
+    # Model proposal pipeline (PR P2 — episode → model generalize)
+    # ------------------------------------------------------------------
+    #
+    # When a topic has accumulated enough episodes, ask the LLM whether
+    # the events are parametrically generalizable into a model. If so,
+    # the proposal lands in topic_decisions for user confirmation
+    # (chat-driven via MCP tools — no separate /memory page in MVP).
+    #
+    # Trigger is manual today (user clicks a button, or asks the agent
+    # in chat to scan a topic). Cron-based auto-trigger is deferred to
+    # a follow-up.
+
+    PROPOSAL_VERSION = "v1"  # bump on _PROPOSAL_PROMPT edits; lands in trace
+
+    _PROPOSAL_PROMPT = """你正在帮助提炼一个跑步教练系统的"模式库"。
+
+下面是一个 topic 及其关联的 episodes（事件）。判断这些事件是否可以提炼成一个可参数化的模型（model），用于今后量化追踪。
+
+**Topic**:
+{topic_block}
+
+**Episodes** ({n_episodes} 个):
+{episodes_block}
+
+**已有 models（避免重复）**:
+{existing_models_block}
+
+判断标准：
+- 至少 3 个相关 episodes 才考虑提议
+- 事件之间应有可量化的共性（数值、频率、形状）
+- 如果已有 model 已经覆盖了这个 pattern，不要重复提议
+- 不确定时返回 propose=false 比乱建好
+
+可用 model_type:
+  decay         — 衰减/恢复曲线，params 含 peak_drop_day / peak_drop_pct / return_to_baseline_day
+  linear_trend  — 趋势/斜率，params 含 slope / intercept / unit
+  mean_std      — 基线 + 离散，params 含 mean / sd / window 或 sample 描述
+  ordinal_score — 按桶分数，params 含 scores: {{key: float}}
+  rate          — 比率/概率，params 含 by_X: {{key: float}} 或 overall_rate
+  fixed_obs     — 一次性快照观察，params 自由 shape
+
+返回 JSON（仅这两种形式之一，不要多余文字）：
+
+{{
+  "propose": true,
+  "model_key": "category.short_descriptive_key",
+  "name": "中文标签",
+  "category": "Health/Recovery" | "Running/Performance" | ...,
+  "model_type": "decay" | "linear_trend" | ...,
+  "params": {{ ... 与 model_type 匹配的字段 ... }},
+  "n_samples": <实际支撑参数的事件数>,
+  "confidence": "low" | "medium" | "high",
+  "rationale": "1-2 句解释为什么这些 episodes 适合参数化"
+}}
+
+或：
+
+{{
+  "propose": false,
+  "reason": "为什么这些 episodes 还不能 / 不适合参数化"
+}}
+"""
+
+    MIN_EPISODES_TO_PROPOSE = 3
+
+    @staticmethod
+    def _strip_llm_json(text: str) -> str:
+        """Strip the common LLM JSON-wrapping artifacts before
+        json.loads: leading/trailing whitespace, ```json fences, or
+        leading prose with a JSON block embedded. If the cleaned
+        string still doesn't parse, the caller surfaces llm_error and
+        returns the raw text for debugging."""
+        s = text.strip()
+        # Markdown code fence: ```json\n...\n``` or ```\n...\n```
+        if s.startswith("```"):
+            first_nl = s.find("\n")
+            if first_nl > 0:
+                s = s[first_nl + 1:]
+            if s.rstrip().endswith("```"):
+                s = s.rsplit("```", 1)[0]
+            s = s.strip()
+        # If there's prose before/after a clean JSON object, slice
+        # from the first '{' to the last '}'. Conservative — works
+        # for single top-level object responses (which our prompt
+        # asks for) but not arrays.
+        if not s.startswith("{") and "{" in s:
+            first = s.find("{")
+            last = s.rfind("}")
+            if first >= 0 and last > first:
+                s = s[first:last + 1]
+        return s
+
+    def propose_model_from_topic(
+        self, topic_id: str, *, trigger: str = "manual"
+    ) -> dict:
+        """
+        Ask the LLM whether the topic's related episodes can be
+        parameterized into a model. Either parks a 'new_model'
+        decision (user confirms in chat / via API) or returns
+        a no-op result with a reason.
+
+        `trigger`: free-form label ('manual' / 'cron' / 'post_consolidate')
+        recorded in the trace + decision proposal so we can grep by
+        source. Defaults to 'manual'.
+
+        Returns a dict shaped:
+          {"status": "parked",       "decision_id": "dec_...", "proposal": {...}}
+          {"status": "skipped",      "reason": "..."}
+          {"status": "llm_error",    "raw": "...", "reason": "..."}
+
+        Skipped cases:
+          - topic doesn't exist → status='skipped', reason='topic_missing'
+          - < MIN_EPISODES_TO_PROPOSE episodes → status='skipped', reason='too_few_episodes'
+          - LLM says propose=false → status='skipped', reason=<LLM's reason>
+        """
+        topic = self.get_topic(topic_id)
+        if not topic:
+            return {"status": "skipped", "reason": "topic_missing"}
+
+        episodes = self.get_topic_episodes(topic_id, limit=50)
+        if len(episodes) < self.MIN_EPISODES_TO_PROPOSE:
+            return {
+                "status": "skipped",
+                "reason": "too_few_episodes",
+                "n_episodes": len(episodes),
+                "min_required": self.MIN_EPISODES_TO_PROPOSE,
+            }
+
+        # Existing models linked to this topic — included in the prompt
+        # so the LLM doesn't propose duplicates. Lookup by model_id.
+        existing_ids = topic.get("related_models", []) or []
+        existing_models = []
+        for mid in existing_ids:
+            row = self.conn.execute(
+                "SELECT model_key, name, model_type, params_json "
+                "FROM models WHERE model_id = ?", (mid,)
+            ).fetchone()
+            if row:
+                existing_models.append({
+                    "model_key": row["model_key"],
+                    "name": row["name"],
+                    "model_type": row["model_type"],
+                    "params": json.loads(row["params_json"] or "{}"),
+                })
+
+        # Build the prompt block-by-block — keeps payload predictable
+        # and easier to grep in the trace row.
+        topic_block = json.dumps(
+            {
+                "name": topic["name"],
+                "category": topic.get("root_category"),
+                "status": topic["status"],
+                "working_conclusion": topic.get("working_conclusion"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        episodes_block = json.dumps(
+            [
+                {
+                    "event_type": e["event_type"],
+                    "timestamp": e.get("timestamp"),
+                    "context": e.get("context"),  # 5W1H+E
+                    "lesson_learned": e.get("lesson_learned"),
+                }
+                for e in episodes
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        existing_models_block = (
+            json.dumps(existing_models, ensure_ascii=False, indent=2)
+            if existing_models else "(none)"
+        )
+
+        prompt = self._PROPOSAL_PROMPT.format(
+            topic_block=topic_block,
+            n_episodes=len(episodes),
+            episodes_block=episodes_block,
+            existing_models_block=existing_models_block,
+        )
+
+        # Trace the whole proposal call so we can grep
+        # `kind='model_propose'` later for "why didn't the LLM propose
+        # X?" debugging.
+        with self.tracer.turn(
+            kind="model_propose",
+            thread_id=f"topic:{topic_id}",
+            prompt_version=self.PROPOSAL_VERSION,
+            prompt_hash="cme_propose_v1",
+            user_input=topic["name"],
+        ) as trace:
+            trace.extras["trigger"] = trigger
+            trace.extras["n_episodes"] = len(episodes)
+            trace.extras["existing_models"] = [m["model_key"] for m in existing_models]
+
+            raw = self._llm_invoke(prompt)
+            trace.final_answer = raw[:500]
+
+            # LLMs occasionally wrap JSON in markdown code fences
+            # (```json ... ```) or include leading prose. Be lenient:
+            # strip a leading fence + trailing fence, and if that still
+            # doesn't parse, try to locate the first { ... } block.
+            cleaned = self._strip_llm_json(raw)
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                trace.extras["parse_error"] = str(e)
+                return {
+                    "status": "llm_error",
+                    "raw": raw[:500],
+                    "reason": f"unparseable JSON: {e}",
+                }
+
+            if not parsed.get("propose"):
+                return {
+                    "status": "skipped",
+                    "reason": parsed.get("reason") or "llm_declined",
+                }
+
+            # LLM proposes — validate the required fields are there
+            # before parking. Don't validate model_type strictly here
+            # (let park surface as-is so user can see the LLM's full
+            # output even if it's malformed); resolve will validate
+            # before insert.
+            for required in ("model_key", "name", "model_type", "params"):
+                if required not in parsed:
+                    return {
+                        "status": "llm_error",
+                        "raw": raw[:500],
+                        "reason": f"missing required field: {required}",
+                    }
+
+            # Wrap the LLM proposal with the topic_id so resolve knows
+            # what to link the resulting model to.
+            proposal = {
+                "topic_id": topic_id,
+                "trigger": trigger,
+                **parsed,  # propose, model_key, name, category, model_type, params, n_samples, confidence, rationale
+            }
+            decision_id = self.park_topic_decision(
+                kind="new_model", proposal=proposal, candidates=[]
+            )
+            trace.extras["decision_id"] = decision_id
+            return {
+                "status": "parked",
+                "decision_id": decision_id,
+                "proposal": proposal,
+            }
+
+    # ------------------------------------------------------------------
     # Pending Clarifications CRUD
     # ------------------------------------------------------------------
     def create_pending(
@@ -1088,10 +1383,16 @@ class MemoryOS:
     ) -> str:
         """
         Queue a consolidation proposal that the matcher couldn't auto-resolve.
-        kind: 'new_topic' | 'conflict' | 'episode_linking'. UI surfaces
-        pending rows for user action.
+        kind: 'new_topic' | 'conflict' | 'episode_linking' | 'new_model'.
+        UI / chat surfaces pending rows for user action.
+
+        PR P2 added 'new_model' for the pattern-store proposal pipeline:
+        when the LLM concludes that a topic's accumulated episodes are
+        parametrically generalizable, it proposes a model_key + params,
+        and the agent (or any explicit /memory route in the future)
+        asks the user to confirm.
         """
-        if kind not in ("new_topic", "conflict", "episode_linking"):
+        if kind not in ("new_topic", "conflict", "episode_linking", "new_model"):
             raise ValueError(f"Unknown decision kind: {kind}")
         decision_id = f"dec_{uuid.uuid4().hex[:8]}"
         self.conn.execute(
@@ -1193,6 +1494,48 @@ class MemoryOS:
                     status=proposal.get("status", "Open"),
                     working_conclusion=proposal.get("working_conclusion"),
                 )
+            elif kind == "new_model":
+                # PR P2: confirm the LLM-proposed model — create the
+                # model row and link it back to the source topic. The
+                # proposal carries every field create_model needs
+                # (validated by propose_model_from_topic), plus
+                # topic_id added at park time.
+                source_topic_id = proposal.get("topic_id")
+                if not source_topic_id:
+                    raise ValueError(
+                        "new_model proposal missing topic_id "
+                        "(propose_model_from_topic should have set this)"
+                    )
+                model_id = self.create_model(
+                    model_key=proposal["model_key"],
+                    name=proposal["name"],
+                    category=proposal.get("category", "General"),
+                    model_type=proposal["model_type"],
+                    params_json=proposal.get("params") or {},
+                    derivation_method="llm",  # came from LLM, not stat
+                    n_samples=int(proposal.get("n_samples") or 0),
+                    confidence=proposal.get("confidence"),
+                    evidence_json={
+                        "episode_count_at_proposal": int(
+                            proposal.get("n_samples") or 0
+                        ),
+                        "proposal_rationale": proposal.get("rationale"),
+                        "trigger": proposal.get("trigger", "manual"),
+                    },
+                    status="Forming",  # llm-derived starts Forming until stat refit
+                )
+                self.link_topic_to_model(source_topic_id, model_id)
+                # Override the resolution string format below — models
+                # use mdl_ prefix so the "created:tpc_xxx" pattern
+                # doesn't fit; we set it inline and skip the default.
+                self.conn.execute(
+                    """UPDATE topic_decisions
+                       SET status = 'created', resolution = ?, resolved_at = ?
+                       WHERE decision_id = ?""",
+                    (f"created:{model_id}", self._now(), decision_id),
+                )
+                self.conn.commit()
+                return model_id  # early return: skip the trailing UPDATE
             else:  # conflict → create Conflicting topic from scratch
                 result_tid = f"tpc_{uuid.uuid4().hex[:8]}"
                 now = self._now()

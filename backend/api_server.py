@@ -1173,6 +1173,67 @@ def get_model(model_key: str) -> dict[str, Any]:
     return m
 
 
+class DecisionResolveInput(BaseModel):
+    """Input for /api/memory/decisions/{id}/resolve. action enum
+    matches MemoryOS.resolve_topic_decision's action arg."""
+    action: Literal["merge", "create_new", "link", "reject"]
+    target_topic_id: str | None = None
+    target_topic_ids: list[str] | None = None
+
+
+@app.get("/api/memory/decisions")
+def list_decisions() -> dict[str, Any]:
+    """List pending topic_decisions queue items.
+
+    PR P2 added kind='new_model' so agents (via MCP) and any future
+    UI can iterate over pending model proposals + existing
+    pending new_topic / conflict / episode_linking items together.
+    Filter client-side on `kind` for narrow views."""
+    return {"decisions": memory_engine.list_pending_decisions()}
+
+
+@app.post("/api/memory/decisions/{decision_id}/resolve")
+def resolve_decision(
+    decision_id: str, body: DecisionResolveInput
+) -> dict[str, Any]:
+    """Apply user's verdict on a parked decision.
+
+    For kind='new_model':
+      - action='create_new' → creates a model + links to source topic;
+        returns model_id in `result`.
+      - action='reject' → marks the row resolved with no side effects.
+    """
+    try:
+        result = memory_engine.resolve_topic_decision(
+            decision_id,
+            action=body.action,
+            target_topic_id=body.target_topic_id,
+            target_topic_ids=body.target_topic_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if result == "":
+        raise HTTPException(
+            404, f"decision {decision_id!r} not found or already resolved"
+        )
+    return {"ok": True, "result": result}
+
+
+@app.post("/api/memory/topics/{topic_id}/propose_model")
+def propose_model(topic_id: str) -> dict[str, Any]:
+    """PR P2 manual trigger. Ask the LLM whether `topic_id`'s
+    accumulated episodes are parametrically generalizable; on yes,
+    parks a 'new_model' decision the user can confirm via
+    /api/memory/decisions/{id}/resolve (or MCP `resolve_decision`).
+
+    Response shape mirrors propose_model_from_topic:
+      {status: 'parked',     decision_id, proposal}
+      {status: 'skipped',    reason, ...}
+      {status: 'llm_error',  raw, reason}
+    """
+    return memory_engine.propose_model_from_topic(topic_id)
+
+
 @app.post("/api/memory/models/refit/{model_key}")
 def refit_model(model_key: str) -> dict[str, Any]:
     """Manually trigger a stat-derived model refit. PR P1 ships only
