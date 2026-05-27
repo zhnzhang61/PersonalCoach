@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from subprocess import CompletedProcess
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -258,6 +259,120 @@ class TestAiSessions:
         resp = client.delete("/api/ai/sessions/random_thread_xyz")
         assert resp.status_code == 400
         assert "non-coach" in resp.json()["detail"]
+
+
+class TestAiChatStream:
+    """SSE variant of /api/ai/chat (PR C).
+
+    The endpoint wraps `agent.chat_stream` — an async generator
+    yielding {type, ...} dicts — in a StreamingResponse with
+    text/event-stream framing. Tests mock chat_stream to control
+    the event sequence and assert the SSE wire shape.
+    """
+
+    @staticmethod
+    def _fake_stream(events):
+        """Build an async generator that yields a fixed list of events."""
+
+        async def _gen():
+            for ev in events:
+                yield ev
+
+        return _gen()
+
+    def test_streams_tokens_then_done(self, client):
+        import backend.api_server as api_server
+
+        api_server.agent.chat_stream = MagicMock(
+            return_value=self._fake_stream([
+                {"type": "token", "content": "Hello"},
+                {"type": "token", "content": " world"},
+                {"type": "done"},
+            ])
+        )
+        resp = client.post(
+            "/api/ai/chat/stream",
+            json={"thread_id": "coach_20260513T120000Z", "message": "hi"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        # X-Accel-Buffering header prevents proxy buffering — kills UX without it.
+        assert resp.headers.get("x-accel-buffering") == "no"
+
+        body = resp.text
+        # Three SSE frames, each terminated by blank line.
+        assert "event: token\ndata: " in body
+        assert "event: done\ndata: " in body
+        # JSON payloads should be parseable.
+        import json as _json
+        frames = [f for f in body.split("\n\n") if f.strip()]
+        events = []
+        for frame in frames:
+            for line in frame.split("\n"):
+                if line.startswith("data: "):
+                    events.append(_json.loads(line[6:]))
+        assert events == [
+            {"type": "token", "content": "Hello"},
+            {"type": "token", "content": " world"},
+            {"type": "done"},
+        ]
+
+    def test_forwards_chat_stream_kwargs(self, client):
+        import backend.api_server as api_server
+
+        api_server.agent.chat_stream = MagicMock(
+            return_value=self._fake_stream([{"type": "done"}])
+        )
+        client.post(
+            "/api/ai/chat/stream",
+            json={
+                "thread_id": "coach_20260513T120000Z",
+                "message": "hi",
+                "system_context": "extra context",
+            },
+        )
+        api_server.agent.chat_stream.assert_called_once_with(
+            user_input="hi",
+            thread_id="coach_20260513T120000Z",
+            system_context="extra context",
+        )
+
+    def test_error_event_passes_through(self, client):
+        """When chat_stream yields an error event (rate limit, model
+        failure, etc.) the endpoint frames it as event: error so the
+        client can parse + react."""
+        import backend.api_server as api_server
+
+        api_server.agent.chat_stream = MagicMock(
+            return_value=self._fake_stream([
+                {"type": "error", "message": "429 rate limit"},
+            ])
+        )
+        resp = client.post(
+            "/api/ai/chat/stream",
+            json={"thread_id": "coach_20260513T120000Z", "message": "hi"},
+        )
+        assert resp.status_code == 200
+        assert "event: error\n" in resp.text
+        assert "429 rate limit" in resp.text
+
+    def test_unicode_in_token_payload_preserved(self, client):
+        """Token content is often Chinese — ensure_ascii=False on the
+        JSON dump must round-trip without escaping to \\uXXXX."""
+        import backend.api_server as api_server
+
+        api_server.agent.chat_stream = MagicMock(
+            return_value=self._fake_stream([
+                {"type": "token", "content": "今日恢复良好"},
+                {"type": "done"},
+            ])
+        )
+        resp = client.post(
+            "/api/ai/chat/stream",
+            json={"thread_id": "coach_20260513T120000Z", "message": "hi"},
+        )
+        assert "今日恢复良好" in resp.text  # raw, not \u-escaped
+        assert "\\u" not in resp.text.split("event: token")[1].split("\n\n")[0]
 
 
 class TestAiHistory:

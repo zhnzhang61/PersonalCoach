@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 # (FileResponse import removed alongside the legacy GET / route.)
 from pydantic import BaseModel, Field
 
@@ -865,6 +866,53 @@ def ai_chat(body: ChatInput) -> dict[str, Any]:
         system_context=body.system_context,
     )
     return {"thread_id": body.thread_id, "answer": answer}
+
+
+@app.post("/api/ai/chat/stream")
+async def ai_chat_stream(body: ChatInput):
+    """SSE variant of /api/ai/chat. Yields LLM tokens as they arrive
+    so the Coach UI can show "live typing" instead of blocking ~10s
+    on tool-using turns.
+
+    Frame format follows the EventSource spec:
+        event: <type>\\n
+        data: <json>\\n
+        \\n
+
+    Event types (see AgenticCoach.chat_stream for the source):
+      token      — {"type":"token", "content":"..."}
+      tool_call  — {"type":"tool_call", "name":"..."}
+      done       — {"type":"done"}
+      error      — {"type":"error", "message":"..."}
+
+    On `done`, the frontend should invalidate /api/ai/history to pick
+    up the canonical message rows (with per-message ts from PR #71).
+    The full state — including tool calls and the final AI message —
+    has been committed to the checkpointer by then.
+
+    Note: cancellation mid-stream is NOT yet wired up. If the client
+    disconnects, the underlying agent run continues to completion in
+    the background. Add an abort path here when we need it (separate
+    PR).
+    """
+    async def event_source():
+        async for ev in agent.chat_stream(
+            user_input=body.message,
+            thread_id=body.thread_id,
+            system_context=body.system_context,
+        ):
+            payload = json.dumps(ev, ensure_ascii=False)
+            yield f"event: {ev['type']}\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            # Prevent proxies from buffering — kills the streaming UX.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==========================================================================

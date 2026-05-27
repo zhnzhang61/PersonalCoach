@@ -4,13 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, Loader2 } from "lucide-react";
-import { apiDelete, apiGet, apiPost } from "@/lib/api";
+import { apiDelete, apiGet, apiPost, streamSSE } from "@/lib/api";
 import { classifyCoachError } from "@/lib/coach-errors";
 import { useCoachSession } from "@/lib/hooks/use-coach-session";
 import type {
   CoachActionName,
   CoachActionResponse,
-  CoachChatResponse,
   CoachHistoryResponse,
   CoachMessage,
   CoachSession,
@@ -103,6 +102,17 @@ export function CoachThread() {
   const [archiveToast, setArchiveToast] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Optimistic state during a streaming chat turn. While the SSE
+  // stream is open we show the user's just-sent message + an
+  // accumulating AI bubble so the user sees tokens arriving instead
+  // of staring at a spinner for 10s. On `done` we drop this and
+  // refresh /api/ai/history to pick up the canonical messages (with
+  // ts from PR #71).
+  const [streamingTurn, setStreamingTurn] = useState<{
+    userMessage: string;
+    aiContent: string;
+  } | null>(null);
+
   const refreshAll = () => {
     qc.invalidateQueries({ queryKey: ["coach"] });
   };
@@ -175,20 +185,72 @@ export function CoachThread() {
     return null;
   };
 
+  /**
+   * Stream a chat turn over SSE. Returns:
+   *   "ok"               — stream completed cleanly
+   *   ErrInfo            — failed; caller decides whether to retry
+   * Side effects: appends tokens into `streamingTurn.aiContent` so
+   * the live bubble renders progress.
+   */
+  const tryStreamChat = async (
+    tid: string,
+    text: string,
+  ): Promise<"ok" | ReturnType<typeof classifyCoachError>> => {
+    setStreamingTurn({ userMessage: text, aiContent: "" });
+    let streamError: ReturnType<typeof classifyCoachError> | null = null;
+    try {
+      await streamSSE(
+        "/api/ai/chat/stream",
+        { thread_id: tid, message: text },
+        (ev) => {
+          if (ev.type === "token") {
+            setStreamingTurn((prev) =>
+              prev ? { ...prev, aiContent: prev.aiContent + ev.content } : prev,
+            );
+          } else if (ev.type === "error") {
+            streamError = classifyCoachError(ev.message);
+          }
+          // tool_call + done are informational here — `done` is
+          // implicit when the SSE source closes; we let the loop
+          // exit on its own.
+        },
+      );
+    } catch (e) {
+      return classifyCoachError((e as Error).message);
+    }
+    return streamError ?? "ok";
+  };
+
   const sendChat = async (text: string) => {
     const tid = ensureCurrent();
     setPending("chat");
     setErrorMsg(null);
-    await callWithRetry(
-      () =>
-        apiPost<CoachChatResponse>("/api/ai/chat", {
-          thread_id: tid,
-          message: text,
-        }),
-      // /api/ai/chat doesn't shape errors into the body — failures
-      // come back as thrown HTTP errors only.
-      () => null,
-    );
+
+    // Single retry on rate-limit, mirroring the old sync flow's
+    // callWithRetry behavior. We can't retry mid-stream (partial
+    // tokens already rendered), so retry means a fresh attempt with
+    // a fresh streaming bubble.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await tryStreamChat(tid, text);
+      if (result === "ok") {
+        setErrorMsg(null);
+        break;
+      }
+      if (
+        result.kind === "rate_limit" &&
+        attempt === 0 &&
+        result.retryAfterSec
+      ) {
+        setErrorMsg(result.message);
+        setStreamingTurn(null); // clear partial bubble before retry
+        await new Promise((r) => setTimeout(r, result.retryAfterSec! * 1000));
+        continue;
+      }
+      setErrorMsg(result.message);
+      break;
+    }
+
+    setStreamingTurn(null);
     refreshAll();
     setPending(null);
   };
@@ -244,12 +306,14 @@ export function CoachThread() {
     return () => clearTimeout(t);
   }, [archiveToast]);
 
-  // Scroll-to-bottom on message append. We watch the count of
-  // active messages; when it grows, scroll the bottom anchor into view.
+  // Scroll-to-bottom on message append OR on streaming progress.
+  // Watching `streamingTurn?.aiContent.length` keeps the view pinned
+  // to the latest tokens as they arrive — without this the user has
+  // to manually scroll while the agent is writing.
   const bottomRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activeMessages.length, pending]);
+  }, [activeMessages.length, pending, streamingTurn?.aiContent.length]);
 
   // Filter out tool/system messages from display — those are agent
   // internals, the user sees only human/ai turns.
@@ -329,18 +393,38 @@ export function CoachThread() {
         {/* Active messages */}
         <div className="space-y-3">
           {renderWithDayDividers(visible(activeMessages))}
+
+          {/* Live streaming turn: optimistic user bubble + accumulating
+            * AI bubble. Renders only while a chat turn is in flight
+            * (SSE stream open). On stream close, refreshAll() pulls
+            * the canonical messages and this block clears. */}
+          {streamingTurn && (
+            <>
+              <MessageBubble
+                message={{ role: "human", content: streamingTurn.userMessage }}
+              />
+              <MessageBubble
+                message={{
+                  role: "ai",
+                  content: streamingTurn.aiContent || "…",
+                }}
+              />
+            </>
+          )}
         </div>
 
         {/* Empty state */}
-        {closedSessions.length === 0 && activeMessages.length === 0 && hydrated && (
+        {closedSessions.length === 0 && activeMessages.length === 0 && !streamingTurn && hydrated && (
           <div className="mt-12 text-center text-sm text-muted-foreground">
             <p>No prior conversations yet.</p>
             <p className="mt-1">Pick an action above or just ask something.</p>
           </div>
         )}
 
-        {/* Pending spinner */}
-        {pending && (
+        {/* Pending spinner — hidden during streaming since the live
+          * AI bubble already conveys "in progress". Stays for actions
+          * (which don't stream) and pre-first-token of chat. */}
+        {pending && !streamingTurn && (
           <div className="my-4 flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" />
             {pending === "chat"
