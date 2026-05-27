@@ -330,6 +330,65 @@ class TestResolveNewModelDecision:
         with pytest.raises(ValueError, match="topic_id"):
             mem.resolve_topic_decision(did, action="create_new")
 
+    def test_merge_action_rejected_for_new_model(self, mem):
+        """Codex P2 catch on PR #78. The merge branch's prior
+        `else: # conflict` fall-through corrupted target topics when
+        callers passed action='merge' on a new_model decision (which
+        the shared API enum allows). Verify the engine now refuses
+        with a clear error AND leaves the target topic untouched."""
+        tid = _topic_with_episodes(mem, n_episodes=3)
+        did = self._park_a_proposal(mem, tid)
+
+        # Capture pre-state of target topic
+        before = mem.get_topic(tid)
+        assert before["status"] == "Testing"  # _topic_with_episodes uses Testing
+
+        with pytest.raises(ValueError, match="merge.*not supported.*new_model"):
+            mem.resolve_topic_decision(did, action="merge", target_topic_id=tid)
+
+        # Target topic untouched — NOT corrupted to Conflicting
+        after = mem.get_topic(tid)
+        assert after["status"] == "Testing"
+        assert after["status"] != "Conflicting"
+        # Decision still pending (not silently resolved as merged)
+        row = mem.conn.execute(
+            "SELECT status FROM topic_decisions WHERE decision_id = ?", (did,),
+        ).fetchone()
+        assert row["status"] == "pending"
+
+    def test_create_new_rejected_for_episode_linking(self, mem):
+        """Mirror catch on the create_new branch: a parked
+        episode_linking decision should NOT silently fall through to
+        the conflict-create path. Forces caller to use the 'link'
+        action."""
+        # Park a synthetic episode_linking decision
+        eid = mem.create_episode(
+            event_type="test_event",
+            context={"what": "test"},
+        )
+        did = mem.park_topic_decision(
+            kind="episode_linking",
+            proposal={
+                "episode_id": eid,
+                "event_type": "test_event",
+                "what": "test",
+            },
+            candidates=[],
+        )
+        with pytest.raises(
+            ValueError, match="create_new.*not supported.*episode_linking"
+        ):
+            mem.resolve_topic_decision(did, action="create_new")
+
+        # No phantom Conflicting topic created
+        all_topics = mem.list_topics()
+        assert all(t["status"] != "Conflicting" for t in all_topics)
+        # Decision still pending
+        row = mem.conn.execute(
+            "SELECT status FROM topic_decisions WHERE decision_id = ?", (did,),
+        ).fetchone()
+        assert row["status"] == "pending"
+
 
 # ---------------------------------------------------------------------------
 # park_topic_decision now accepts 'new_model'

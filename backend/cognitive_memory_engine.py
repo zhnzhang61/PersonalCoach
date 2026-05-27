@@ -1474,7 +1474,7 @@ class MemoryOS:
                 if updates:
                     self.update_topic(target_topic_id, **updates)
                     self._invalidate_topic_cache(target_topic_id)
-            else:  # conflict
+            elif kind == "conflict":
                 self.promote_topic_to_conflicting(
                     target_topic_id,
                     open_question=proposal.get("question_for_user", ""),
@@ -1482,6 +1482,18 @@ class MemoryOS:
                         "old_belief": proposal.get("old_belief"),
                         "new_evidence": proposal.get("new_evidence"),
                     },
+                )
+            else:
+                # Codex P2 catch on #78: the old `else: # conflict`
+                # branch silently caught new_model + episode_linking,
+                # corrupting the target topic (promote_topic_to_conflicting
+                # with empty question / context) and resolving the
+                # decision without creating any of the things it should.
+                # Force the caller to pick a kind-appropriate action.
+                raise ValueError(
+                    f"action='merge' is not supported for kind={kind!r}. "
+                    f"new_model: use 'create_new' or 'reject'. "
+                    f"episode_linking: use 'link' or 'reject'."
                 )
             result_tid = target_topic_id
             resolution = f"merged:{target_topic_id}"
@@ -1536,7 +1548,8 @@ class MemoryOS:
                 )
                 self.conn.commit()
                 return model_id  # early return: skip the trailing UPDATE
-            else:  # conflict → create Conflicting topic from scratch
+            elif kind == "conflict":
+                # Conflict → create Conflicting topic from scratch.
                 result_tid = f"tpc_{uuid.uuid4().hex[:8]}"
                 now = self._now()
                 name_seed = (
@@ -1565,6 +1578,16 @@ class MemoryOS:
                     ),
                 )
                 self.conn.commit()
+            else:
+                # Codex P2 catch on #78 (mirror of the merge branch
+                # fix): the prior `else: # conflict` swallowed
+                # episode_linking too, which would create a bogus
+                # Conflicting topic from a parked link decision.
+                # Force kind-appropriate action.
+                raise ValueError(
+                    f"action='create_new' is not supported for kind={kind!r}. "
+                    f"episode_linking: use 'link' or 'reject'."
+                )
             resolution = f"created:{result_tid}"
 
         elif action == "link":
