@@ -365,7 +365,7 @@ doc.
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
 | **A** ✅ done 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) | Fix Coach UI multi-day timeline confusion. Backend `get_history_with_ts` walks `checkpointer.list()` to tag each message with first-seen ts; `/api/ai/history` emits ts. Frontend `<DayDivider>` inserted at calendar-day transitions (local TZ) in both active + closed session streams. 8 new unit tests + 2 new API behavior tests. | ~½ day | User-flagged felt pain. Isolated UI/session-boundary issue, no deps. |
-| **C** ← next | SSE streaming for `/api/ai/chat` (currently dumps full reply after 10s+) | ~1 day | Felt every chat turn. Independent of coach-brain buildout. |
+| **C** ✅ done 2026-05-27 | SSE streaming for `/api/ai/chat`. Backend `agent.chat_stream` async-generator wraps `astream_events(version='v2')`, filters to {token, tool_call, done, error} events. New endpoint `POST /api/ai/chat/stream` returns `text/event-stream`. Frontend `streamSSE` consumer in `web/lib/api.ts`; `sendChat` switches to optimistic user bubble + accumulating AI bubble during stream. 5 unit tests + 4 endpoint behavior tests. | ~1 day | Felt every chat turn. Independent of coach-brain buildout. |
 
 ### Phase 1 — Foundation before P2
 
@@ -454,17 +454,18 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: C** — SSE streaming for `/api/ai/chat`. Currently the chat
-endpoint blocks until the full agent reply lands (~10s+ on tool-using
-turns), then dumps the whole thing at once. Streaming gives the user
-the "live typing" feel and surfaces partial output if a turn errors
-mid-flight.
+**Next PR: D** ~~(removed)~~ — see Phase 1 note about CME tests already
+covered. The next actionable item is **B** (Structured tracing MVP)
+before any P-series PR.
 
-Suggested branch: `add-chat-sse-streaming`.
+Phase 0 complete.
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
   per-message ts + DayDivider for multi-day sessions.
+- **C** ✅ 2026-05-27 — SSE streaming for `/api/ai/chat` via
+  `astream_events`; frontend renders accumulating AI bubble during
+  stream.
 
 ---
 
