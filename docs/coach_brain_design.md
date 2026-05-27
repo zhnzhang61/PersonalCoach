@@ -390,7 +390,7 @@ doc.
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **P1** | `models` table + `topics.related_models` col + `topic_decisions.kind='new_model'` migration + helper fns + 2 MCP tools (`get_model`, `list_models`) + 1 seed stat-derived model (e.g. `recovery.hrv_14d_baseline`) + 3–5 migration-safety tests (idempotency, new enum round-trip, new column round-trip) | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
+| **P1** ✅ done 2026-05-27 | `models` table scaffolding. New CME `models` table (model_id PK + UNIQUE model_key + model_type/derivation_method/status/confidence CHECK enums + params_json + n_samples + evidence_json + timestamps) parallel to `episodes`. `topics.related_models` JSON column added via idempotent ALTER. `topic_decisions.kind` CHECK extended to include `'new_model'` via table-rebuild. MemoryOS helpers: `create_model`, `get_model`, `list_models`, `update_model_params`, `link_topic_to_model`. New `/api/memory/models[/{key}]` + `/api/memory/models/refit/{model_key}` endpoints. MCP tools `get_model` + `list_models` for the agent. Seed model: `recovery.hrv_14d_baseline` (mean_std) from `get_health_stats`. 22 new tests (migration idempotency, CRUD, validation, seed refit). | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
 | **P2** | Episode → model generalize pipeline: LLM proposal prompt + `topic_decisions` integration + UI for confirm/reject + manual-trigger endpoint (cron later) | ~1-2 days | Makes models grow. Without P2, P1 is a passive store. |
 | **P3** | Daily check-in (perceived layer §2): UI widget on Health/Coach tab + `/api/checkins` CRUD + episode integration + MCP tool `get_recent_checkins(days)` | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
 | **P4** | Planned workouts (intent layer §3): start with manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP tool `get_planned_workouts(start, end)` + plan-vs-actual deviation compute. Google Cal wiring deferred. | ~2 days | Unlocks 95% of coaching value (adherence + deviation). Manual JSON keeps scope tight. |
@@ -454,18 +454,18 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: P1** — `models` table scaffolding. Adds new table parallel
-to `episodes`, `topics.related_models` column, `topic_decisions.kind='new_model'`
-enum value, helper fns, 2 MCP tools (`get_model` + `list_models`), and
-1 seed stat-derived model (e.g. `recovery.hrv_14d_baseline`). Includes
-3–5 migration-safety tests in the same PR (idempotency, new enum
-round-trip, new column round-trip).
+**Next PR: P2** — Episode → model generalize pipeline. LLM proposal
+prompt looking at clustered episodes under a topic; proposals land
+in `topic_decisions` queue with `kind='new_model'`; UI for confirm /
+reject; manual-trigger endpoint (cron later). On confirm, the model
+is created + linked back to the topic via `link_topic_to_model`.
 
-Suggested branch: `add-cme-models-store`.
+Suggested branch: `add-cme-model-proposal-pipeline`.
 
-Phase 0 + Phase 1 complete. Foundations laid: per-message ts on
-chat history (PR A) + streaming chat (PR C) + structured tracing
-on every LLM turn (PR B). P-series can build on top.
+Phase 0 + Phase 1 + P1 complete. Foundations laid: per-message ts +
+DayDivider (#71) + streaming chat (#73) + structured tracing (#74) +
+pattern store scaffolding (this PR). P2 is the first step in making
+the model store actually grow.
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —
@@ -474,8 +474,11 @@ on every LLM turn (PR B). P-series can build on top.
   SSE streaming for `/api/ai/chat` via `astream_events`; frontend
   renders accumulating AI bubble during stream. Cross-loop bridge
   through `self._loop` after codex P1 catch.
-- **B** ✅ 2026-05-27 — Structured tracing MVP (JSONL traces +
-  `PROMPT_VERSION` + `docs/PROMPT_CHANGELOG.md`).
+- **B** ✅ 2026-05-27 ([#74](https://github.com/zhnzhang61/PersonalCoach/pull/74)) —
+  Structured tracing MVP (JSONL traces + `PROMPT_VERSION` +
+  `docs/PROMPT_CHANGELOG.md`).
+- **P1** ✅ 2026-05-27 — `models` table + helpers + `get_model` /
+  `list_models` MCP tools + seed `recovery.hrv_14d_baseline` model.
 
 ---
 

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS topics (
                       CHECK(status IN ('Open', 'Testing', 'Resolved')),
     working_conclusion TEXT,              -- nullable while Open
     related_episodes  TEXT DEFAULT '[]',  -- JSON array of episode_ids
+    related_models    TEXT DEFAULT '[]',  -- JSON array of model_ids (PR P1)
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -77,22 +78,61 @@ CREATE TABLE IF NOT EXISTS pending_clarifications (
 -- can't cross MATCH_THRESHOLD against any existing topic, we park it here
 -- instead of creating a possibly-duplicate row. UI surfaces `status='pending'`
 -- rows for the user to confirm: merge-into-X / create-new / reject.
+-- PR P1 added `new_model` kind so the same queue carries pattern-store
+-- proposals (LLM proposes "promote these 7 episodes to a parameterized
+-- recovery curve model") routed through the same confirm-or-reject UI.
 CREATE TABLE IF NOT EXISTS topic_decisions (
     decision_id     TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK(kind IN ('new_topic', 'conflict', 'episode_linking')),
+    kind            TEXT NOT NULL CHECK(kind IN (
+                      'new_topic', 'conflict', 'episode_linking', 'new_model'
+                    )),
     proposal_json   TEXT NOT NULL,           -- LLM proposal as emitted
     candidates_json TEXT NOT NULL DEFAULT '[]',  -- [{topic_id, name, status, score}, ...]
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending', 'merged', 'created', 'rejected', 'linked')),
-    resolution      TEXT,                     -- "merged:tpc_xxx" | "created:tpc_xxx" | "linked:tpc_a,tpc_b" | "rejected"
+    resolution      TEXT,                     -- "merged:tpc_xxx" | "created:tpc_xxx" | "linked:tpc_a,tpc_b" | "rejected" | "created:mdl_xxx"
     created_at      TEXT NOT NULL,
     resolved_at     TEXT
+);
+
+-- Pattern store (PR P1). Parallel to `episodes`: each row is a
+-- parameterized observation about the user — "your HRV recovery
+-- curve", "your heat response", "your weekday quality pattern" —
+-- not a free-text concept (those stay in topics) and not a single
+-- event (those stay in episodes). Models accumulate over time and
+-- get refit incrementally as new data arrives. Topics point at
+-- models via topics.related_models; the agent can ask for either
+-- the conceptual summary (topic.working_conclusion) or the
+-- parameterized version (model.params_json).
+CREATE TABLE IF NOT EXISTS models (
+    model_id          TEXT PRIMARY KEY,            -- mdl_xxxxxx
+    model_key         TEXT UNIQUE NOT NULL,        -- "recovery.hrv_curve_post_long_run"
+    name              TEXT NOT NULL,               -- human label, may be Chinese
+    category          TEXT NOT NULL,               -- "Health/Recovery", "Running/Performance"...
+    model_type        TEXT NOT NULL
+                      CHECK(model_type IN (
+                        'decay', 'linear_trend', 'mean_std',
+                        'ordinal_score', 'rate', 'fixed_obs'
+                      )),
+    params_json       TEXT NOT NULL,               -- shape determined by model_type
+    n_samples         INTEGER NOT NULL DEFAULT 0,
+    confidence        TEXT CHECK(confidence IN ('low', 'medium', 'high')),
+    evidence_json     TEXT,                        -- {"episodes":[], "activities":[], "dates":[]}
+    derivation_method TEXT NOT NULL
+                      CHECK(derivation_method IN ('stat', 'llm', 'hybrid')),
+    status            TEXT NOT NULL DEFAULT 'Forming'
+                      CHECK(status IN ('Forming', 'Stable', 'Stale', 'Drifting')),
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    last_verified_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_topics_status ON topics(status);
 CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
 CREATE INDEX IF NOT EXISTS idx_pending_unresolved ON pending_clarifications(is_resolved);
 CREATE INDEX IF NOT EXISTS idx_topic_decisions_pending ON topic_decisions(status);
+CREATE INDEX IF NOT EXISTS idx_models_category ON models(category);
+CREATE INDEX IF NOT EXISTS idx_models_status   ON models(status);
 """
 
 
@@ -116,6 +156,7 @@ class MemoryOS:
         self.conn.executescript(_SCHEMA_SQL)
         self.conn.commit()
         self._migrate_topic_decisions_check()
+        self._migrate_topics_related_models()
 
         # In-memory topic-embedding cache.
         #
@@ -149,15 +190,26 @@ class MemoryOS:
     def _migrate_topic_decisions_check(self) -> None:
         """
         CHECK constraints in SQLite are immutable; if the existing DB was
-        created before `episode_linking`/`linked` were legal values, rebuild
-        the table. Idempotent: noop when the current schema already allows them.
+        created before the current set of legal `kind`/`status` values,
+        rebuild the table. Idempotent: noop when the current schema
+        already allows everything we need.
+
+        Tracked legal values (must match _SCHEMA_SQL):
+          kind:   'new_topic', 'conflict', 'episode_linking', 'new_model'
+          status: 'pending', 'merged', 'created', 'rejected', 'linked'
+
+        PR #66 (Reorg) added 'episode_linking' + 'linked'.
+        PR P1 added 'new_model' for the pattern-store proposal queue.
         """
         row = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='topic_decisions'"
         ).fetchone()
         if not row or not row["sql"]:
             return
-        if "episode_linking" in row["sql"] and "linked" in row["sql"]:
+        sql = row["sql"]
+        needed_kinds = ("new_topic", "conflict", "episode_linking", "new_model")
+        needed_statuses = ("pending", "merged", "created", "rejected", "linked")
+        if all(k in sql for k in needed_kinds) and all(s in sql for s in needed_statuses):
             return  # already migrated
 
         self.conn.executescript(
@@ -165,7 +217,9 @@ class MemoryOS:
             BEGIN;
             CREATE TABLE topic_decisions_new (
                 decision_id     TEXT PRIMARY KEY,
-                kind            TEXT NOT NULL CHECK(kind IN ('new_topic', 'conflict', 'episode_linking')),
+                kind            TEXT NOT NULL CHECK(kind IN (
+                                  'new_topic', 'conflict', 'episode_linking', 'new_model'
+                                )),
                 proposal_json   TEXT NOT NULL,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
                 status          TEXT NOT NULL DEFAULT 'pending'
@@ -181,6 +235,20 @@ class MemoryOS:
             COMMIT;
             """
         )
+
+    def _migrate_topics_related_models(self) -> None:
+        """PR P1: topics.related_models holds JSON list of model_ids
+        that point at the parameterized version of this topic's belief.
+        For fresh DBs, _SCHEMA_SQL already includes the column; for
+        DBs created pre-P1, ALTER ADD COLUMN is safe + cheap.
+        Idempotent: checks PRAGMA before issuing the ALTER."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(topics)")}
+        if "related_models" in cols:
+            return
+        self.conn.execute(
+            "ALTER TABLE topics ADD COLUMN related_models TEXT DEFAULT '[]'"
+        )
+        self.conn.commit()
 
     def _now(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -283,6 +351,9 @@ class MemoryOS:
             return None
         d = dict(row)
         d["related_episodes"] = json.loads(d["related_episodes"])
+        # related_models added in PR P1; legacy rows (pre-migration)
+        # may have NULL in this column — coerce to [].
+        d["related_models"] = json.loads(d.get("related_models") or "[]")
         return d
 
     def list_topics(self, status: str | None = None) -> list[dict]:
@@ -299,6 +370,7 @@ class MemoryOS:
         for r in rows:
             d = dict(r)
             d["related_episodes"] = json.loads(d["related_episodes"])
+            d["related_models"] = json.loads(d.get("related_models") or "[]")
             result.append(d)
         return result
 
@@ -438,6 +510,215 @@ class MemoryOS:
             d["related_topic_ids"] = json.loads(d["related_topic_ids"])
             result.append(d)
         return result
+
+    # ------------------------------------------------------------------
+    # Model CRUD (PR P1 — pattern store)
+    # ------------------------------------------------------------------
+    #
+    # Models are parameterized observations about the user, parallel
+    # to episodes. See docs/coach_brain_design.md §"CME schema upgrade"
+    # for the design rationale.
+    #
+    # SQLite CHECK can't express "field X required when kind=Y", so
+    # we validate model_type-specific params in app code via
+    # _validate_params. Schema-level CHECK still guards the enums
+    # (model_type, status, derivation_method, confidence).
+
+    _MODEL_TYPES = (
+        "decay",          # post-X recovery curves: {peak_drop_day, peak_drop_pct, ...}
+        "linear_trend",   # X-vs-Y slope: {slope, intercept, monthly_change_pct, ...}
+        "mean_std",       # baseline: {mean, sd, threshold_warning, ...}
+        "ordinal_score",  # per-bucket scores: {scores: {mon: 0.8, tue: 0.5, ...}}
+        "rate",           # rate/ratio: {by_topic: {volume_up: 0.7, ...}}
+        "fixed_obs",      # one-off observation snapshot: free shape
+    )
+    _MODEL_STATUSES = ("Forming", "Stable", "Stale", "Drifting")
+    _DERIVATION_METHODS = ("stat", "llm", "hybrid")
+    _CONFIDENCE_LEVELS = ("low", "medium", "high")
+
+    @staticmethod
+    def _validate_params(model_type: str, params: dict) -> None:
+        """Light type-aware validation. Each model_type has a small
+        set of expected keys; we warn on missing but don't enforce —
+        the param shape may evolve and we don't want to block a real
+        observation on a strict schema check. Hard errors only for
+        obvious mistakes (params isn't a dict, model_type not in
+        the enum)."""
+        if not isinstance(params, dict):
+            raise ValueError(f"params_json must be a dict, got {type(params).__name__}")
+        # model_type enum is enforced by SQLite CHECK; this is the
+        # app-layer mirror for clearer errors before INSERT.
+        if model_type not in MemoryOS._MODEL_TYPES:
+            raise ValueError(
+                f"model_type {model_type!r} not in {MemoryOS._MODEL_TYPES}"
+            )
+
+    def create_model(
+        self,
+        *,
+        model_key: str,
+        name: str,
+        category: str,
+        model_type: str,
+        params_json: dict,
+        derivation_method: str,
+        n_samples: int = 0,
+        confidence: str | None = None,
+        evidence_json: dict | None = None,
+        status: str = "Forming",
+    ) -> str:
+        """Insert a new model row. Returns the generated model_id.
+
+        Raises ValueError on bad enums (model_type / status /
+        derivation_method / confidence) or non-dict params. Raises
+        sqlite3.IntegrityError on duplicate model_key (UNIQUE)."""
+        self._validate_params(model_type, params_json)
+        if status not in self._MODEL_STATUSES:
+            raise ValueError(f"status {status!r} not in {self._MODEL_STATUSES}")
+        if derivation_method not in self._DERIVATION_METHODS:
+            raise ValueError(
+                f"derivation_method {derivation_method!r} not in {self._DERIVATION_METHODS}"
+            )
+        if confidence is not None and confidence not in self._CONFIDENCE_LEVELS:
+            raise ValueError(
+                f"confidence {confidence!r} not in {self._CONFIDENCE_LEVELS}"
+            )
+
+        model_id = f"mdl_{uuid.uuid4().hex[:8]}"
+        now = self._now()
+        self.conn.execute(
+            """INSERT INTO models
+               (model_id, model_key, name, category, model_type,
+                params_json, n_samples, confidence, evidence_json,
+                derivation_method, status, created_at, updated_at,
+                last_verified_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                model_id, model_key, name, category, model_type,
+                json.dumps(params_json, ensure_ascii=False),
+                n_samples, confidence,
+                json.dumps(evidence_json or {}, ensure_ascii=False),
+                derivation_method, status, now, now, now,
+            ),
+        )
+        self.conn.commit()
+        return model_id
+
+    def get_model(self, model_key: str) -> dict | None:
+        """Return a model by its stable key, or None if missing.
+        params_json and evidence_json are deserialized for caller
+        convenience — same convention as get_topic."""
+        row = self.conn.execute(
+            "SELECT * FROM models WHERE model_key = ?", (model_key,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["params_json"] = json.loads(d["params_json"] or "{}")
+        d["evidence_json"] = json.loads(d["evidence_json"] or "{}")
+        return d
+
+    def list_models(
+        self,
+        category: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """List models, optionally filtered by category prefix or
+        status enum. Returns rows with JSON fields deserialized."""
+        clauses, params = [], []
+        if category:
+            clauses.append("category LIKE ?")
+            params.append(f"{category}%")
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM models {where} ORDER BY updated_at DESC", params
+        ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["params_json"] = json.loads(d["params_json"] or "{}")
+            d["evidence_json"] = json.loads(d["evidence_json"] or "{}")
+            out.append(d)
+        return out
+
+    def update_model_params(
+        self,
+        model_key: str,
+        *,
+        params_json: dict | None = None,
+        n_samples: int | None = None,
+        confidence: str | None = None,
+        evidence_json: dict | None = None,
+        status: str | None = None,
+        bump_verified: bool = True,
+    ) -> bool:
+        """Incremental update of a model. None args leave fields
+        untouched. `bump_verified` updates last_verified_at — set to
+        False for trivial edits (e.g., manual rename) that aren't a
+        refit. Returns False if model_key doesn't exist."""
+        existing = self.get_model(model_key)
+        if not existing:
+            return False
+        sets, vals = [], []
+        if params_json is not None:
+            self._validate_params(existing["model_type"], params_json)
+            sets.append("params_json = ?")
+            vals.append(json.dumps(params_json, ensure_ascii=False))
+        if n_samples is not None:
+            sets.append("n_samples = ?")
+            vals.append(n_samples)
+        if confidence is not None:
+            if confidence not in self._CONFIDENCE_LEVELS:
+                raise ValueError(
+                    f"confidence {confidence!r} not in {self._CONFIDENCE_LEVELS}"
+                )
+            sets.append("confidence = ?")
+            vals.append(confidence)
+        if evidence_json is not None:
+            sets.append("evidence_json = ?")
+            vals.append(json.dumps(evidence_json, ensure_ascii=False))
+        if status is not None:
+            if status not in self._MODEL_STATUSES:
+                raise ValueError(f"status {status!r} not in {self._MODEL_STATUSES}")
+            sets.append("status = ?")
+            vals.append(status)
+        if not sets:
+            return True  # nothing to update is success
+        now = self._now()
+        sets.append("updated_at = ?")
+        vals.append(now)
+        if bump_verified:
+            sets.append("last_verified_at = ?")
+            vals.append(now)
+        vals.append(model_key)
+        self.conn.execute(
+            f"UPDATE models SET {', '.join(sets)} WHERE model_key = ?", vals
+        )
+        self.conn.commit()
+        return True
+
+    def link_topic_to_model(self, topic_id: str, model_id: str) -> bool:
+        """Append model_id to topics.related_models (JSON array).
+        Idempotent: noop if already linked. Returns False if topic
+        doesn't exist."""
+        row = self.conn.execute(
+            "SELECT related_models FROM topics WHERE topic_id = ?", (topic_id,)
+        ).fetchone()
+        if not row:
+            return False
+        current = json.loads(row["related_models"] or "[]")
+        if model_id in current:
+            return True
+        current.append(model_id)
+        self.conn.execute(
+            "UPDATE topics SET related_models = ?, updated_at = ? WHERE topic_id = ?",
+            (json.dumps(current), self._now(), topic_id),
+        )
+        self.conn.commit()
+        return True
 
     # ------------------------------------------------------------------
     # Pending Clarifications CRUD
