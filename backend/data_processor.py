@@ -891,7 +891,11 @@ class DataProcessor:
                 # Unknown types accepted as-is — coaches sometimes invent
                 # ("threshold-by-feel").
                 out["type"] = str(t)
-        # Numeric optionals
+        # Numeric optionals. All four are physical quantities that
+        # can't be negative — a negative target_hr quietly corrupts
+        # the plan-vs-actual deviation math (HR delta would flip sign
+        # and read "harder than planned" against a -5 target). Reject
+        # at the data layer so the agent can't write nonsense either.
         for fld, caster in [
             ("target_pace_min_mi", float),
             ("target_hr", int),
@@ -904,9 +908,14 @@ class DataProcessor:
                     out[fld] = None
                 else:
                     try:
-                        out[fld] = caster(v)
+                        coerced = caster(v)
                     except (TypeError, ValueError):
                         raise ValueError(f"{fld} must be a number, got {v!r}")
+                    if coerced < 0:
+                        raise ValueError(
+                            f"{fld} must be >= 0, got {coerced}"
+                        )
+                    out[fld] = coerced
         # String optionals
         for fld in ("notes", "cal_event_id"):
             if fld in payload:

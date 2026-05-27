@@ -867,6 +867,36 @@ async def get_planned_workouts(start: str, end: str) -> dict:
 
 
 @mcp.tool()
+async def get_plan_actual_deviation(activity_id: int) -> dict:
+    """Compare a run to what was planned for that day (P4b).
+
+    Use this on a post-run review turn to ground the "did you do
+    what we said?" coaching question. The match is by date — if
+    multiple plans exist for the run's date, the most-recently-updated
+    one is picked. Returns:
+
+      {
+        matched:  bool,
+        planned:  {date, type, target_pace_min_mi?, target_hr?,
+                   distance_mi?, duration_min?, notes?, id, ...} | null,
+        actual:   {date, distance_mi, duration_min, pace_min_mi?,
+                   avg_hr?} | null,
+        deltas:   {pace_min_mi?, hr?, distance_mi?, duration_min?}
+                  | null,
+      }
+
+    Convention: deltas are `actual - planned`. Positive `pace_min_mi`
+    means slower than planned, positive `hr` means worked harder,
+    positive `duration_min` means went longer.
+
+    `matched=false` with `actual` still populated means the run
+    happened but no plan was on the calendar that day — that's
+    coaching signal on its own ("unplanned hard run on a recovery
+    week")."""
+    return await _get(f"/api/runs/{activity_id}/plan-deviation")
+
+
+@mcp.tool()
 async def propose_workout_plan(workouts: list[dict]) -> dict:
     """Save a plan of N workouts to the user's calendar + local store.
 

@@ -29,10 +29,14 @@ const FC_VIEW: Record<ViewMode, string> = {
 // styling so the user can tell at a glance which calendar an item came
 // from. Same colors used in tooltips, future legend, etc.
 const SOURCE_STYLE: Record<CalendarEventSource, { bg: string; border: string; text: string }> = {
-  google: { bg: "#475569", border: "#475569", text: "#ffffff" },         // slate
+  google: { bg: "#475569", border: "#475569", text: "#ffffff" },         // slate = life event
   google_error: { bg: "#fee2e2", border: "#dc2626", text: "#991b1b" },   // red
-  manual: { bg: "#fc4c02", border: "#fc4c02", text: "#ffffff" },         // strava-orange (existing)
+  manual: { bg: "#fc4c02", border: "#fc4c02", text: "#ffffff" },         // strava-orange (manual activities)
   garmin_run: { bg: "#16a34a", border: "#16a34a", text: "#ffffff" },     // green = completed run
+  // AI-authored planned workout (PR P4b). Distinct hue from the
+  // green of completed runs so a glance answers "done vs upcoming".
+  // Amber reads as "pending" in the rest of the palette.
+  planned_workout: { bg: "#d97706", border: "#d97706", text: "#ffffff" },
 };
 
 export function PlanCalendar() {

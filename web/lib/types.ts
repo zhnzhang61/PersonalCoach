@@ -409,6 +409,67 @@ export interface CheckinsResponse {
 }
 
 // ==========================================
+// Planned workouts (PR P4a — intent layer §3, P4b — UI)
+// ==========================================
+//
+// `planned_workouts.json` rows. `cal_event_id` is present when the
+// row was dual-written to Google Cal (which happens automatically
+// during create when the user is connected). Edits via our PUT
+// endpoint sync back to Cal when this id is non-null; deletes via
+// DELETE remove the Cal event too.
+export type PlannedWorkoutType =
+  | "easy"
+  | "tempo"
+  | "interval"
+  | "long"
+  | "run"
+  | "swim"
+  | "gym"
+  | "other";
+
+export interface PlannedWorkout {
+  id: string;
+  date: string; // YYYY-MM-DD
+  type: PlannedWorkoutType;
+  target_pace_min_mi?: number | null;
+  target_hr?: number | null;
+  distance_mi?: number | null;
+  duration_min?: number | null;
+  notes?: string | null;
+  cal_event_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PlannedWorkoutsResponse {
+  start: string;
+  end: string;
+  planned_workouts: PlannedWorkout[];
+}
+
+// Plan-vs-actual deviation for a single run (PR P4b). Returned by
+// `GET /api/runs/{id}/plan-deviation`. `deltas` follows the
+// "actual - planned" convention; only keys whose plan side was
+// populated are emitted.
+export interface PlanDeviation {
+  matched: boolean;
+  planned: PlannedWorkout | null;
+  actual: {
+    date: string;
+    distance_mi: number;
+    duration_min: number;
+    pace_min_mi: number | null;
+    avg_hr: number | null;
+  } | null;
+  deltas: {
+    pace_min_mi?: number;
+    hr?: number;
+    distance_mi?: number;
+    duration_min?: number;
+  } | null;
+}
+
+// ==========================================
 // Unified calendar events (Training tab → Plan calendar)
 // ==========================================
 // After server-side normalisation, Google Calendar events + ManualActivity
@@ -419,7 +480,11 @@ export type CalendarEventSource =
   | "google"
   | "google_error"
   | "manual"
-  | "garmin_run";
+  | "garmin_run"
+  // Google events whose description contains the
+  // PLANNED_WORKOUT_MARKER — re-classified server-side so the UI can
+  // dye AI-authored workouts distinctly from generic life events.
+  | "planned_workout";
 
 export interface CalendarEvent {
   source: CalendarEventSource;
