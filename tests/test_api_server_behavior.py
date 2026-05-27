@@ -264,27 +264,56 @@ class TestAiHistory:
     def test_history_wire_shape_uses_role_not_type(self, client):
         """Front-end's CoachMessage type keys on `role`, not LangChain's
         internal `.type`. Lock in the on-the-wire conversion in the
-        handler so a backend refactor can't silently break the chat UI."""
+        helper so a backend refactor can't silently break the chat UI.
+
+        Since PR A the endpoint forwards `get_history_with_ts` output 1:1
+        — the helper already aligns the shape, so this test mocks the
+        helper rather than building a fake checkpointer."""
         import backend.api_server as api_server
 
-        class _FakeMessage:
-            def __init__(self, t, c):
-                self.type = t
-                self.content = c
-
-        api_server.agent.get_history.return_value = [
-            _FakeMessage("human", "hi"),
-            _FakeMessage("ai", "hello"),
+        api_server.agent.get_history_with_ts.return_value = [
+            {"role": "human", "content": "hi", "ts": "2026-05-13T10:00:00Z"},
+            {"role": "ai", "content": "hello", "ts": "2026-05-13T10:00:01Z"},
         ]
         resp = client.get("/api/ai/history/coach_20260513T120000Z")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["messages"] == [
-            {"role": "human", "content": "hi"},
-            {"role": "ai", "content": "hello"},
-        ]
+        assert body["messages"][0]["role"] == "human"
+        assert body["messages"][0]["content"] == "hi"
         # No `type` field — the rename was deliberate.
         assert "type" not in body["messages"][0]
+
+    def test_history_includes_ts_per_message(self, client):
+        """PR A — fix-coach-multi-day-timeline: per-message `ts` powers
+        the UI's day-boundary dividers. The endpoint must pass through
+        whatever the helper returns, including ts."""
+        import backend.api_server as api_server
+
+        api_server.agent.get_history_with_ts.return_value = [
+            {"role": "human", "content": "q1", "ts": "2026-05-11T15:00:00Z"},
+            {"role": "ai", "content": "a1", "ts": "2026-05-11T15:00:01Z"},
+            {"role": "human", "content": "q2", "ts": "2026-05-12T09:00:00Z"},
+        ]
+        resp = client.get("/api/ai/history/coach_20260513T120000Z")
+        body = resp.json()
+        assert [m["ts"] for m in body["messages"]] == [
+            "2026-05-11T15:00:00Z",
+            "2026-05-11T15:00:01Z",
+            "2026-05-12T09:00:00Z",
+        ]
+
+    def test_history_null_ts_passes_through(self, client):
+        """Legacy checkpoints without ts get null — UI treats null as
+        'no day anchor' (no divider). Endpoint must NOT drop the field."""
+        import backend.api_server as api_server
+
+        api_server.agent.get_history_with_ts.return_value = [
+            {"role": "human", "content": "legacy", "ts": None},
+        ]
+        resp = client.get("/api/ai/history/coach_20260513T120000Z")
+        body = resp.json()
+        assert body["messages"][0]["ts"] is None
+        assert "ts" in body["messages"][0]  # field present, not omitted
 
 
 # ===========================================================================
