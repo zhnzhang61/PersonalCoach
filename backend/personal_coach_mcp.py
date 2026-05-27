@@ -700,6 +700,59 @@ async def search_episodes(keywords: list[str], limit: int = 10) -> dict:
 
 
 @mcp.tool()
+async def get_model(model_key: str) -> dict | None:
+    """Get a personal pattern model by stable key.
+
+    Models are parameterized observations about the user — "your HRV
+    recovery curve", "your heat response", "your weekday quality
+    pattern" — derived from accumulated data (stat job) or LLM-
+    proposed from episode clusters and user-confirmed. Faster than
+    re-deriving from raw windows per turn.
+
+    Examples:
+      - 'recovery.hrv_curve_post_long_run' → decay shape with
+        peak_drop_day, peak_drop_pct, return_to_baseline_day
+      - 'heat.pace_drop_at_temp' → linear_trend with slope per °C
+      - 'adherence.planned_vs_actual' → rate by workout_type
+
+    Returns null if the model doesn't exist yet (not enough data).
+    Use list_models to discover available keys.
+
+    The underlying API returns 404 when a model_key isn't found —
+    semantically correct REST but turns a normal discovery path
+    ("does recovery.hrv_curve_post_long_run exist yet?") into an
+    exception. We catch the 404 here so agents can branch on `is
+    None` instead of try/except. Other HTTP errors (5xx, network)
+    still propagate."""
+    try:
+        return await _get(f"/api/memory/models/{model_key}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
+
+
+@mcp.tool()
+async def list_models(
+    category: str | None = None, status: str | None = None
+) -> dict:
+    """List personal pattern models, optionally filtered.
+
+    category: prefix match on category, e.g. 'Health' returns all
+              Health/* models. Common categories: 'Health/Recovery',
+              'Running/Performance', 'Health/Sleep'.
+    status:   Forming (just created, n_samples < threshold), Stable
+              (well-supported), Stale (no refit in 30d), Drifting
+              (recent data diverges from stored params)."""
+    params = {}
+    if category:
+        params["category"] = category
+    if status:
+        params["status"] = status
+    return await _get("/api/memory/models", **params)
+
+
+@mcp.tool()
 async def get_pending_clarifications() -> dict:
     """Unresolved clarification questions the agent owes the user.
 

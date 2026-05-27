@@ -1154,6 +1154,49 @@ def search_episodes(q: str, limit: int = 10) -> dict[str, Any]:
     return {"episodes": episodes}
 
 
+# --- Models (PR P1 — pattern store) ---
+
+
+@app.get("/api/memory/models")
+def list_models(
+    category: str | None = None, status: str | None = None
+) -> dict[str, Any]:
+    models = memory_engine.list_models(category=category, status=status)
+    return {"models": models, "filter": {"category": category, "status": status}}
+
+
+@app.get("/api/memory/models/{model_key}")
+def get_model(model_key: str) -> dict[str, Any]:
+    m = memory_engine.get_model(model_key)
+    if not m:
+        raise HTTPException(404, f"model {model_key!r} not found")
+    return m
+
+
+@app.post("/api/memory/models/refit/{model_key}")
+def refit_model(model_key: str) -> dict[str, Any]:
+    """Manually trigger a stat-derived model refit. PR P1 ships only
+    one model (`recovery.hrv_14d_baseline`); P6 will add more, and
+    a background cron will replace the manual trigger.
+
+    Returns `{ok: false, reason: "insufficient_data"}` when the
+    underlying data window is too thin to characterize. Caller can
+    poll later or wait for nightly refresh."""
+    from backend.seed_models import refit_hrv_14d_baseline
+
+    if model_key == "recovery.hrv_14d_baseline":
+        result = refit_hrv_14d_baseline(memory_engine, processor)
+        if result is None:
+            return {"ok": False, "reason": "insufficient_data"}
+        return {"ok": True, "model_key": result, "model": memory_engine.get_model(result)}
+
+    raise HTTPException(
+        404,
+        f"no stat refit fn registered for model_key={model_key!r}. "
+        f"Known stat-derived: recovery.hrv_14d_baseline.",
+    )
+
+
 # --- Pending Clarifications ---
 
 

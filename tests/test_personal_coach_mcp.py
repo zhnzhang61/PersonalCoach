@@ -635,3 +635,90 @@ class TestGetPendingClarifications:
         fake_get.responses.append({"pending": []})
         _run(mcp.get_pending_clarifications())
         assert fake_get.calls == [("/api/memory/pending", {})]
+
+
+class TestGetModel:
+    """PR P1 — pattern store MCP tool. Discovery path: agent asks
+    "does model X exist?" and expects None if not, not an exception."""
+
+    def test_returns_payload_when_found(self, fake_get):
+        fake_get.responses.append({
+            "model_id": "mdl_abc",
+            "model_key": "recovery.hrv_14d_baseline",
+            "name": "14天 HRV 基线",
+            "params_json": {"mean": 70.5},
+        })
+        result = _run(mcp.get_model(model_key="recovery.hrv_14d_baseline"))
+        assert result["model_id"] == "mdl_abc"
+        assert result["params_json"] == {"mean": 70.5}
+        assert fake_get.calls == [
+            ("/api/memory/models/recovery.hrv_14d_baseline", {}),
+        ]
+
+    def test_returns_none_on_404(self):
+        """Codex P2 catch on PR P1 (#76). The API returns 404 for
+        not-yet-seeded models (semantically correct), but the
+        MCP tool's docstring promises `None` so agents can branch on
+        `is None` rather than try/except every discovery call.
+        Verify the 404 is swallowed → None."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Mock _get to raise the same HTTPStatusError httpx would on 404
+        response = MagicMock(spec=httpx.Response, status_code=404)
+        err = httpx.HTTPStatusError("404", request=MagicMock(), response=response)
+        mock_get = AsyncMock(side_effect=err)
+
+        with patch("backend.personal_coach_mcp._get", new=mock_get):
+            result = _run(mcp.get_model(model_key="recovery.not_yet_built"))
+        assert result is None
+
+    def test_non_404_errors_still_propagate(self):
+        """A 500 / 503 / network failure is NOT 'model missing' — those
+        must surface to the caller, not get silently None'd."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+
+        response = MagicMock(spec=httpx.Response, status_code=500)
+        err = httpx.HTTPStatusError("500", request=MagicMock(), response=response)
+        mock_get = AsyncMock(side_effect=err)
+
+        with patch("backend.personal_coach_mcp._get", new=mock_get):
+            with pytest.raises(httpx.HTTPStatusError):
+                _run(mcp.get_model(model_key="any"))
+
+
+class TestListModels:
+    def test_no_filter_path(self, fake_get):
+        fake_get.responses.append({"models": []})
+        _run(mcp.list_models())
+        assert fake_get.calls == [("/api/memory/models", {})]
+
+    def test_category_filter_passed_through(self, fake_get):
+        fake_get.responses.append({"models": []})
+        _run(mcp.list_models(category="Health/Recovery"))
+        assert fake_get.calls == [
+            ("/api/memory/models", {"category": "Health/Recovery"}),
+        ]
+
+    def test_status_filter_passed_through(self, fake_get):
+        fake_get.responses.append({"models": []})
+        _run(mcp.list_models(status="Stable"))
+        assert fake_get.calls == [
+            ("/api/memory/models", {"status": "Stable"}),
+        ]
+
+    def test_both_filters(self, fake_get):
+        fake_get.responses.append({"models": []})
+        _run(mcp.list_models(category="Running", status="Forming"))
+        assert fake_get.calls == [
+            ("/api/memory/models", {"category": "Running", "status": "Forming"}),
+        ]
+
+    def test_none_args_dropped_from_query(self, fake_get):
+        """category=None / status=None must NOT appear as `?category=&status=`
+        in the URL — that'd give us empty-string filters server-side
+        instead of unfiltered."""
+        fake_get.responses.append({"models": []})
+        _run(mcp.list_models(category=None, status=None))
+        assert fake_get.calls == [("/api/memory/models", {})]
