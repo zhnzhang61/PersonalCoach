@@ -355,9 +355,9 @@ call.
 
 ## Sequenced rollout
 
-11 PRs in 3 phases. Strict order — each builds on the previous. Items
-A/B/C/D/E originate from open AI-side work tracked here (also referenced
-in IMPROVEMENTS.md §1/§3); P1-P6 are the coach-brain buildout from this
+10 PRs in 3 phases. Strict order — each builds on the previous. Items
+A/B/C/E originate from open AI-side work tracked here (also referenced
+in IMPROVEMENTS.md §3); P1-P6 are the coach-brain buildout from this
 doc.
 
 ### Phase 0 — Felt-pain quick wins (do these FIRST for momentum)
@@ -367,18 +367,30 @@ doc.
 | **A** | Investigate + fix Coach UI multi-day timeline confusion (user observation 2026-05-26: yesterday's question mid-stream, Google-failed reply, today's batched answers all rendered together) | ~½ day | User-flagged felt pain. Isolated UI/session-boundary issue, no deps. |
 | **C** | SSE streaming for `/api/ai/chat` (currently dumps full reply after 10s+) | ~1 day | Felt every chat turn. Independent of coach-brain buildout. |
 
-### Phase 1 — Foundations before touching CME
+### Phase 1 — Foundation before P2
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **D** | `agentic_coach.py` + `cognitive_memory_engine.py` unit tests (Phase 3 of §1 IMPROVEMENTS — backend completion) | ~1 day | **Blocking for P1**: about to ALTER CME schema. CME has 0 tests today; without them, P1 migration can break silently. |
 | **B** | Structured tracing MVP (JSONL per-turn traces + `PROMPT_VERSION` constant + `docs/PROMPT_CHANGELOG.md`) | ~1 day | **Blocking for P2**: P2 introduces async LLM proposal → confirm flow. Without traces we'll be flying blind when proposals don't fire / parse / land. |
+
+> **Removed from earlier roadmap draft**: a "D — CME tests" PR. CME is
+> already well-covered: `tests/test_cme_v2.py` (9 tests) +
+> `tests/test_cme_v2b.py` (32 tests) = 41 tests covering episode-topic
+> junctions, retrieve_working_context, embedding match, topic_decisions
+> park/resolve, consolidation flow, conflict promotion, link resolution.
+> IMPROVEMENTS.md §1 Phase 3 marks CME "best-covered, skip." The only
+> NEW coverage P1 needs — migration idempotency, `kind='new_model'`
+> enum round-trip, `related_models` column round-trip — is bundled
+> into P1 itself (3–5 tests). `agentic_coach.py` Phase 3 tests
+> (session lifecycle, archive, delete-session) remain a genuine gap
+> but P1 doesn't touch agent code, so they're a parallel track via
+> IMPROVEMENTS §1 Phase 3 — not blocking this roadmap.
 
 ### Phase 2 — Coach-brain buildout (the main course)
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **P1** | `models` table + `topics.related_models` col + `topic_decisions.kind='new_model'` migration + helper fns + 2 MCP tools (`get_model`, `list_models`) + 1 seed stat-derived model (e.g. `recovery.hrv_14d_baseline`) | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
+| **P1** | `models` table + `topics.related_models` col + `topic_decisions.kind='new_model'` migration + helper fns + 2 MCP tools (`get_model`, `list_models`) + 1 seed stat-derived model (e.g. `recovery.hrv_14d_baseline`) + 3–5 migration-safety tests (idempotency, new enum round-trip, new column round-trip) | ~1 day | Foundation. No user-visible feature, but unblocks everything else. |
 | **P2** | Episode → model generalize pipeline: LLM proposal prompt + `topic_decisions` integration + UI for confirm/reject + manual-trigger endpoint (cron later) | ~1-2 days | Makes models grow. Without P2, P1 is a passive store. |
 | **P3** | Daily check-in (perceived layer §2): UI widget on Health/Coach tab + `/api/checkins` CRUD + episode integration + MCP tool `get_recent_checkins(days)` | ~1-2 days | First C-bucket user-visible feature. Closes "agent blind to subjective state" gap. |
 | **P4** | Planned workouts (intent layer §3): start with manual JSON file (`data/manual_inputs/planned_workouts.json`) + MCP tool `get_planned_workouts(start, end)` + plan-vs-actual deviation compute. Google Cal wiring deferred. | ~2 days | Unlocks 95% of coaching value (adherence + deviation). Manual JSON keeps scope tight. |
@@ -407,14 +419,16 @@ the user has flagged or experiences every chat turn. They're isolated
 infrastructure, and (b) momentum — two visible wins before the slower
 foundation phase.
 
-**Why D must land before P1.** P1 introduces an ALTER on the `topics`
-table + new `models` table + new `topic_decisions.kind` enum value.
-CME has **zero unit tests today**. Without D, a migration bug (wrong
-column type, missing index, broken `consolidate_memory_background`
-under new schema) can write subtly-wrong data silently — the kind of
-bug that surfaces weeks later when a topic mysteriously stops linking
-to its episodes. D acts as the safety net before we touch CME's
-schema.
+**Why migration-safety tests live in P1, not a separate PR.** P1
+introduces an ALTER on `topics` + new `models` table + new
+`topic_decisions.kind='new_model'` enum value. CME's existing
+behavioral surface is already covered (41 tests via `test_cme_v2.py`
++ `test_cme_v2b.py`); what's NOT covered is P1's net-new schema. The
+right place for those 3–5 tests is the same PR that ships the
+schema change — they verify what P1 itself just added, not a
+pre-existing gap. Spinning them off into a separate "CME tests" PR
+would (a) misrepresent the actual CME coverage state and (b) split
+the schema change from its own safety net.
 
 **Why B must land before P2.** P2 wires an async pipeline: nightly
 job (or manual trigger) → LLM proposes models from episode clusters →
@@ -434,9 +448,9 @@ E after P6 when we have real traces accumulated through the full
 flow (planned input → check-in → external context → model proposals
 → agent reply).
 
-**Total time estimate.** ~12–16 working days (not counting review +
-fix cycles). Phase 0: 1.5 days. Phase 1: 2 days. Phase 2: 7–11 days.
-Phase 3: 0.5 day.
+**Total time estimate.** ~10–14 working days (not counting review +
+fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
+(P1 includes its own migration-safety tests). Phase 3: 0.5 day.
 
 ### Where to start
 
@@ -450,6 +464,9 @@ Suggested branch: `fix-coach-multi-day-timeline`.
 
 ## What this doc does NOT cover
 
+- **`agentic_coach.py` Phase 3 tests** (session lifecycle, archive,
+  delete-session) — see IMPROVEMENTS §1 Phase 3. Genuine coverage gap,
+  but P1 doesn't touch agent code, so parallel track. NOT blocking.
 - **Frontend tests** (Vitest setup, format/coach-errors/todays-read/
   use-coach-session unit tests) — see IMPROVEMENTS §1 Phase 3. Parallel
   track, not blocking.
