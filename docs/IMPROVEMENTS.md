@@ -512,16 +512,18 @@ Ideas not yet developed:
   `/api/runs` alone, add a `/api/garmin-activities?type=...`
   endpoint and a separate "Cross-training" section in the
   Activity tab. (B) is the cleanest UX.
-- **Garmin sync gap-resilience** — two failure modes observed
-  2026-05-26 (PR #68 era). (a) `run_sync(days_back=5)` window:
-  if app isn't opened for >5d, missing days fall outside the
-  window forever; chart `/api/health/timeline` returned 8 nulls
-  for 5/14–5/21. (b) Stub-file trap: existence check treats any
-  on-disk JSON as "done," but Garmin returns an empty
-  `dailySleepDTO` (`sleepTimeSeconds=None`, score=None) if you
-  sync before the watch finishes uploading last night's data —
-  the stub then sticks forever. Fix shape: enlarge default
-  `days_back` (or detect last-good-day → backfill to it) AND
-  add stub-detection to the existence check (treat
-  `sleepTimeSeconds is None` / missing `hrvSummary` as
-  needs-refetch).
+- ~~**Garmin sync gap-resilience**~~ ✅ shipped in #PR_NUMBER —
+  two failure modes observed 2026-05-26 (PR #68 era).
+  (a) `run_sync(days_back=5)` window: if app isn't opened for
+  >5d, missing days fall outside the window forever; chart
+  `/api/health/timeline` returned 8 nulls for 5/14–5/21.
+  (b) Stub-file trap: existence check treats any on-disk JSON
+  as "done," but Garmin returns an empty `dailySleepDTO`
+  (`sleepTimeSeconds=None`, score=None) if you sync before the
+  watch finishes uploading last night's data — the stub then
+  sticks forever. Fix: default `days_back` bumped to 30; added
+  `_is_stub(method, path)` in `backend/garmin_sync.py` that runs
+  alongside the existence check inside the daily loop with
+  per-method signatures (sleep / hrv / rhr). Unknown methods
+  default to "not a stub." 24 new tests in
+  `tests/test_garmin_sync.py`.
