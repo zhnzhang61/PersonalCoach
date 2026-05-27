@@ -519,7 +519,19 @@ def calendar_events(
     google_connected = gcal.is_connected()
     if google_connected:
         try:
-            events.extend(gcal.list_events(start_dt, end_dt))
+            from backend.google_calendar import PLANNED_WORKOUT_MARKER
+            google_events = gcal.list_events(start_dt, end_dt)
+            # Re-classify AI-authored planned workouts so the UI can
+            # dye them distinctly from generic life events. We detect
+            # them by the marker line we embed in the description
+            # during _plan_to_cal_payload — that's the same heuristic
+            # /api/planned-workouts uses for the read merge, so the
+            # two surfaces stay consistent.
+            for ev in google_events:
+                desc = ev.get("description") or ""
+                if PLANNED_WORKOUT_MARKER in desc:
+                    ev["source"] = "planned_workout"
+            events.extend(google_events)
         except Exception as e:
             # Don't fail the whole request — surface the error so the UI
             # can show "Google calendar disconnected" without losing the
@@ -961,6 +973,86 @@ def update_planned_workout(
             pass
 
     return {"ok": True, "cal_synced": cal_synced, "planned_workout": plan}
+
+
+def _compute_plan_deviation_for_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Plan-vs-actual deviation for a given run summary (P4b).
+
+    Strategy: match the planned workout by date. If multiple plans
+    exist on the same date (e.g., AM/PM doubles, or a re-issued plan),
+    the most-recently-updated one wins. Fancier link-via-cal_event_id
+    matching could come later — date matching covers the dominant case
+    (one workout per day) and degrades gracefully on edge cases.
+
+    Returns:
+      {
+        matched: bool,
+        planned: <plan row> | None,
+        actual:  <normalized run summary> | None,
+        deltas:  {pace_min_mi, hr, distance_mi, duration_min} | None,
+      }
+    `actual` is populated whenever the run summary is valid (even when
+    no plan exists for that date) so the agent can still describe what
+    the user did.  `deltas` keys are present only for fields the plan
+    specified — if a plan didn't pin `target_hr`, deltas won't have an
+    `hr` key. `actual - planned` is the convention (positive pace =
+    slower than planned, positive HR = harder, positive duration =
+    went longer)."""
+    run_date = (summary.get("startTimeLocal") or "")[:10]
+
+    distance_m = summary.get("distance") or 0
+    distance_mi = distance_m / 1609.34 if distance_m else 0.0
+    duration_s = summary.get("movingDuration") or summary.get("duration") or 0
+    duration_min = duration_s / 60 if duration_s else 0.0
+    pace_min_mi: float | None = None
+    if distance_mi > 0 and duration_s > 0:
+        pace_min_mi = (duration_s / 60) / distance_mi
+
+    actual = {
+        "date": run_date,
+        "distance_mi": round(distance_mi, 2),
+        "duration_min": round(duration_min, 1),
+        "pace_min_mi": round(pace_min_mi, 2) if pace_min_mi is not None else None,
+        "avg_hr": summary.get("averageHR"),
+    }
+
+    if not run_date:
+        return {"matched": False, "planned": None, "actual": actual, "deltas": None}
+
+    plans = processor.list_planned_workouts_in_range(run_date, run_date)
+    if not plans:
+        return {"matched": False, "planned": None, "actual": actual, "deltas": None}
+
+    plan = max(
+        plans,
+        key=lambda p: p.get("updated_at") or p.get("created_at") or "",
+    )
+
+    deltas: dict[str, Any] = {}
+    if plan.get("target_pace_min_mi") is not None and actual["pace_min_mi"] is not None:
+        deltas["pace_min_mi"] = round(
+            actual["pace_min_mi"] - plan["target_pace_min_mi"], 2
+        )
+    if plan.get("target_hr") is not None and actual["avg_hr"] is not None:
+        deltas["hr"] = int(actual["avg_hr"] - plan["target_hr"])
+    if plan.get("distance_mi") is not None:
+        deltas["distance_mi"] = round(actual["distance_mi"] - plan["distance_mi"], 2)
+    if plan.get("duration_min") is not None:
+        deltas["duration_min"] = round(actual["duration_min"] - plan["duration_min"], 1)
+
+    return {"matched": True, "planned": plan, "actual": actual, "deltas": deltas}
+
+
+@app.get("/api/runs/{activity_id}/plan-deviation")
+def run_plan_deviation(activity_id: int) -> dict[str, Any]:
+    """Plan-vs-actual deviation for a run. Agent calls this on
+    post-run review to power the "did you do what we said?" coaching
+    turn. Returns 404 if the run doesn't exist; matched=False (with
+    actual still populated) if no plan was on that date."""
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, f"Run {activity_id} not found")
+    return _compute_plan_deviation_for_summary(summary)
 
 
 @app.delete("/api/planned-workouts/{plan_id}")

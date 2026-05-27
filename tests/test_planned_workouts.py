@@ -544,6 +544,45 @@ class TestPlannedWorkoutsAPI:
         )
         assert resp.status_code == 400
 
+    def test_calendar_events_reclassifies_planned_workouts(self, client):
+        """`/api/calendar/events` post-processes Google events whose
+        description carries the PLANNED_WORKOUT_MARKER and re-stamps
+        their `source` to "planned_workout" so the UI can dye them
+        distinctly from generic life events. Same marker the read-
+        merge uses for /api/planned-workouts, kept consistent so the
+        UI doesn't see two different classifications of the same
+        event."""
+        import backend.api_server as api_server
+        api_server.gcal.is_connected.return_value = True
+        api_server.gcal.list_events.return_value = [
+            {
+                "source": "google", "id": "evt_ai", "title": "Easy workout",
+                "start": "2026-05-30T09:00:00-04:00",
+                "end":   "2026-05-30T09:40:00-04:00",
+                "all_day": False,
+                "description": (
+                    "personalcoach.training=true\ntype: easy\n"
+                    "duration_min: 40"
+                ),
+            },
+            {
+                "source": "google", "id": "evt_meeting", "title": "1:1",
+                "start": "2026-05-30T10:00:00-04:00",
+                "end":   "2026-05-30T10:30:00-04:00",
+                "all_day": False,
+                "description": "weekly sync",
+            },
+        ]
+        resp = client.get(
+            "/api/calendar/events?"
+            "start=2026-05-30T00:00:00&end=2026-05-31T00:00:00"
+        )
+        assert resp.status_code == 200
+        events = {e["id"]: e for e in resp.json()["events"]}
+        assert events["evt_ai"]["source"] == "planned_workout"
+        # Generic life event stays "google".
+        assert events["evt_meeting"]["source"] == "google"
+
     def test_put_with_cal_event_id_syncs_to_cal(self, client):
         import backend.api_server as api_server
         api_server.gcal.is_connected.return_value = True
@@ -613,6 +652,177 @@ class TestPlannedWorkoutsAPI:
 
 
 # ---------------------------------------------------------------------------
+# Plan-vs-actual deviation (P4b — used by agent post-run review)
+# ---------------------------------------------------------------------------
+
+
+class TestPlanDeviation:
+    """`GET /api/runs/{id}/plan-deviation` matches a run to a planned
+    workout by date and returns per-field deltas (actual - planned).
+    Powers the agent's "did you do what we said?" coaching turn."""
+
+    def _patch_run_summary(self, summary):
+        """Patch `_find_run_summary` (lives in api_server, not on the
+        processor mock) so the deviation endpoint sees our fake run."""
+        import backend.api_server as api_server
+        return patch.object(api_server, "_find_run_summary", return_value=summary)
+
+    def test_404_when_run_missing(self, client):
+        with self._patch_run_summary(None):
+            resp = client.get("/api/runs/99999/plan-deviation")
+        assert resp.status_code == 404
+
+    def test_matched_when_plan_exists_on_run_date(self, client):
+        """Happy path: run on 2026-05-28, plan on same date, deltas
+        come out signed correctly (actual - planned)."""
+        import backend.api_server as api_server
+        # Run: 5.0 mi in 40 min @ 156 bpm → pace 8.0 min/mi
+        run = {
+            "activityId": 1,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "movingDuration": 40 * 60,
+            "duration": 40 * 60,
+            "averageHR": 156,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [{
+            "id": "plan_a", "date": "2026-05-28", "type": "tempo",
+            "target_pace_min_mi": 7.5, "target_hr": 165,
+            "distance_mi": 6.0, "duration_min": 45,
+            "updated_at": "2026-05-27T10:00:00+00:00",
+        }]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/1/plan-deviation")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matched"] is True
+        # actual side
+        assert body["actual"]["distance_mi"] == 5.0
+        assert body["actual"]["duration_min"] == 40.0
+        assert body["actual"]["pace_min_mi"] == 8.0
+        assert body["actual"]["avg_hr"] == 156
+        # deltas: actual minus planned
+        assert body["deltas"]["pace_min_mi"] == 0.5    # 8.0 - 7.5 → slower
+        assert body["deltas"]["hr"] == -9              # 156 - 165 → easier
+        assert body["deltas"]["distance_mi"] == -1.0   # cut 1 mile short
+        assert body["deltas"]["duration_min"] == -5.0  # 5 min short
+
+    def test_matched_false_when_no_plan_on_date(self, client):
+        """Run happened, no plan that day — matched=False, but actual
+        is still populated (unplanned-run coaching signal)."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 2,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 3.0 * 1609.34,
+            "movingDuration": 27 * 60,
+            "duration": 27 * 60,
+            "averageHR": 142,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = []
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/2/plan-deviation")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matched"] is False
+        assert body["planned"] is None
+        assert body["deltas"] is None
+        assert body["actual"]["distance_mi"] == 3.0
+        assert body["actual"]["avg_hr"] == 142
+
+    def test_multiple_plans_picks_most_recently_updated(self, client):
+        """Edge case: AM/PM doubles or re-issued plans — most recent
+        `updated_at` wins so the user's latest intent gets compared."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 3,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 150,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [
+            {"id": "old", "date": "2026-05-28", "type": "easy",
+             "target_hr": 140,
+             "updated_at": "2026-05-26T10:00:00+00:00"},
+            {"id": "new", "date": "2026-05-28", "type": "tempo",
+             "target_hr": 165,
+             "updated_at": "2026-05-28T06:00:00+00:00"},
+        ]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/3/plan-deviation")
+        body = resp.json()
+        assert body["planned"]["id"] == "new"
+        # delta against the NEW plan's target_hr (165), not 140.
+        assert body["deltas"]["hr"] == 150 - 165
+
+    def test_partial_plan_only_emits_specified_deltas(self, client):
+        """A plan that pinned `target_hr` only — deltas should have
+        an `hr` key but NOT `pace_min_mi` / `distance_mi` /
+        `duration_min`. Lets the agent know which fields the user
+        actually committed to vs which it should infer."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 4,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": 160,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [{
+            "id": "p", "date": "2026-05-28", "type": "easy",
+            "target_hr": 150,
+            "updated_at": "2026-05-27T10:00:00+00:00",
+        }]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/4/plan-deviation")
+        deltas = resp.json()["deltas"]
+        assert set(deltas.keys()) == {"hr"}
+        assert deltas["hr"] == 10
+
+    def test_zero_distance_run_no_pace_in_actual(self, client):
+        """Garmin sometimes records 0-distance "activities" (paused
+        treadmill, etc.). pace_min_mi should be null rather than
+        raising a divide-by-zero."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 5,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 0,
+            "duration": 30 * 60,
+            "averageHR": 120,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = []
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/5/plan-deviation")
+        body = resp.json()
+        assert body["actual"]["pace_min_mi"] is None
+        # No KeyError on missing pace + still no crash.
+
+    def test_missing_avg_hr_no_hr_delta(self, client):
+        """HRM not worn → averageHR is None. We should NOT compare
+        None against the plan's target_hr — `hr` simply not emitted."""
+        import backend.api_server as api_server
+        run = {
+            "activityId": 6,
+            "startTimeLocal": "2026-05-28T07:00:00",
+            "distance": 5.0 * 1609.34,
+            "duration": 40 * 60,
+            "averageHR": None,
+        }
+        api_server.processor.list_planned_workouts_in_range.return_value = [{
+            "id": "p", "date": "2026-05-28", "type": "easy",
+            "target_hr": 150, "target_pace_min_mi": 8.0,
+            "updated_at": "2026-05-27T10:00:00+00:00",
+        }]
+        with self._patch_run_summary(run):
+            resp = client.get("/api/runs/6/plan-deviation")
+        deltas = resp.json()["deltas"]
+        assert "hr" not in deltas
+        assert "pace_min_mi" in deltas
+
+
+# ---------------------------------------------------------------------------
 # MCP tools
 # ---------------------------------------------------------------------------
 
@@ -677,6 +887,17 @@ class TestPlannedWorkoutsMCP:
         assert r["n_synced"] == 1
         assert r["n_total"] == 2
         assert r["cal_synced"] is False
+
+    def test_get_plan_actual_deviation_forwards_activity_id(self):
+        """MCP tool wraps `/api/runs/{id}/plan-deviation`. Just a thin
+        forward — endpoint logic is covered by TestPlanDeviation."""
+        from backend import personal_coach_mcp as mcp
+        with patch(
+            "backend.personal_coach_mcp._get",
+            new=AsyncMock(return_value={"matched": False}),
+        ) as get_rec:
+            asyncio.run(mcp.get_plan_actual_deviation(activity_id=12345))
+        get_rec.assert_called_once_with("/api/runs/12345/plan-deviation")
 
     def test_propose_workout_plan_empty_returns_cal_synced_false(self):
         """Edge case: agent calls with [] — `len == 0` and
