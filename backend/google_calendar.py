@@ -259,13 +259,20 @@ class GoogleCalendar:
         start: str,
         end: str,
         description: str | None = None,
+        reminders: dict[str, Any] | None = None,
         calendar_id: str = "primary",
     ) -> dict[str, Any]:
         """Create a new event on the user's calendar. `start` / `end`
         are ISO 8601: a date-only string (YYYY-MM-DD) creates an
         all-day event, datetime with time creates a timed event.
         Returns the normalized event dict (same shape list_events
-        emits) so callers can stash the returned id."""
+        emits) so callers can stash the returned id.
+
+        `reminders` is passed through to Google's API verbatim. None
+        means "use the user's calendar default" (Google's behavior
+        when the field is omitted). To force silence, pass
+        `{"useDefault": False, "overrides": []}` — see the
+        planned-workout writer in api_server._plan_to_cal_payload."""
         creds = self._load_creds()
         if creds is None:
             raise RuntimeError("Google Calendar not connected")
@@ -274,6 +281,8 @@ class GoogleCalendar:
             body["description"] = description
         body["start"] = _iso_to_event_time(start)
         body["end"] = _iso_to_event_time(end)
+        if reminders is not None:
+            body["reminders"] = reminders
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         try:
             ev = (
@@ -293,10 +302,17 @@ class GoogleCalendar:
         start: str | None = None,
         end: str | None = None,
         description: str | None = None,
+        reminders: dict[str, Any] | None = None,
         calendar_id: str = "primary",
     ) -> dict[str, Any]:
         """Patch an existing event. Only the fields passed get
-        modified — None args leave the field as-is on Google's side."""
+        modified — None args leave the field as-is on Google's side.
+
+        Note on `reminders`: patch semantics mean omitting the field
+        leaves whatever the user (or another writer) set last. If you
+        pass a value here we WILL overwrite the user's manual setting;
+        callers writing planned workouts should know this and decide
+        whether to push silence on every update or only on insert."""
         creds = self._load_creds()
         if creds is None:
             raise RuntimeError("Google Calendar not connected")
@@ -309,6 +325,8 @@ class GoogleCalendar:
             body["start"] = _iso_to_event_time(start)
         if end is not None:
             body["end"] = _iso_to_event_time(end)
+        if reminders is not None:
+            body["reminders"] = reminders
         if not body:
             # Nothing to patch — return current state instead of a
             # zero-field API call.

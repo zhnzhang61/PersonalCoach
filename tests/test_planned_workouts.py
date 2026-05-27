@@ -241,6 +241,51 @@ class TestGoogleCalWriteMethods:
         assert body["start"] == {"date": "2026-05-30"}
         assert body["end"] == {"date": "2026-05-31"}
 
+    def test_insert_event_omits_reminders_field_when_not_passed(
+        self, gcal_with_creds
+    ):
+        """Default behavior must stay "use the calendar's defaults" —
+        omitting `reminders` from the body so Google falls back to the
+        user's calendar config. The opt-in silence path goes through
+        the kwarg, so other event types we might write in the future
+        (calendar sync, etc.) aren't surprise-silenced."""
+        from backend import google_calendar as gc_module
+
+        gcal_with_creds._load_creds = MagicMock(return_value=MagicMock())
+        mock_service = MagicMock()
+        mock_service.events.return_value.insert.return_value.execute.return_value = {
+            "id": "evt_x",
+        }
+        with patch.object(gc_module, "build", return_value=mock_service):
+            gcal_with_creds.insert_event(
+                summary="x", start="2026-05-30T09:00:00",
+                end="2026-05-30T10:00:00",
+            )
+        body = mock_service.events.return_value.insert.call_args.kwargs["body"]
+        assert "reminders" not in body
+
+    def test_insert_event_passes_reminders_through_to_body(
+        self, gcal_with_creds
+    ):
+        """When the caller passes `reminders`, it lands on the body
+        verbatim — Google's API consumes it directly."""
+        from backend import google_calendar as gc_module
+
+        gcal_with_creds._load_creds = MagicMock(return_value=MagicMock())
+        mock_service = MagicMock()
+        mock_service.events.return_value.insert.return_value.execute.return_value = {
+            "id": "evt_silent",
+        }
+        with patch.object(gc_module, "build", return_value=mock_service):
+            gcal_with_creds.insert_event(
+                summary="Silent workout",
+                start="2026-05-30T09:00:00",
+                end="2026-05-30T10:00:00",
+                reminders={"useDefault": False, "overrides": []},
+            )
+        body = mock_service.events.return_value.insert.call_args.kwargs["body"]
+        assert body["reminders"] == {"useDefault": False, "overrides": []}
+
     def test_update_event_patches_only_provided_fields(self, gcal_with_creds):
         from backend import google_calendar as gc_module
 
@@ -419,6 +464,56 @@ class TestPlannedWorkoutsAPI:
         assert kwargs["start"].startswith("2026-05-30T09:00:00")
         # End = start + 45min = 09:45 local.
         assert kwargs["end"].startswith("2026-05-30T09:45:00")
+
+    def test_create_silences_notifications(self, client):
+        """AI-proposed workouts must NOT fire native phone reminders —
+        the user already engaged via chat to schedule them. Pin that
+        `reminders={"useDefault": False, "overrides": []}` lands on the
+        Google insert call. (Without this, Google falls back to the
+        user's calendar default, which is usually a 10-min popup or
+        push.)"""
+        import backend.api_server as api_server
+        api_server.gcal.is_connected.return_value = True
+        api_server.gcal.insert_event.return_value = {"id": "evt_silent"}
+        api_server.processor.upsert_planned_workout.side_effect = [
+            {"id": "plan_s", "date": "2026-05-30", "type": "easy"},
+            {"id": "plan_s", "date": "2026-05-30", "type": "easy",
+             "cal_event_id": "evt_silent"},
+        ]
+        resp = client.post(
+            "/api/planned-workouts",
+            json={"date": "2026-05-30", "type": "easy"},
+        )
+        assert resp.status_code == 200
+        kwargs = api_server.gcal.insert_event.call_args.kwargs
+        assert kwargs.get("reminders") == {
+            "useDefault": False, "overrides": [],
+        }
+
+    def test_put_preserves_user_reminder_choice(self, client):
+        """Asymmetry by design: insert silences, but update intentionally
+        does NOT push `reminders` so a user who manually re-enabled
+        notifications on Google's side doesn't get them stomped on
+        every time we edit a field via the app. The update path
+        cherry-picks {summary, start, end, description} from
+        _plan_to_cal_payload and drops `reminders`. If a future refactor
+        switches to **-spreading the payload, this test catches it."""
+        import backend.api_server as api_server
+        api_server.gcal.is_connected.return_value = True
+        api_server.processor.upsert_planned_workout.return_value = {
+            "id": "plan_a", "date": "2026-05-30", "type": "tempo",
+            "cal_event_id": "evt_xyz",
+        }
+        resp = client.put(
+            "/api/planned-workouts/plan_a",
+            json={"duration_min": 50},
+        )
+        assert resp.status_code == 200
+        kwargs = api_server.gcal.update_event.call_args.kwargs
+        assert "reminders" not in kwargs, (
+            "update path must not push reminders — see _plan_to_cal_payload "
+            "comment on the asymmetry."
+        )
 
     def test_create_cal_failure_falls_back_to_json_only(self, client):
         """Network blip or Cal API error — JSON row was saved, Cal

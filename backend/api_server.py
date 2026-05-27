@@ -829,9 +829,18 @@ def _plan_to_cal_payload(plan: dict) -> dict[str, Any]:
     we want to write. Title = workout type (capitalized);
     description embeds the marker line + structured fields so the
     read merge in /api/planned-workouts can recognize it. Time:
-    default to a 1-hour block at 09:00 local — better than all-day
-    for phone reminders, but not so specific that the user can't
-    drag it around in Google Cal."""
+    default to a 1-hour block at 09:00 local — gives the event a
+    concrete slot the user can drag around in Google Cal.
+
+    Notifications are silenced (`reminders.useDefault=False` + empty
+    overrides). Reasoning: AI-proposed workouts shouldn't fire native
+    phone alarms on top of whatever flow the user has — the user
+    already engaged via chat to schedule this. The create path
+    spreads this whole dict into insert_event so the silence lands;
+    the update path explicitly cherry-picks {summary, start, end,
+    description} and intentionally drops `reminders`, so if the user
+    re-enables reminders on Google's side our subsequent edits won't
+    stomp on that choice."""
     title = plan["type"].capitalize() + " workout"
     desc_lines = [
         "personalcoach.training=true",
@@ -862,6 +871,7 @@ def _plan_to_cal_payload(plan: dict) -> dict[str, Any]:
         "start": start_local.isoformat(),
         "end": end_local.isoformat(),
         "description": "\n".join(desc_lines),
+        "reminders": {"useDefault": False, "overrides": []},
     }
 
 
