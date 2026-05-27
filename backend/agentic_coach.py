@@ -44,6 +44,7 @@ import sqlite3
 import threading
 from datetime import date, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.messages import (
     AIMessage,
@@ -72,7 +73,7 @@ from backend.trace_logger import TraceLogger, prompt_hash as _prompt_hash
 # that ran" (e.g., uncommitted edit).
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION = "v7"
+PROMPT_VERSION = "v8"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +328,68 @@ explicit conflicts the agent owes the user.
 
 
 # ---------------------------------------------------------------------------
+# System-prompt builder — runs every turn so today's date is fresh.
+# ---------------------------------------------------------------------------
+
+def _user_tz() -> datetime.tzinfo:
+    """User's local timezone for resolving \"today\".
+
+    Priority: `PERSONAL_COACH_TZ` env var (IANA name, e.g.
+    `Asia/Shanghai`) → process-local tz (`datetime.now().astimezone()`).
+    The env override exists so a deploy on a UTC server (Docker, cloud,
+    a launchd that lost its TZ) doesn't silently put the agent in a
+    different day than the user — the exact bug class this whole
+    builder is trying to eliminate. Falls back to UTC if the override
+    is set but unparseable.
+    """
+    override = os.environ.get("PERSONAL_COACH_TZ")
+    if override:
+        try:
+            return ZoneInfo(override)
+        except ZoneInfoNotFoundError:
+            pass
+    local = datetime.datetime.now().astimezone().tzinfo
+    return local or datetime.timezone.utc
+
+
+# Sentinel header used purely for prompt-hash stability. The hash needs
+# to cover the wrapper template (so wrapper edits show up in
+# PROMPT_CHANGELOG.md) without churning every day as the actual date
+# rolls. Render with a fixed date and feed *this* string into
+# _prompt_hash. The runtime header in _build_prompt() uses today's
+# real date but follows the same template shape.
+_HEADER_TEMPLATE = (
+    "Today is {today_iso} ({weekday}). When the user says "
+    "\"today\", \"tomorrow\", \"this week\" "
+    "(or 今天 / 明天 / 后天 / 这周 / 这个礼拜), "
+    "resolve relative to this date. "
+    "Never schedule planned workouts in the past."
+)
+
+
+def _build_prompt(state: dict) -> list[BaseMessage]:
+    """LangGraph create_react_agent `prompt` callable. Prepends a
+    SystemMessage that pins today's date in front of the persona
+    prompt, then returns the conversation history. Without this the
+    agent has no date anchor (the persona prompt is static and tool
+    results don't always include explicit dates) and ends up planning
+    workouts for whatever day its training data defaulted to.
+
+    `today` is snapshotted once per call so the iso-date and weekday
+    can't disagree across a midnight tick. tz comes from `_user_tz()`
+    rather than `date.today()` to avoid a server/user tz skew
+    (UTC server + Asia/Shanghai user can be a full day off late at
+    night)."""
+    today = datetime.datetime.now(_user_tz()).date()
+    header = _HEADER_TEMPLATE.format(
+        today_iso=today.isoformat(),
+        weekday=today.strftime("%A"),
+    )
+    system = SystemMessage(content=f"{header}\n\n{_SYSTEM_PROMPT}")
+    return [system] + list(state.get("messages", []))
+
+
+# ---------------------------------------------------------------------------
 # Pre-fetch plans — tool name + arg dict per action. Run in parallel
 # with asyncio.gather, results JSON-injected into the system prompt.
 # ---------------------------------------------------------------------------
@@ -504,11 +567,22 @@ class AgenticCoach:
         self._last_provider: str | None = None
 
         # Structured tracing. One TraceLogger per coach; writes JSONL
-        # rows to data/traces/YYYY-MM-DD.jsonl. The hash is computed
-        # once at construction since _SYSTEM_PROMPT is module-level —
-        # if it ever becomes dynamic per-turn this needs to move.
+        # rows to data/traces/YYYY-MM-DD.jsonl.
+        #
+        # The hash must cover what the LLM actually sees — that's the
+        # date header wrapper + the persona body, not just the persona.
+        # Render the header with a fixed sentinel date so the hash is
+        # stable across days (the daily-changing date isn't a prompt
+        # change). Any edit to either the wrapper template or
+        # _SYSTEM_PROMPT moves the hash; PROMPT_VERSION must be bumped
+        # in lockstep (see docs/PROMPT_CHANGELOG.md).
         self.tracer = TraceLogger()
-        self._prompt_hash = _prompt_hash(_SYSTEM_PROMPT)
+        _sentinel_header = _HEADER_TEMPLATE.format(
+            today_iso="0000-00-00", weekday="Sentinel",
+        )
+        self._prompt_hash = _prompt_hash(
+            f"{_sentinel_header}\n\n{_SYSTEM_PROMPT}"
+        )
 
         atexit.register(self._cleanup_sync)
 
@@ -623,7 +697,15 @@ class AgenticCoach:
                 model=llm,
                 tools=self._mcp_tools,
                 checkpointer=self._aio_checkpointer,
-                prompt=_SYSTEM_PROMPT,
+                # Callable rather than the raw string so today's date is
+                # resolved fresh every turn — otherwise a long-lived
+                # server process would freeze "today" at startup time,
+                # and the agent (which has no other date anchor in its
+                # context) ends up planning workouts for the wrong day.
+                # Real repro 2026-05-27: user asked "排个今天40min easy
+                # run" → agent picked 2026-05-14 (started writing past
+                # events). See _build_prompt below for the wrapper.
+                prompt=_build_prompt,
             )
 
     def _cleanup_sync(self) -> None:
