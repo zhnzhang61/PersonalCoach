@@ -50,6 +50,16 @@ async def _get(path: str, **params: Any) -> Any:
         return r.json()
 
 
+async def _post(path: str, body: dict | None = None) -> Any:
+    """POST an api_server endpoint with optional JSON body. Same raise
+    semantics as _get. Added in PR P2 for the resolve_decision +
+    propose_model MCP tools, which mutate state and so need POST."""
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.post(f"{API_BASE}{path}", json=body or {})
+        r.raise_for_status()
+        return r.json()
+
+
 # =============================================================================
 # Pace formatting (double-track: dec + str everywhere)
 # =============================================================================
@@ -750,6 +760,77 @@ async def list_models(
     if status:
         params["status"] = status
     return await _get("/api/memory/models", **params)
+
+
+@mcp.tool()
+async def list_pending_decisions() -> dict:
+    """List parked decisions awaiting user confirmation.
+
+    Includes new_topic + conflict + episode_linking + new_model
+    (PR P2) kinds. Use this to discover what proposals the user
+    needs to confirm or reject in the current session.
+
+    Returns `{"decisions": [{decision_id, kind, proposal, candidates,
+    created_at}, ...]}`. Filter on `kind` client-side for narrow
+    views (e.g. only new_model proposals during a "review models"
+    flow)."""
+    return await _get("/api/memory/decisions")
+
+
+@mcp.tool()
+async def propose_model_from_topic(topic_id: str) -> dict:
+    """PR P2: Ask the LLM whether `topic_id`'s accumulated episodes
+    can be parametrized into a model.
+
+    On success, parks a 'new_model' decision the user can confirm via
+    `resolve_decision(decision_id, action='create_new')`. On skip,
+    returns the reason (too few episodes, LLM declined, parse error).
+
+    Use this when the user says "summarize what we know about X" and
+    you find a topic with enough related episodes to generalize, OR
+    when the user explicitly asks "any patterns worth promoting to a
+    model?".
+
+    Response:
+      {"status": "parked",    "decision_id": "dec_...", "proposal": {...}}
+      {"status": "skipped",   "reason": "...",          ...}
+      {"status": "llm_error", "raw": "...",             "reason": "..."}
+    """
+    return await _post(f"/api/memory/topics/{topic_id}/propose_model")
+
+
+@mcp.tool()
+async def resolve_decision(
+    decision_id: str,
+    action: str,
+    target_topic_id: str | None = None,
+    target_topic_ids: list[str] | None = None,
+) -> dict:
+    """PR P2: Apply the user's verdict on a parked decision.
+
+    Use after the user answers yes/no/which-target to a question
+    like "should I promote topic X to a parameterized model?".
+
+    `action`:
+      - 'create_new' — accept the proposal as-is. For new_model: creates
+                       the model + links to source topic.
+      - 'merge'      — fold into existing target_topic_id (new_topic /
+                       conflict kinds only).
+      - 'link'       — link parked episode to target_topic_ids
+                       (episode_linking kind only).
+      - 'reject'     — discard. No side effects beyond marking row
+                       resolved.
+
+    Returns `{"ok": true, "result": <topic_id | model_id | list | None>}`
+    on success. Raises on missing decision or invalid args."""
+    body = {"action": action}
+    if target_topic_id:
+        body["target_topic_id"] = target_topic_id
+    if target_topic_ids is not None:
+        body["target_topic_ids"] = target_topic_ids
+    return await _post(
+        f"/api/memory/decisions/{decision_id}/resolve", body=body
+    )
 
 
 @mcp.tool()
