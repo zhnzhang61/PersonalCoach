@@ -5,11 +5,12 @@ account and reads / writes events on their primary calendar. This is
 single-user (the owner runs it locally), so we store the refresh token
 in a JSON file under data/oauth/ — sqlite would be overkill for one row.
 
-Phase 1 was read-only (calendar.readonly). PR P4a (2026-05-27) bumped
-SCOPES to include calendar.events so AI-proposed workout plans can be
+Phase 1 was read-only (calendar.readonly). PR P4a (2026-05-27) switched
+to calendar.events (read+write) so AI-proposed workout plans can be
 written directly to the user's calendar. Existing tokens re-authorize
-on next /api/calendar/connect — `include_granted_scopes=true` (already
-set) makes that an incremental-grant flow.
+on next /api/calendar/connect; the consent screen will now ask only
+for the events scope. (We dropped readonly from the SCOPES list — see
+the SCOPES comment below for why mixing them broke OAuth.)
 """
 
 from __future__ import annotations
@@ -42,13 +43,20 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# Phase 2 (PR P4a): added "calendar.events" so we can write AI-proposed
-# workout plans back to the user's calendar. .readonly is kept so we
-# can still fall back to the broader read scope if needed; in practice
-# "calendar.events" already grants read on events we own, but explicit
-# .readonly is harmless and clearer.
+# Phase 2 (PR P4a): switched to "calendar.events" so we can write
+# AI-proposed workout plans back to the user's calendar.
+#
+# We previously listed both "calendar.readonly" AND "calendar.events" —
+# but Google's consent screen consolidates them (events ⊇ readonly for
+# the events resource) and returns a token whose granted scopes are
+# just ["calendar.events"]. google_auth_oauthlib.fetch_token then
+# raises "Scope has changed from 'A B' to 'B'" and the callback errors
+# out — the user clicks Connect, returns, and is_connected() is still
+# False because no token ever got persisted. (This bit a real user on
+# 2026-05-27.) Listing just calendar.events avoids the mismatch and is
+# functionally identical: it grants read+write on events, which is
+# everything this module actually does.
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
 ]
 
