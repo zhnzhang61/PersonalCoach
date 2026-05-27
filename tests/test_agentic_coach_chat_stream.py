@@ -144,6 +144,70 @@ class TestChatStreamContentHandling:
         assert token_events == [{"type": "token", "content": "real"}]
 
 
+class TestChatStreamCrossLoopBridge:
+    """Codex P1 catch on PR #73. AsyncSqliteSaver + MCP + the LangGraph
+    agent are bound to `self._loop` (the daemon-thread loop). If
+    chat_stream drives `astream_events` directly on the request's
+    ASGI loop instead of bridging through `self._loop`, we get
+    cross-loop failures: either the stream initializes resources on
+    the request loop (and later sync chat() calls use them from the
+    wrong loop), or it cross-loop-accesses bg-loop-bound resources.
+
+    These tests lock in that astream_events runs ON the agent's
+    background loop, not on the caller's loop."""
+
+    def test_astream_events_runs_on_agent_loop_not_caller_loop(self, tmp_chat_db):
+        captured: dict[str, object] = {}
+
+        async def _capture_then_yield(events):
+            # Captured at first __anext__ time — inside the producer
+            # coroutine on whichever loop is driving the iteration.
+            captured["loop_id"] = id(asyncio.get_running_loop())
+            for ev in events:
+                yield ev
+
+        coach = AgenticCoach(db_path=tmp_chat_db, skip_api_probe=True)
+        coach._ensure_agent = AsyncMock()
+        coach._agent = MagicMock()
+        coach._agent.astream_events = MagicMock(
+            return_value=_capture_then_yield([
+                {"event": "on_chat_model_stream", "data": {"chunk": _chunk("ok")}},
+            ])
+        )
+        coach._last_provider = "gemini"
+
+        # _collect runs chat_stream inside its own asyncio.run loop.
+        # That's the "request loop" analog — captured loop should NOT
+        # be this one; it should be coach._loop.
+        _ = _collect(coach.chat_stream(user_input="hi", thread_id="t"))
+
+        # The "caller loop" was created fresh inside _collect's
+        # asyncio.run and has since closed; we can't compare ids
+        # directly. But we CAN assert the captured loop is the
+        # agent's owned loop.
+        assert captured["loop_id"] == id(coach._loop)
+
+    def test_ensure_agent_called_on_agent_loop(self, tmp_chat_db):
+        captured: dict[str, object] = {}
+
+        async def _capture_ensure_loop():
+            captured["loop_id"] = id(asyncio.get_running_loop())
+
+        coach = AgenticCoach(db_path=tmp_chat_db, skip_api_probe=True)
+        coach._ensure_agent = _capture_ensure_loop  # raw coroutine fn
+        coach._agent = MagicMock()
+        coach._agent.astream_events = MagicMock(
+            return_value=_fake_stream([])  # immediate finish, no events
+        )
+        coach._last_provider = "gemini"
+
+        _ = _collect(coach.chat_stream(user_input="hi", thread_id="t"))
+
+        # _ensure_agent must run on the same loop that owns
+        # AsyncSqliteSaver/MCP — i.e., coach._loop.
+        assert captured["loop_id"] == id(coach._loop)
+
+
 class TestChatStreamErrorPath:
     def test_exception_in_underlying_stream_becomes_error_event(self, tmp_chat_db):
         """If LangGraph (rate limit, network, etc.) raises mid-stream
