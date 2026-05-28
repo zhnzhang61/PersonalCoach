@@ -232,7 +232,7 @@ two streams agree even when their vocabulary matches.
 
 ##### Cognitive Memory Engine (CME) — `cognitive_memory_engine.py`
 
-Long-term memory in `cognition.db`. Five tables:
+Long-term memory in `cognition.db`. Six tables:
 
 - **topics** — state machine (Open / Testing / Resolved / Conflicting)
   + `working_conclusion` + `open_question` + `related_models`.
@@ -242,8 +242,9 @@ Long-term memory in `cognition.db`. Five tables:
 - **models** — parameterized observations about the user (the pattern
   store; see below). Parallel to episodes.
 - **topic_episode_links** — junction (canonical link source).
-- **pending_clarifications** + **topic_decisions** — the agent's
-  question queue + an audit log of LLM proposals.
+- **pending_clarifications** — the agent's question queue.
+- **topic_decisions** — audit log of LLM proposals (new_model /
+  merge / conflict).
 
 `consolidate_memory_background` is the LLM call that, on session close,
 extracts `{new_topics, topic_updates, new_episodes, conflicts}` from a
@@ -311,10 +312,12 @@ A conversation mirrors an athlete ↔ human-coach exchange. Sessions are
    internalized form (topics/episodes/models) on demand via tools.
 
 Built surface: streaming chat (`/api/ai/chat/stream`, SSE), 5 actions
-(`review_workout`, `review_health`, `make_plan`, `mental`,
-`summarize_and_archive`), session list + delete, multi-day DayDivider
-in the thread, per-message timestamps. Pre-fetch plans hydrate
-action turns with parallel MCP calls injected as system context.
+(`review_workout`, `review_health`, `make_plan`, `follow_up_memory`,
+`summarize_and_archive` — note `follow_up_memory`'s UI label is
+"Memory" with a brain icon), session list + delete, multi-day
+DayDivider in the thread, per-message timestamps. Pre-fetch plans
+hydrate action turns with parallel MCP calls injected as system
+context.
 
 #### 3.4.3 Prompt versioning
 
@@ -498,10 +501,12 @@ Backend is now a `backend/` package (was a flat top-level dump);
   user's `lap_categories` is sparse (~0 tempo-tagged laps). Build via
   an HR-band heuristic (laps with avg_hr in LT × [0.88, 1.02],
   duration ≥ 3 min) so it doesn't need user labels. ~½ day.
-- **Sync gap-resilience + stub detection** — Garmin sync layer; not AI
-  work.
 - **Non-running activity visibility** (swim/bike on Activity tab) — UI
-  bug, not AI.
+  bug, not AI. `/api/runs` filters `"running" in typeKey`, so synced
+  swims/bikes fall through both it and `/api/manual-activities`.
+
+(*Sync gap-resilience + stub detection shipped in #77 — `_is_stub` in
+`garmin_sync.py` + `days_back` bumped 5→30 — so it's no longer a gap.*)
 
 ### 4.6 Post-substrate features (sequenced after Phase 3)
 

@@ -215,7 +215,7 @@ gemini → groq → 本地）。
 
 ##### 认知记忆引擎（CME）— `cognitive_memory_engine.py`
 
-长期记忆，存在 `cognition.db`。五张表：
+长期记忆，存在 `cognition.db`。六张表：
 
 - **topics** — 状态机（Open / Testing / Resolved / Conflicting）+
   `working_conclusion` + `open_question` + `related_models`。
@@ -223,8 +223,8 @@ gemini → groq → 本地）。
   类型（`travel`/`illness`/`life_stress`、`daily_checkin`）。
 - **models** — 关于用户的参数化观察（模式库；见下）。与 episodes 平行。
 - **topic_episode_links** — junction（链接的权威来源）。
-- **pending_clarifications** + **topic_decisions** — agent 的问题队列 +
-  LLM 提案的审计日志。
+- **pending_clarifications** — agent 的问题队列。
+- **topic_decisions** — LLM 提案的审计日志（new_model / merge / conflict）。
 
 `consolidate_memory_background` 是那个 LLM 调用：session 关闭时，从已关闭
 的聊天线程里抽出 `{new_topics, topic_updates, new_episodes, conflicts}`
@@ -284,10 +284,11 @@ agent 会自主查这 5 个 baseline 并引用精确数字——不需要 prompt
    （topics/episodes/models）。
 
 已建表面：流式聊天（`/api/ai/chat/stream`，SSE）、5 个 action
-（`review_workout`、`review_health`、`make_plan`、`mental`、
-`summarize_and_archive`）、session 列表 + 删除、线程里的多日 DayDivider、
-每条消息时间戳。Pre-fetch plan 用并行 MCP 调用 hydrate action 轮次，作为
-system context 注入。
+（`review_workout`、`review_health`、`make_plan`、`follow_up_memory`、
+`summarize_and_archive`——注意 `follow_up_memory` 的 UI 标签是 "Memory"、
+配大脑图标）、session 列表 + 删除、线程里的多日 DayDivider、每条消息
+时间戳。Pre-fetch plan 用并行 MCP 调用 hydrate action 轮次，作为 system
+context 注入。
 
 #### 3.4.3 Prompt 版本管理
 
@@ -454,8 +455,12 @@ consolidate_memory_background 的轨迹"（CME 提案管道现在记 `topic_deci
   `lap_categories` 太稀疏（~0 个 tempo 标签）。改用 HR-band 启发式（laps
   里 avg_hr 落在 LT × [0.88, 1.02]、时长 ≥ 3 分钟）就不需要用户标签了。
   约半天。
-- **同步 gap 韧性 + stub 检测** — Garmin 同步层；不是 AI 工作。
 - **非跑步活动可见性**（Activity tab 上的游泳/骑行）— UI bug，不是 AI。
+  `/api/runs` 过滤 `"running" in typeKey`，所以同步进来的游泳/骑行从它和
+  `/api/manual-activities` 两边都漏掉。
+
+（*同步 gap 韧性 + stub 检测已在 #77 上线——`garmin_sync.py` 里的
+`_is_stub` + `days_back` 从 5 调到 30——所以不再是缺口。*）
 
 ### 4.6 substrate 之后的功能（排在 Phase 3 之后）
 
