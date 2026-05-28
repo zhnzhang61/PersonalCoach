@@ -403,7 +403,7 @@ doc.
 
 | PR | Scope | Estimate | Why this slot |
 |---|---|---|---|
-| **E** | LangSmith wiring (`LANGSMITH_API_KEY` env + middleware around agent calls). Free tier OK for single-user volume. | ~½ day | Pure upgrade on top of B's JSONL traces. After ≥1 month of usage data so we can query meaningfully. |
+| **E** ✅ done 2026-05-28 | LangSmith wiring. New `backend/langsmith_setup.py` reports tracing status across the four env-var combinations (flag on/off × key set/missing) — distinguishes the silent-failure mode (`MISCONFIGURED` — flag set but key absent → spans 401 silently) from clean OFF. `GET /api/debug/observability` surfaces the status (NEVER echoes the API key value — pinned by a regression test). One-line startup log emit so the wiring is obvious in uvicorn output. Zero changes to the agent itself: langchain auto-instruments when env vars are set. New `docs/langsmith-setup.md` walks signup → env vars → verification. 27 new tests across all four env-var combos + the no-key-leak invariant at both helper and HTTP layers. | ~½ day | Pure observability upgrade on top of B's JSONL traces. Closes the per-tool-call visibility gap we hit during P6 baseline testing (JSONL trace shows `user_input` + `final_answer`, not which `get_model` calls fired). |
 
 ### After Phase 3
 
@@ -456,36 +456,34 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: E (LangSmith)** — wire `LANGSMITH_API_KEY` env +
-middleware around the agent's LLM calls so the JSONL traces (from
-PR B) get mirrored to LangSmith's hosted UI for ad-hoc slicing.
-Free tier is fine for single-user volume. ~½ day. Worth doing now
-because the agent's coaching surface is mature enough (5 input
-streams + 5 stat-derived models) that real chat turns will produce
-interesting traces to query.
+**Phase 2 + Phase 3 substrate is done.** All four agent input
+streams live, pattern store has 5 stat-derived baselines, JSONL
+traces capture every turn locally, LangSmith captures every tool
+call + LLM round-trip when env vars are set. Real chat tests
+(2026-05-28) confirmed the agent autonomously consults all 5
+baselines and quotes exact numbers — no prompt changes needed.
 
-**OR deferred from P6: `tempo.pace_hr_table`** — typical pace per
-HR band on tempo days. Two paths to get it useful:
-1. **Wait for tagged data** — the model needs `lap_categories`
-   labeled as "Tempo" / "Threshold" on enough laps to characterize.
-   User's current data has ~0 tempo-tagged laps; the model would
-   be empty.
-2. **HR-band heuristic** — identify tempo segments by HR alone
-   (laps with avg_hr in LT × [0.88, 1.02], duration ≥ 3 min). No
-   user labels needed; works on any run with HRM. ~½ day to add.
+**Three obvious follow-up candidates** (none blocked, pick by
+desire):
 
-Suggested branch: `add-langsmith-tracing` (for E) or
-`add-tempo-pace-hr-table` (for the deferred model).
+1. **`POST /api/memory/models/refit-all`** — iterate `REFIT_REGISTRY`,
+   refit every model in one call. Wire to startup so DB rebuilds
+   don't leave the agent reading a stale or empty model store.
+   ~½ day. Surfaced as a real gap during P6 batch 2 testing (HRV
+   model was missing on a fresh CME DB until we manually re-refit).
+2. **`tempo.pace_hr_table` via HR-band heuristic** — typical pace
+   per HR band on tempo days. Originally deferred in P6 batch 2
+   because `lap_categories` was sparse; an HR-band heuristic
+   (laps with avg_hr in LT × [0.88, 1.02], duration ≥ 3 min) doesn't
+   need user labels and works on any HRM run. ~½ day.
+3. **§6 advice trail / §8 goal feasibility** — sequenced as
+   post-Phase-3 in the original design. Each is ~2-3 days of work
+   and depends on having Phase 2 data accumulated, which we now
+   do.
 
-Phase 0 + Phase 1 + P1–P5 + P6 (batch 1 + 2) complete. All four
-agent input streams live: objective (Garmin sensors + weather +
-terrain), perceived (check-ins), planned (Cal-synced workouts with
-deviation compute), external (travel/illness/life-stress episodes).
-Pattern store now has 5 stat-derived baselines: HRV, aerobic
-decoupling, cadence, sleep debt, weekly volume trend. After E
-lands, the substrate is functionally "done" for §1–§5 and we can
-revisit §6/§8 (advice trail / goal feasibility) or backfill the
-tempo model when data warrants it.
+Suggested branches: `add-refit-all-endpoint`,
+`add-tempo-pace-hr-table`, `add-advice-trail`,
+`add-goal-feasibility`.
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —

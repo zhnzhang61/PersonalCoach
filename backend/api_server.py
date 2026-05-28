@@ -18,6 +18,7 @@ from backend.agentic_coach import AgenticCoach
 from backend.cognitive_memory_engine import MemoryOS
 from backend.data_processor import DataProcessor
 from backend.google_calendar import GoogleCalendar
+from backend.langsmith_setup import langsmith_status, startup_log_line
 from backend.seed_models import (
     refit_aerobic_decoupling_baseline,
     refit_cadence_baseline,
@@ -1857,3 +1858,22 @@ def consolidate_memory(body: ConsolidateInput) -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, Literal["ok"]]:
     return {"status": "ok"}
+
+
+@app.get("/api/debug/observability")
+def observability_status() -> dict[str, Any]:
+    """LangSmith tracing status (PR E). Lets the operator / agent
+    check whether spans are flowing without having to grep env vars
+    or restart the server. Body shape matches `langsmith_status()`
+    and never echoes the API key value (would leak a secret on a
+    forgotten port-forward)."""
+    return langsmith_status()
+
+
+# Module-level emit so the wiring is obvious in uvicorn's startup
+# output. Three states: ON / MISCONFIGURED / OFF — see
+# langsmith_setup.startup_log_line for the contract. Using print()
+# rather than logging because uvicorn's default logger doesn't
+# surface app-side logger.info() in `--reload` mode, and we want
+# this line to be hard to miss.
+print(startup_log_line(), flush=True)
