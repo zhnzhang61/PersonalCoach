@@ -21,7 +21,7 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from backend.llm_provider import call_embedding, call_llm, cosine_similarity
 from backend.trace_logger import TraceLogger
@@ -528,6 +528,103 @@ class MemoryOS:
             d["related_topic_ids"] = json.loads(d["related_topic_ids"])
             result.append(d)
         return result
+
+    # Event types that act as "external context" for a run — the
+    # things that explain why a sensor number looked the way it did
+    # without being IN the sensor stream (P5 §4). Centralized here so
+    # the API endpoint, MCP tool, and any future migration share
+    # one source of truth.
+    EXTERNAL_EVENT_TYPES: ClassVar[tuple[str, ...]] = (
+        "travel", "illness", "life_stress",
+    )
+
+    def list_external_events(
+        self, start_date: str, end_date: str
+    ) -> list[dict]:
+        """Return external-context episodes (travel / illness /
+        life_stress) whose date range overlaps [start_date, end_date]
+        (YYYY-MM-DD, inclusive on both sides).
+
+        Each event's `context` dict carries `start_date` + `end_date`;
+        an event qualifies when `event.start_date <= range.end_date`
+        AND `event.end_date >= range.start_date`.
+
+        Date-resolution fallback chain (most to least authoritative):
+          1. context.start_date / context.end_date (the normal path —
+             this is what `create_external_event` writes).
+          2. episode.timestamp[:10] (legacy / partially-filled rows
+             saved before P5 standardized the context shape).
+          3. episode.created_at[:10] (sentinel — for the case where
+             both context dates AND timestamp are missing, which
+             should never happen via the API but can if a row was
+             hand-edited or imported from elsewhere).
+
+        Rows for which ALL THREE are missing are skipped rather than
+        included with empty-string sentinels (empty-string sort places
+        them before any real date, which is misleading; and an event
+        with no date is functionally indistinguishable from "no event
+        recorded").
+
+        Returns episodes ordered earliest-first by start_date (the
+        agent reasons over the timeline), unlike list_episodes which
+        is recency-first.
+        """
+        placeholders = ",".join("?" * len(self.EXTERNAL_EVENT_TYPES))
+        rows = self.conn.execute(
+            f"""SELECT * FROM episodes
+                WHERE event_type IN ({placeholders})
+                ORDER BY timestamp ASC""",
+            self.EXTERNAL_EVENT_TYPES,
+        ).fetchall()
+
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            ctx = json.loads(d["context_json"])
+            d["context"] = ctx
+            del d["context_json"]
+            d["related_topic_ids"] = json.loads(d["related_topic_ids"])
+            # Try each fallback in order; bail if all empty so we
+            # don't ship a "" sentinel that distorts the timeline.
+            ev_start = (
+                ctx.get("start_date")
+                or (d["timestamp"] or "")[:10]
+                or (d.get("created_at") or "")[:10]
+            )
+            if not ev_start:
+                continue
+            ev_end = (
+                ctx.get("end_date")
+                or (d["timestamp"] or "")[:10]
+                or (d.get("created_at") or "")[:10]
+                or ev_start
+            )
+            # Range overlap.
+            if ev_start <= end_date and ev_end >= start_date:
+                # Promote derived range to top level for caller
+                # convenience (agent doesn't have to dig into
+                # context to know span).
+                d["start_date"] = ev_start
+                d["end_date"] = ev_end
+                out.append(d)
+        out.sort(key=lambda e: e.get("start_date") or "")
+        return out
+
+    def delete_episode(self, episode_id: str) -> bool:
+        """Hard-delete an episode + its topic links. Used by the
+        external-events UI when the user removes a logged event.
+        Returns True when a row was removed, False when nothing
+        matched (idempotent — UI delete sweeps don't 404 on a
+        re-click)."""
+        cur = self.conn.execute(
+            "DELETE FROM episodes WHERE episode_id = ?", (episode_id,)
+        )
+        self.conn.execute(
+            "DELETE FROM topic_episode_links WHERE episode_id = ?",
+            (episode_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def search_episodes(self, keywords: list[str], limit: int = 10) -> list[dict]:
         """Simple keyword search across context_json and lesson_learned."""
