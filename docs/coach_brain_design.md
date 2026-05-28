@@ -396,7 +396,7 @@ doc.
 | **P4a** ✅ done 2026-05-27 | Planned workouts (intent layer §3) — agent → Cal → user-phone loop. JSON storage at `data/manual_inputs/planned_workouts.json` + CRUD endpoints. Google Cal `SCOPES` switched to `calendar.events` (read+write); existing users re-authorize once on next /api/calendar/connect. New `GoogleCalendar` methods `insert_event` / `update_event` / `delete_event` (events are silent — `reminders.useDefault=False`). MCP tools `propose_workout_plan(workouts)` and `get_planned_workouts(start, end)`. Today-date pinned into the system prompt via `_build_prompt` callable (agent had no date anchor and was scheduling in the past). Cal-write failures degrade to JSON-only. | ~2.5 days + 4 follow-up fix PRs | Closes the actual value loop: AI gives a plan, it lands on the user's phone Cal. Cal-read-only meant copy-paste 30 fields — unworkable. |
 | **P4b** ✅ done 2026-05-27 | Manual editing UI + plan-vs-actual deviation compute. Training tab gets `<UpcomingWorkouts>` (next 14 days, each row taps into an `<EditWorkoutModal>`). "+ Add" button creates plans manually outside the chat flow. Edit/delete sync to Google Cal via P4a's PUT/DELETE endpoints. Backend gains `_compute_plan_deviation_for_summary` + `GET /api/runs/{id}/plan-deviation`; MCP tool `get_plan_actual_deviation(activity_id)` returns `{matched, planned, actual, deltas}` (only fields the plan pinned get a delta; `actual - planned` convention). `/api/calendar/events` server-side reclassifies Google events whose description carries `personalcoach.training=true` from `source: "google"` to `source: "planned_workout"`, dyed amber on `PlanCalendar` (vs slate for life events, green for completed runs). 9 new tests. | ~1 day | Polishes the user side — manage plans without going through chat or Google Cal. Deviation compute powers the "did you do what we said?" coaching turn. |
 | **P5** ✅ done 2026-05-27 | External context channels (§4). Backend: new `compute_route_profile(activity_id)` returns 5-band grade distribution + climb/loss/min-max grade; `GET /api/runs/{id}/route-profile` + MCP tool `get_run_route_profile` (404 → safe-empty payload). CME gains `EXTERNAL_EVENT_TYPES` (`travel`/`illness`/`life_stress`), `list_external_events(start, end)` with date-range overlap + ASC ordering + timestamp fallback, and `delete_episode(id)` (idempotent, also cleans `topic_episode_links`). New endpoints `GET/POST/DELETE /api/memory/external-events` with whitelist+range+description validation. MCP tool `get_external_events(start, end)`. Frontend: `<ExternalEvents>` card on Health tab with type-colored chips (travel=sky, illness=rose, life_stress=amber) + add modal (type pills, date range with `min={start}` guard on end picker, description with type-specific placeholder, save blocked when description empty or range inverted). Weather was already inlined on `get_run_detail` (no work needed). Menstrual MCP surface deferred — user's `get_menstrual_calendar_data` files are all empty for this profile, no point shipping an empty tool. 26 new tests. | ~1 day | Closes the "agent can't see why" gap. Three new user-supplied context channels + terrain awareness on every run. |
-| **P6** | First batch of stat-derived models (§1, §5): aerobic decoupling per run, pace-HR table for tempos, cadence baseline, sleep debt, cycle-volume diff. Each follows P1+P2 stat-derivation path. | ~2-3 days | First real B-bucket payloads. Builds on P1 store + P2 pipeline. |
+| **P6** (batch 1) ✅ done 2026-05-27 | Two stat-derived models on the P1+P2 scaffold: `aerobic.decoupling_baseline` (mean_std of % HR/pace drift on easy/long runs) and `cadence.baseline` (mean_std of spm on easy runs). Shared helpers: `_compute_run_decoupling_pct` (half-vs-half from telemetry), `_compute_run_avg_cadence` (mean spm with sub-100 filter), `_is_aerobic_run` (duration ≥ 30 min + avg_hr < user's LT × 0.92), `_aerobic_hr_ceiling` (reads LT from profile, falls back to 155 bpm), `_compute_baseline_params` (shared mean/sd/Forming-vs-Stable status). Refit registry in `/api/memory/models/refit/{key}` now dict-shaped — adding a future model is one registry entry. 30 new tests. **Pace-HR table for tempos, sleep debt, cycle-volume diff still pending** — batch 2 of P6 will follow once we see how the agent uses these two in real chat turns. | ~1 day | First real B-bucket payloads beyond the HRV seed. Aerobic decoupling lets the agent answer "is this drift normal for you?", cadence flags fatigue / shoe issues. |
 
 ### Phase 3 — Trace upgrade
 
@@ -455,30 +455,34 @@ fix cycles). Phase 0: 1.5 days. Phase 1: 1 day. Phase 2: 7–11 days
 
 ### Where to start
 
-**Next PR: P6** — First batch of stat-derived models (§1, §5). Each
-follows the P1+P2 path: derivation function reads from data_processor,
-computes a parameterized observation, persists via `create_model`,
-agent surfaces via `get_model`/`list_models`. Candidates from the
-roadmap:
-- `aerobic.decoupling_per_run` (linear_trend) — pace/HR drift across
-  the second half vs first half of an aerobic run
-- `tempo.pace_hr_table` (lookup) — typical pace at each HR band on
-  tempo days
-- `cadence.baseline` (mean_std) — steady-state cadence at easy effort
-- `sleep.debt_14d` (rolling) — running 14-day sleep deficit
-- `cycle.weekly_volume_diff` — diff vs last week's mileage
+**Next PR: P6 batch 2** — add the remaining stat-derived models from
+the §1/§5 candidate list. Same pattern as batch 1: derivation function
+in `seed_models.py`, registry entry in the refit endpoint, tests
+mocking `data_processor`. Still on the docket:
+- `tempo.pace_hr_table` (rate / ordinal_score) — typical pace at each
+  HR band on tempo days. Reads category_stats / lap_categories to find
+  tempo segments.
+- `sleep.debt_14d` (mean_std) — rolling 14-day sleep deficit from the
+  health ledger. Mirrors `recovery.hrv_14d_baseline` shape — just
+  swap the metric.
+- `cycle.weekly_volume_diff` (linear_trend) — week-over-week mileage
+  change, signed. Slope tells the agent "you're ramping" vs "you're
+  tapering" without it having to do the math each turn.
 
-Pick 2 to ship together so each model gets exercised end-to-end
-(derivation + persist + retrieval + agent prompt) before chaining 5.
+Pick 2 (or all 3 if quick) for batch 2; the helpers landed in batch 1
+(`_compute_baseline_params`, the registry dict) make each new model
+roughly half a screen.
 
-Suggested branch: `add-stat-derived-models-batch1`.
+Suggested branch: `add-stat-derived-models-batch2`.
 
-Phase 0 + Phase 1 + P1–P5 complete. All four agent input streams
-now live: objective (Garmin sensors + weather + terrain), perceived
-(check-ins), planned (Cal-synced workouts with deviation compute),
-external (travel/illness/life-stress episodes), patterns (model
-store, but only the HRV baseline so far). P6 fills in real
-B-bucket model payloads.
+Phase 0 + Phase 1 + P1–P5 + P6 batch 1 complete. All four agent input
+streams live: objective (Garmin sensors + weather + terrain),
+perceived (check-ins), planned (Cal-synced workouts with deviation
+compute), external (travel/illness/life-stress episodes), patterns
+(HRV baseline + aerobic decoupling baseline + cadence baseline). P6
+batch 2 adds the remaining 3 model candidates; after that the
+substrate is "done" for §1–§5 and we can move to E (LangSmith) or
+revisit §6/§8 (advice trail / goal feasibility).
 
 **Previously landed**:
 - **A** ✅ 2026-05-27 ([#71](https://github.com/zhnzhang61/PersonalCoach/pull/71)) —

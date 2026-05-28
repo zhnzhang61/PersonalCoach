@@ -18,6 +18,22 @@ from backend.agentic_coach import AgenticCoach
 from backend.cognitive_memory_engine import MemoryOS
 from backend.data_processor import DataProcessor
 from backend.google_calendar import GoogleCalendar
+from backend.seed_models import (
+    refit_aerobic_decoupling_baseline,
+    refit_cadence_baseline,
+    refit_hrv_14d_baseline,
+)
+
+# Registry of stat-derived models. Importable so a future nightly
+# cron (or debug CLI) can iterate without rebuilding — see PR #88
+# review feedback. Keep dict-shaped so the cron's for-loop stays
+# trivial. Adding a new model means: write refit_* in seed_models,
+# add one entry here, ship docs.
+REFIT_REGISTRY: dict[str, Any] = {
+    "recovery.hrv_14d_baseline": refit_hrv_14d_baseline,
+    "aerobic.decoupling_baseline": refit_aerobic_decoupling_baseline,
+    "cadence.baseline": refit_cadence_baseline,
+}
 
 
 app = FastAPI(title="PersonalCoach API", version="0.1.0")
@@ -1772,26 +1788,39 @@ def propose_model(topic_id: str) -> dict[str, Any]:
 
 @app.post("/api/memory/models/refit/{model_key}")
 def refit_model(model_key: str) -> dict[str, Any]:
-    """Manually trigger a stat-derived model refit. PR P1 ships only
-    one model (`recovery.hrv_14d_baseline`); P6 will add more, and
-    a background cron will replace the manual trigger.
+    """Manually trigger a stat-derived model refit. A background
+    cron will eventually replace the manual trigger; until then this
+    is the single way to refresh a model's params after new data
+    syncs.
 
-    Returns `{ok: false, reason: "insufficient_data"}` when the
-    underlying data window is too thin to characterize. Caller can
-    poll later or wait for nightly refresh."""
-    from backend.seed_models import refit_hrv_14d_baseline
-
-    if model_key == "recovery.hrv_14d_baseline":
-        result = refit_hrv_14d_baseline(memory_engine, processor)
-        if result is None:
-            return {"ok": False, "reason": "insufficient_data"}
-        return {"ok": True, "model_key": result, "model": memory_engine.get_model(result)}
-
-    raise HTTPException(
-        404,
-        f"no stat refit fn registered for model_key={model_key!r}. "
-        f"Known stat-derived: recovery.hrv_14d_baseline.",
-    )
+    Status codes:
+      • 200 — refit ran, model updated.
+      • 404 — unknown `model_key`.
+      • 422 — refit ran but the underlying data window was too thin
+              to characterize (Garmin sync stopped, fresh install,
+              etc.). Distinct from 200 so cron / monitoring can
+              alert when this lingers — `curl -f` and HTTP-status-
+              based health checks will see it as a non-success.
+              Body still carries the `{ok: false, reason}` shape so
+              human callers can parse the explanation."""
+    fn = REFIT_REGISTRY.get(model_key)
+    if fn is None:
+        raise HTTPException(
+            404,
+            f"no stat refit fn registered for model_key={model_key!r}. "
+            f"Known stat-derived: {sorted(REFIT_REGISTRY)}.",
+        )
+    result = fn(memory_engine, processor)
+    if result is None:
+        raise HTTPException(
+            422,
+            detail={"ok": False, "reason": "insufficient_data"},
+        )
+    return {
+        "ok": True,
+        "model_key": result,
+        "model": memory_engine.get_model(result),
+    }
 
 
 # --- Pending Clarifications ---
