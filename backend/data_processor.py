@@ -1716,16 +1716,21 @@ class DataProcessor:
             return None
 
         # 5 grade bands. Cutoffs picked empirically (running coach
-        # vocabulary, not road-bike): <-6% = "steep down", -6 to -2 =
-        # "rolling down", -2 to 2 = "flat", 2-6 = "rolling up", >6 =
-        # "steep up". Boundary at ±2% matches the threshold below
-        # which most runners can't feel the grade with their legs.
+        # vocabulary, not road-bike): ±2% = the threshold below
+        # which most runners can't feel the grade; ±6% = where
+        # running form has to change (overstriding down, shortened
+        # stride up). Classifier below uses `lo <= grade < hi` —
+        # bottom inclusive, top exclusive — so the outer-band labels
+        # are asymmetric: `<-6%` (strict, since exactly -6% lands in
+        # rolling_down) but `>=6%` (inclusive, since exactly 6%
+        # lands in steep_up). That's a stickler-readable consequence
+        # of one-rule classification, not a bug.
         bands = [
             ("steep_down", "<-6%", -float("inf"), -0.06),
             ("rolling_down", "-6% to -2%", -0.06, -0.02),
             ("flat", "-2% to 2%", -0.02, 0.02),
             ("rolling_up", "2% to 6%", 0.02, 0.06),
-            ("steep_up", ">6%", 0.06, float("inf")),
+            ("steep_up", ">=6%", 0.06, float("inf")),
         ]
         band_dist_m = {b[0]: 0.0 for b in bands}
 

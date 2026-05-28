@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarRange, Loader2, Plus, Trash2, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +16,15 @@ import type {
   ExternalEventsResponse,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+// Window for what shows in the card AND the modal's date-picker
+// bounds. Context events span longer windows than planned workouts
+// (a 30-day-old illness still shapes today's read; a trip 2 months
+// out is worth logging now) — wider than the 14-day planned-workout
+// window. Symmetric ±60 keeps the modal bounds the same as the list
+// window so a saved event never silently disappears from view.
+const WINDOW_DAYS_BACK = 60;
+const WINDOW_DAYS_FORWARD = 60;
 
 // External-context events card (PR P5 — external context §4).
 //
@@ -61,8 +70,8 @@ function plusDays(iso: string, days: number): string {
 
 export function ExternalEvents() {
   const today = todayLocal();
-  const start = plusDays(today, -14);
-  const end = plusDays(today, 14);
+  const start = plusDays(today, -WINDOW_DAYS_BACK);
+  const end = plusDays(today, WINDOW_DAYS_FORWARD);
 
   const query = useQuery({
     queryKey: ["external-events", start, end],
@@ -127,6 +136,8 @@ export function ExternalEvents() {
       {adding && (
         <AddEventModal
           today={today}
+          minDate={start}
+          maxDate={end}
           onClose={() => setAdding(false)}
         />
       )}
@@ -147,41 +158,52 @@ function EventRow({ event }: { event: ExternalEvent }) {
       apiDelete(`/api/memory/external-events/${event.episode_id}`),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["external-events"] }),
+    // No onError → before this, a 500 / network blip silently
+    // stopped the spinner and left the row mounted with no signal.
+    // Surface the failure below the row so the user knows to retry.
   });
 
   return (
-    <li className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
-      <span
-        className={cn(
-          "shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-          TYPE_COLOR[event.event_type],
-        )}
-      >
-        {TYPE_LABEL[event.event_type]}
-      </span>
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="text-xs text-muted-foreground">
-          {sameDay
-            ? formatDateRange(event.start_date, event.start_date, true)
-            : formatDateRange(event.start_date, event.end_date, false)}
+    <li className="rounded-md border border-border bg-background p-3">
+      <div className="flex items-start gap-3">
+        <span
+          className={cn(
+            "shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+            TYPE_COLOR[event.event_type],
+          )}
+        >
+          {TYPE_LABEL[event.event_type]}
+        </span>
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="text-xs text-muted-foreground">
+            {sameDay
+              ? formatDateRange(event.start_date, event.start_date, true)
+              : formatDateRange(event.start_date, event.end_date, false)}
+          </div>
+          {description && (
+            <p className="text-sm text-foreground/90">{description}</p>
+          )}
         </div>
-        {description && (
-          <p className="text-sm text-foreground/90">{description}</p>
-        )}
+        <button
+          type="button"
+          onClick={() => del.mutate()}
+          disabled={del.isPending}
+          className="shrink-0 rounded-full p-1 text-muted-foreground transition-colors hover:bg-rose-500/10 hover:text-rose-600 disabled:opacity-50"
+          aria-label="Delete event"
+        >
+          {del.isPending ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Trash2 className="size-3.5" />
+          )}
+        </button>
       </div>
-      <button
-        type="button"
-        onClick={() => del.mutate()}
-        disabled={del.isPending}
-        className="shrink-0 rounded-full p-1 text-muted-foreground transition-colors hover:bg-rose-500/10 hover:text-rose-600 disabled:opacity-50"
-        aria-label="Delete event"
-      >
-        {del.isPending ? (
-          <Loader2 className="size-3.5 animate-spin" />
-        ) : (
-          <Trash2 className="size-3.5" />
-        )}
-      </button>
+      {del.isError && (
+        <p className="mt-2 text-[10px] text-rose-600 dark:text-rose-400">
+          Delete failed —{" "}
+          {(del.error as Error | null)?.message ?? "please retry."}
+        </p>
+      )}
     </li>
   );
 }
@@ -202,15 +224,35 @@ function formatDateRange(
 
 interface AddEventModalProps {
   today: string;
+  minDate: string;
+  maxDate: string;
   onClose: () => void;
 }
 
-function AddEventModal({ today, onClose }: AddEventModalProps) {
+function AddEventModal({
+  today,
+  minDate,
+  maxDate,
+  onClose,
+}: AddEventModalProps) {
   const qc = useQueryClient();
   const [eventType, setEventType] = useState<ExternalEventType>("travel");
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
   const [description, setDescription] = useState("");
+
+  // Cancel-then-reopen race: if the user clicks Cancel (or backdrop)
+  // while a save is in flight, the v1 modal unmounts but the
+  // mutation's onSuccess callback still fires from v1's closure when
+  // the HTTP request resolves. That captured `onClose` would close
+  // v2 — losing whatever the user typed there. Guard onSuccess /
+  // invalidate with a mount check so unmounted modals are inert.
+  const isMounted = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
 
   const create = useMutation({
     mutationFn: () =>
@@ -221,8 +263,12 @@ function AddEventModal({ today, onClose }: AddEventModalProps) {
         description: description.trim(),
       }),
     onSuccess: () => {
+      // Even if this v1 instance unmounted before the request
+      // resolved, the query invalidation is harmless to fire — it
+      // just refetches. But onClose would close whatever v2 modal
+      // is currently mounted, so gate that.
       qc.invalidateQueries({ queryKey: ["external-events"] });
-      onClose();
+      if (isMounted.current) onClose();
     },
   });
 
@@ -288,6 +334,8 @@ function AddEventModal({ today, onClose }: AddEventModalProps) {
               <input
                 type="date"
                 value={startDate}
+                min={minDate}
+                max={maxDate}
                 onChange={(e) => setStartDate(e.target.value)}
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40"
               />
@@ -296,7 +344,11 @@ function AddEventModal({ today, onClose }: AddEventModalProps) {
               <input
                 type="date"
                 value={endDate}
-                min={startDate}
+                // min is the LATER of (window start, user's chosen
+                // start) so the picker enforces both "inside window"
+                // and "after start" simultaneously.
+                min={startDate > minDate ? startDate : minDate}
+                max={maxDate}
                 onChange={(e) => setEndDate(e.target.value)}
                 className={cn(
                   "w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40",

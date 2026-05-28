@@ -547,9 +547,23 @@ class MemoryOS:
 
         Each event's `context` dict carries `start_date` + `end_date`;
         an event qualifies when `event.start_date <= range.end_date`
-        AND `event.end_date >= range.start_date`. Events missing
-        either context date fall back to the episode's `timestamp`
-        date so legacy / partially-filled rows still surface.
+        AND `event.end_date >= range.start_date`.
+
+        Date-resolution fallback chain (most to least authoritative):
+          1. context.start_date / context.end_date (the normal path —
+             this is what `create_external_event` writes).
+          2. episode.timestamp[:10] (legacy / partially-filled rows
+             saved before P5 standardized the context shape).
+          3. episode.created_at[:10] (sentinel — for the case where
+             both context dates AND timestamp are missing, which
+             should never happen via the API but can if a row was
+             hand-edited or imported from elsewhere).
+
+        Rows for which ALL THREE are missing are skipped rather than
+        included with empty-string sentinels (empty-string sort places
+        them before any real date, which is misleading; and an event
+        with no date is functionally indistinguishable from "no event
+        recorded").
 
         Returns episodes ordered earliest-first by start_date (the
         agent reasons over the timeline), unlike list_episodes which
@@ -570,8 +584,21 @@ class MemoryOS:
             d["context"] = ctx
             del d["context_json"]
             d["related_topic_ids"] = json.loads(d["related_topic_ids"])
-            ev_start = ctx.get("start_date") or (d["timestamp"] or "")[:10]
-            ev_end = ctx.get("end_date") or ev_start
+            # Try each fallback in order; bail if all empty so we
+            # don't ship a "" sentinel that distorts the timeline.
+            ev_start = (
+                ctx.get("start_date")
+                or (d["timestamp"] or "")[:10]
+                or (d.get("created_at") or "")[:10]
+            )
+            if not ev_start:
+                continue
+            ev_end = (
+                ctx.get("end_date")
+                or (d["timestamp"] or "")[:10]
+                or (d.get("created_at") or "")[:10]
+                or ev_start
+            )
             # Range overlap.
             if ev_start <= end_date and ev_end >= start_date:
                 # Promote derived range to top level for caller

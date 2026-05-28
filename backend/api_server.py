@@ -1645,10 +1645,15 @@ def create_external_event(body: ExternalEventCreate) -> dict[str, Any]:
             400,
             f"event_type must be one of {_MO.EXTERNAL_EVENT_TYPES}",
         )
-    # Light validation — match planned_workouts._validate
+    # Strict ISO-date validation. The shape-check we used originally
+    # (len==10 + dashes at pos 4,7) lets garbage like "abcd-ef-gh" or
+    # "2026-99-99" through, which then breaks lexicographic sorting +
+    # range-overlap in list_external_events. fromisoformat catches
+    # invalid month/day and non-digit chars in one shot.
     for fld, val in [("start_date", body.start_date), ("end_date", body.end_date)]:
-        if not (isinstance(val, str) and len(val) == 10
-                and val[4] == "-" and val[7] == "-"):
+        try:
+            datetime.date.fromisoformat(val)
+        except (TypeError, ValueError):
             raise HTTPException(400, f"{fld} must be YYYY-MM-DD")
     if body.end_date < body.start_date:
         raise HTTPException(400, "end_date must be >= start_date")

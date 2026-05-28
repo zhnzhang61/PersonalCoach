@@ -113,6 +113,32 @@ class TestListExternalEvents:
         assert evs[0]["start_date"] == "2026-05-15"
         assert evs[0]["end_date"] == "2026-05-15"
 
+    def test_falls_back_to_created_at_when_timestamp_missing(self, mem):
+        """Both context dates AND timestamp missing → fall back to
+        the row's database `created_at`. Without this final-resort
+        fallback, ALL three missing → silent drop (empty string
+        sentinel distorts the timeline). Pin behavior so a regression
+        that breaks the chain surfaces visibly."""
+        eid = mem.create_episode(
+            event_type="travel",
+            context={"description": "hand-imported row"},
+            timestamp="2026-05-15T12:00:00+00:00",
+        )
+        # Simulate the corrupted-row case: blank out timestamp post-hoc.
+        mem.conn.execute(
+            "UPDATE episodes SET timestamp = '' WHERE episode_id = ?",
+            (eid,),
+        )
+        mem.conn.commit()
+        evs = mem.list_external_events("2000-01-01", "2099-12-31")
+        # Either surfaces with the created_at fallback (preferred) OR
+        # silently drops. Pin whichever — currently surfaces.
+        assert len(evs) == 1
+        # The derived start_date comes from `created_at` — verify it's
+        # a parseable YYYY-MM-DD string rather than empty.
+        assert len(evs[0]["start_date"]) == 10
+        assert evs[0]["start_date"][4] == "-"
+
     def test_orders_earliest_first(self, mem):
         """Agent reads the timeline forward; ASC by start_date so
         the model sees events in causal order."""
@@ -216,6 +242,34 @@ class TestExternalEventsAPI:
             },
         )
         assert resp.status_code == 400
+
+    @pytest.mark.parametrize(
+        "bad_date",
+        [
+            "abcd-ef-gh",       # all non-digits, shape matches
+            "2026-99-99",       # impossible month/day
+            "20a6-05-20",       # non-digit in year
+            "2026-13-01",       # month > 12
+            "2026-02-30",       # impossible Feb 30
+            "26-05-20",         # too short
+            "2026-05-200",      # too long
+        ],
+    )
+    def test_create_rejects_garbage_dates_with_dash_shape(self, client, bad_date):
+        """Original shape-check (`len==10 + dashes at pos 4,7`) let
+        garbage like 'abcd-ef-gh' or '2026-99-99' through, which
+        breaks lexicographic sorting + range-overlap downstream.
+        fromisoformat catches all these in one shot."""
+        resp = client.post(
+            "/api/memory/external-events",
+            json={
+                "event_type": "travel",
+                "start_date": bad_date,
+                "end_date": "2026-05-22",
+                "description": "x",
+            },
+        )
+        assert resp.status_code == 400, f"accepted bad date {bad_date!r}"
 
     def test_create_rejects_inverted_range(self, client):
         resp = client.post(
@@ -402,8 +456,11 @@ class TestComputeRouteProfile:
 
     def test_missing_elevation_descriptor_returns_none(self, dp, tmp_path):
         """Some treadmill / pool activities have no directElevation
-        metric in the descriptor list. Bail out cleanly."""
-        details_dir = tmp_path / "data" / "activity_details"
+        metric in the descriptor list. Bail out cleanly. Uses the
+        same dir path as _write_telemetry — the previous version of
+        this test dropped the `get_` prefix and was passing for the
+        wrong reason (file-not-found early return)."""
+        details_dir = tmp_path / "data" / "get_activity_details"
         details_dir.mkdir(parents=True, exist_ok=True)
         (details_dir / "4.json").write_text(json.dumps({
             "metricDescriptors": [
@@ -482,19 +539,44 @@ class TestRouteProfileMCP:
         assert result == backend_payload
 
     def test_returns_safe_empty_dict_on_404(self):
-        """404 (no GPS / not synced) shouldn't make the agent crash —
-        return a stable shape with zeros + a note. Callers branch on
-        total_distance_mi > 0."""
+        """404 (no GPS / not synced) is the expected "no data" shape
+        for the agent. Returns a stable zero-payload + a `note` field
+        so callers branch on `total_distance_mi > 0` rather than
+        try/except. Pre-fix this used `except Exception` which also
+        ate 5xx / network errors — see test below."""
         import httpx
         from backend import personal_coach_mcp as mcp
 
-        async def boom(*args, **kwargs):
+        async def raise_404(*args, **kwargs):
+            resp = httpx.Response(404)
             raise httpx.HTTPStatusError(
-                "404", request=None, response=None,  # type: ignore[arg-type]
+                "404", request=httpx.Request("GET", "http://x"),
+                response=resp,
             )
 
-        with patch("backend.personal_coach_mcp._get", new=AsyncMock(side_effect=boom)):
+        with patch("backend.personal_coach_mcp._get", new=AsyncMock(side_effect=raise_404)):
             result = asyncio.run(mcp.get_run_route_profile(activity_id=9999))
         assert result["total_distance_mi"] == 0
         assert result["grade_distribution"] == []
         assert "note" in result
+
+    def test_propagates_5xx(self):
+        """Backend outages / 5xx should NOT degrade to the safe-empty
+        shape — that would mask connectivity issues as "treadmill,
+        untracked" and the agent would confidently tell the user
+        the wrong thing. Only 404 is the expected "no GPS" signal;
+        everything else propagates so the upstream caller can log /
+        retry / surface."""
+        import httpx
+        from backend import personal_coach_mcp as mcp
+
+        async def raise_500(*args, **kwargs):
+            resp = httpx.Response(500)
+            raise httpx.HTTPStatusError(
+                "500", request=httpx.Request("GET", "http://x"),
+                response=resp,
+            )
+
+        with patch("backend.personal_coach_mcp._get", new=AsyncMock(side_effect=raise_500)):
+            with pytest.raises(httpx.HTTPStatusError):
+                asyncio.run(mcp.get_run_route_profile(activity_id=9999))

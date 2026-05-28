@@ -630,13 +630,21 @@ async def get_run_route_profile(activity_id: int) -> dict:
     is the AI-friendly collapsed shape, no histogram to interpret.
 
     Returns a 404-ish empty dict when the run lacks GPS (treadmill,
-    no-sync, etc.) — check the returned `total_distance_mi`."""
+    no-sync, etc.) — check the returned `total_distance_mi`. Other
+    HTTP errors (5xx, network, timeout) still propagate so the agent
+    distinguishes "no data" from "system broken" — otherwise a
+    backend outage would manifest as the agent confidently telling
+    the user "no GPS, treadmill" when the real issue is connectivity.
+    Same pattern as `get_model` (line ~792)."""
+    import httpx
     try:
         return await _get(f"/api/runs/{activity_id}/route-profile")
-    except Exception:
-        # Caller should branch on missing fields; surfacing the
-        # HTTPStatusError directly would force every consumer to
-        # try/except a 404 they're already expecting.
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
+        # 404 is the expected "no GPS" / "not yet synced" shape —
+        # caller branches on the returned `total_distance_mi == 0`
+        # rather than try/except.
         return {
             "activity_id": activity_id,
             "total_distance_mi": 0,
