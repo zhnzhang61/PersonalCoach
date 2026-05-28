@@ -1,5 +1,7 @@
 # PersonalCoach — Project Guide
 
+**English** · [中文](PROJECT_GUIDE.zh.md)
+
 Single source of truth for how this project is built and what's left to
 do. The **only** doc — supersedes the older scattered set (architecture,
 coach_brain_design, coach_chat_design, mcp_tools_design, IMPROVEMENTS,
@@ -7,9 +9,10 @@ CI, langsmith-setup, PROMPT_CHANGELOG) which were point-in-time notes
 that drifted as the code moved. Reflects the **current** state
 (2026-05-28).
 
-> Chinese version: [PROJECT_GUIDE.zh.md](PROJECT_GUIDE.zh.md).
 > Prompt changelog is now [§3.4.3](#343-prompt-versioning); LangSmith
-> setup is [§3.4.4](#344-observability--traces--langsmith).
+> setup is [§3.4.4](#344-observability--traces--langsmith); Garmin
+> token setup (the 429 workaround that used to live in the README) is
+> [§3.2](#32-authentication).
 
 ---
 
@@ -166,10 +169,10 @@ shapes.
 Two external auth flows; **the app never handles passwords** — the user
 signs in directly, the app stores the resulting tokens.
 
-- **Garmin** — `garmin_ticket_login.py` does Garmin's OAuth1
-  ticket-and-jar dance (older than OIDC); writes `oauth1_token.json` +
-  `domain_profile.json`. `garmin_sync.py` uses the refresh token to
-  pull activities + daily health. Spawned via
+- **Garmin** — `backend/garmin_ticket_login.py` exchanges a manually-
+  obtained Service Ticket for a long-lived garth OAuth2 token (the
+  "429 workaround", see setup below). `backend/garmin_sync.py` then
+  uses it to pull activities + daily health, spawned via
   `python -m backend.garmin_sync` from `POST /api/sync/garmin`.
 - **Google Calendar** — `google_calendar.py`. OAuth flow at
   `/oauth/google/start` → `/callback`. Scope is `calendar.events`
@@ -181,6 +184,68 @@ signs in directly, the app stores the resulting tokens.
     them and returns just `events`, which trips
     `oauthlib`'s strict scope check → callback errors → silent
     "not connected". List `calendar.events` only.
+
+##### Garmin token setup (the 429 workaround)
+
+Garmin now fronts login with strict Cloudflare anti-bot. Automated
+browser login (Playwright etc.) reliably trips `HTTP 429 Too Many
+Requests` + infinite-CAPTCHA loops. The workaround: grab a one-time
+**Service Ticket** manually in a browser, then exchange it immediately
+with the project script for a durable garth `OAuth2` token.
+
+> **Never** commit a Service Ticket, password, or token to git /
+> screenshots. They're short-lived secrets.
+
+**Step 1 — grab the Service Ticket (`ST-…`)** (one-time, expires in
+under a minute — run step 2 immediately after):
+1. Open a fresh **incognito** browser window. F12 → **Network** tab →
+   check **Preserve log**.
+2. Visit the mobile SSO login URL:
+   ```
+   https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android
+   ```
+3. Log in normally (clear any CAPTCHA by hand). After success the page
+   redirects to a "site can't be reached" — **that's expected**.
+4. Copy the **whole redirect URL** from the address bar, or just the
+   `ticket=ST-…-sso` part.
+
+**Step 2 — exchange + write garth** (from repo root):
+```bash
+# A: pass the redirect URL or ST string directly (fastest)
+uv run python -m backend.garmin_ticket_login --url "https://...ticket=ST-..."
+# or
+uv run python -m backend.garmin_ticket_login --ticket "ST-....-sso"
+
+# B: no args — paste the redirect URL when prompted
+uv run python -m backend.garmin_ticket_login
+
+# C: auto-open the login page, then paste the address-bar URL
+uv run python -m backend.garmin_ticket_login --open-browser
+```
+The script exchanges the ST → a long-lived session
+(`~/.local/share/pirate-garmin/native-oauth2.json`, override with
+`--app-dir`) and writes the DI token to `~/.garth/oauth2_token.json`.
+
+Useful flags:
+- `--compat` — also write `oauth1_token.json` + `domain_profile.json`
+  stubs for older `garminconnect` that still checks OAuth1.
+- `--run-sync` — run `python -m backend.garmin_sync` on success.
+
+```bash
+# exchange + compat stubs + pull data in one go
+uv run python -m backend.garmin_ticket_login --url "$PASTED_URL" --compat --run-sync
+```
+
+**Already have a `native-oauth2.json`?** Just migrate it into garth:
+```bash
+uv run python -m scripts.migrate_garmin_token
+```
+(`scripts/migrate_garmin_token.py` shares the migration logic with
+`backend/garmin_ticket_login.py`.)
+
+**Recovery:** don't hand-edit `.venv` to hard-code tickets — `uv sync`
+overwrites it. If you ever did, restore upstream behavior with
+`uv sync --reinstall-package pirate-garmin`.
 
 ### 3.3 MCP tools
 

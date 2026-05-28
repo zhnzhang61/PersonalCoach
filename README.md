@@ -1,115 +1,47 @@
-## Garmin Error 429
+# PersonalCoach
 
-由于 Garmin 目前全面启用了严格的 Cloudflare 防爬虫机制，使用 Playwright 等自动化浏览器登录极易触发 `HTTP 429 Too Many Requests` 和无限验证码死循环。
+> 单用户、iPhone 优先的 AI 跑步教练。一个常驻 agent 推理你的 Garmin
+> 传感器数据、恢复指标、计划日历、主观 check-in，以及一份累积的长期记忆
+> （topics / episodes / 统计模型）。
+>
+> A single-user, iPhone-first AI running coach: one always-on agent
+> reasoning over your Garmin sensor data, recovery metrics, planned
+> calendar, subjective check-ins, and an accumulated long-term memory.
 
-本方案通过**浏览器手动获取一次性票据 (Service Ticket)**，再用项目脚本**立刻**完成兑换，最终提取出原生 `garminconnect`（Garth）可用的长效 `OAuth2` 通行证。
+## 📖 文档 / Documentation
 
-**安全提示**：不要把 Service Ticket、密码或 token 写进仓库、截图或提交到 git。若曾在 `.venv` 里硬编码过 `ST-...`，请删掉或重装 `pirate-garmin`（见文末「恢复虚拟环境里的包」）。
+完整的架构、子系统、路线图、工程债、以及 **Garmin / Google / LangSmith 的
+接入步骤**，全在这一份指南里（含语言切换）：
 
----
+→ **[English](docs/PROJECT_GUIDE.md)** · **[中文](docs/PROJECT_GUIDE.zh.md)**
 
-### 步骤 1：手动获取一次性服务票据 (Service Ticket)
+Everything — architecture, subsystems, roadmap, engineering debt, and
+the **Garmin / Google / LangSmith setup runbooks** — lives in that one
+guide.
 
-> **注意**：Service Ticket (`ST-xxxx`) 是一次性的，且有效期极短（不到 1 分钟），获取后必须**立刻**在终端运行下一步脚本。
+| 想找什么 / Looking for | 去哪 / Where |
+|---|---|
+| 大图 + 5 个 tab | [§1 Overview](docs/PROJECT_GUIDE.md#1-overview) |
+| **Garmin 登录（429 绕过）** | [§3.2 Authentication](docs/PROJECT_GUIDE.md#32-authentication) |
+| MCP 工具清单 | [§3.3 MCP tools](docs/PROJECT_GUIDE.md#33-mcp-tools) |
+| 记忆 / 模型 / 输入流 | [§3.4.1 Coach brain](docs/PROJECT_GUIDE.md#341-coach-brain--memory-models-input-streams) |
+| LangSmith tracing 接入 | [§3.4.4 Observability](docs/PROJECT_GUIDE.md#344-observability--traces--langsmith) |
+| 还剩什么没做 | [§4 Engineering debt](docs/PROJECT_GUIDE.md#4-engineering-debt) |
 
-1. 打开一个**全新/无痕模式**的浏览器窗口。
-2. 按 `F12` 打开开发者工具，切换到 **Network（网络）** 面板。
-3. **关键操作**：在 Network 面板顶部勾选 **Preserve log（保留日志）**。
-4. 在地址栏输入并访问以下专属移动端登录链接：
-  ```text
-   https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android
-  ```
-5. 正常输入账号密码登录（如有真人验证码则手动通过）。
-6. 登录成功后，页面会跳转并显示找不到网页 (`This site can't be reached`)，**这是正常现象**。
-7. 立刻查看浏览器地址栏，复制**整段 URL**，或只复制 `ticket=` 后面的服务票据：
-  ```text
-   ST-xxxxxxx-xxxxxxxxxxxxxx-sso
-  ```
-
----
-
-### 步骤 2：一键兑换并写入 Garth（推荐）
-
-无需再修改 `.venv` 里的 `pirate_garmin` 源码。在项目根目录执行：
+## 🚀 快速开始 / Quick start
 
 ```bash
-# 方式 A：直接把重定向 URL 或 ST 字符串作为参数（最快）
-uv run python garmin_ticket_login.py --url "https://...ticket=ST-...."
+# 后端 / backend
+uv run uvicorn backend.api_server:app --port 8765
 
-# 或
-uv run python garmin_ticket_login.py --ticket "ST-....-sso"
-
-# 方式 B：无参数运行，按提示粘贴「重定向后的完整 URL」（或只贴 ST-…-sso）
-uv run python garmin_ticket_login.py
-
-# 方式 C：先自动打开登录页，再在终端按提示粘贴地址栏 URL
-uv run python garmin_ticket_login.py --open-browser
+# 前端 / frontend
+cd web && npm run dev          # 或 npm run build && npm run start (prod)
 ```
 
-脚本会：
-
-1. 用 `pirate_garmin` 的兑换逻辑把 ST 换成长效会话，写入 `~/.local/share/pirate-garmin/native-oauth2.json`（可用 `--app-dir` 覆盖）。
-2. 把其中的 DI token 写入 `~/.garth/oauth2_token.json`。
-
-可选参数：
-
-- `--compat`：同时生成 `oauth1_token.json` 与 `domain_profile.json` 占位文件（见步骤 3），兼容仍检查 OAuth1 的旧版 `garminconnect`。
-- `--run-sync`：成功后自动执行 `uv run python garmin_sync.py`。
-
-示例（兑换 + 兼容占位 + 拉数据）：
-
-```bash
-uv run python garmin_ticket_login.py --url "$PASTED_URL" --compat --run-sync
-```
+Garmin 首次登录（Cloudflare 429 绕过）见
+[§3.2](docs/PROJECT_GUIDE.md#32-authentication)；测试 `uv run pytest -q`。
 
 ---
-
-### 步骤 3：仅迁移已有 `native-oauth2.json`（可选）
-
-若你已用其他方式生成了 `~/.local/share/pirate-garmin/native-oauth2.json`，只需写入 Garth：
-
-```bash
-uv run python -m scripts.migrate_garmin_token
-```
-
-（`scripts/migrate_garmin_token.py` 与 `backend/garmin_ticket_login.py` 共用同一套迁移逻辑。）
-
----
-
-### 步骤 4：旧版 `garminconnect` 的 OAuth1 检查（可选）
-
-若运行时仍提示缺少 `oauth1_token.json`，使用上面 `**--compat**` 即可；或手动生成占位文件：
-
-```python
-import json
-import os
-
-garth_dir = os.path.expanduser("~/.garth")
-
-with open(os.path.join(garth_dir, "oauth1_token.json"), "w") as f:
-    json.dump({"oauth_token": "dummy", "oauth_token_secret": "dummy"}, f)
-
-with open(os.path.join(garth_dir, "domain_profile.json"), "w") as f:
-    json.dump({}, f)
-
-print("✅ 兼容性假文件已生成！")
-```
-
----
-
-### 恢复虚拟环境里的 `pirate_garmin`（若曾修改过 `site-packages`）
-
-不建议长期改 `.venv` 内文件；升级或同步依赖时也会被覆盖。若你曾改 `auth.py` 硬编码票据，可重装该包以恢复上游行为：
-
-```bash
-uv sync --reinstall-package pirate-garmin
-```
-
----
-
-### 旧流程（不推荐）：魔改 `pirate-garmin` 再 `login`
-
-若仍需手动改 `create_native_session` 并运行 `pirate-garmin login`，可参考历史提交或备份；**新流程应优先使用 `garmin_ticket_login.py`**，避免修改 `site-packages`。
 
 ## 📜 授权与商用协议 (License & Commercial Use)
 
@@ -149,5 +81,3 @@ uv sync --reinstall-package pirate-garmin
 - [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) (MIT) - 提供了基础的 Garmin API 封装。
 - [pirate-garmin](https://github.com/petergardfjall/pirate-garmin) - 在攻克移动端鉴权逻辑上提供了关键的逆向思路。
 - [Pandas](https://github.com/pandas-dev/pandas) - 支撑了底层强大的数据处理。
-
-*注：以上引用的第三方库其所有权归原作者所有，并分别遵循其各自的开源协议。*

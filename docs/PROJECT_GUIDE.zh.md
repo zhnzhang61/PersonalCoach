@@ -1,13 +1,15 @@
 # PersonalCoach — 项目总览
 
+[English](PROJECT_GUIDE.md) · **中文**
+
 项目怎么搭的、还剩什么没做，以这份为准。**唯一**的 doc——取代之前散落的一整套
 （architecture、coach_brain_design、coach_chat_design、mcp_tools_design、
 IMPROVEMENTS、CI、langsmith-setup、PROMPT_CHANGELOG）——那些是某个时间点的
 笔记，随着代码推进逐渐过期。本文反映**当前**状态（2026-05-28）。
 
-> 英文版：[PROJECT_GUIDE.md](PROJECT_GUIDE.md)。
 > Prompt changelog 现在在 [§3.4.3](#343-prompt-版本管理)；LangSmith 接入在
-> [§3.4.4](#344-可观测性--traces--langsmith)。
+> [§3.4.4](#344-可观测性--traces--langsmith)；Garmin token 设置（以前在
+> README 里的 429 绕过流程）在 [§3.2](#32-authentication)。
 
 ---
 
@@ -156,9 +158,9 @@ Garmin JSON dump + 手动输入，归一化成 typed 结构。
 两个外部 auth 流程；**app 永远不碰密码**——用户自己登录，app 只存拿到的
 token。
 
-- **Garmin** — `garmin_ticket_login.py` 走 Garmin 的 OAuth1 ticket-and-jar
-  流程（比 OIDC 还老）；写 `oauth1_token.json` + `domain_profile.json`。
-  `garmin_sync.py` 用 refresh token 拉活动 + 每日健康。通过
+- **Garmin** — `backend/garmin_ticket_login.py` 把手动拿到的 Service
+  Ticket 兑换成长效 garth OAuth2 token（"429 绕过流程"，见下面的设置）。
+  `backend/garmin_sync.py` 再用它拉活动 + 每日健康，通过
   `python -m backend.garmin_sync` 由 `POST /api/sync/garmin` 触发。
 - **Google Calendar** — `google_calendar.py`。OAuth 在
   `/oauth/google/start` → `/callback`。Scope 是 `calendar.events`
@@ -168,6 +170,63 @@ token。
     `calendar.events`——Google 会合并成只给 `events`，触发 `oauthlib`
     的严格 scope 检查 → callback 报错 → 静默"未连接"。只列
     `calendar.events`。
+
+##### Garmin token 设置（429 绕过流程）
+
+Garmin 现在全面启用了严格的 Cloudflare 防爬虫。用 Playwright 等自动化浏览器
+登录极易触发 `HTTP 429 Too Many Requests` 和无限验证码死循环。绕过办法：在
+浏览器**手动获取一次性 Service Ticket**，再用项目脚本**立刻**兑换成长效的
+garth `OAuth2` 通行证。
+
+> **绝不**把 Service Ticket、密码或 token 写进 git / 截图——都是短效 secret。
+
+**步骤 1 — 手动拿 Service Ticket（`ST-…`）**（一次性，有效期不到 1 分钟，
+拿到后**立刻**跑步骤 2）：
+1. 开一个**全新无痕**浏览器窗口。F12 → **Network** 面板 → 勾选
+   **Preserve log（保留日志）**。
+2. 访问移动端 SSO 登录链接：
+   ```
+   https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https://mobile.integration.garmin.com/gcm/android
+   ```
+3. 正常输入账号密码登录（有验证码就手动过）。成功后页面会跳转到"找不到
+   网页"——**这是正常的**。
+4. 复制地址栏**整段 URL**，或只复制 `ticket=ST-…-sso` 那部分。
+
+**步骤 2 — 兑换并写入 garth**（在项目根目录）：
+```bash
+# A：直接把重定向 URL 或 ST 字符串作为参数（最快）
+uv run python -m backend.garmin_ticket_login --url "https://...ticket=ST-..."
+# 或
+uv run python -m backend.garmin_ticket_login --ticket "ST-....-sso"
+
+# B：无参数运行，按提示粘贴重定向后的完整 URL
+uv run python -m backend.garmin_ticket_login
+
+# C：先自动打开登录页，再粘贴地址栏 URL
+uv run python -m backend.garmin_ticket_login --open-browser
+```
+脚本会把 ST 换成长效会话（`~/.local/share/pirate-garmin/native-oauth2.json`，
+可用 `--app-dir` 覆盖），并把 DI token 写入 `~/.garth/oauth2_token.json`。
+
+有用的参数：
+- `--compat` — 同时生成 `oauth1_token.json` + `domain_profile.json` 占位，
+  兼容仍检查 OAuth1 的旧版 `garminconnect`。
+- `--run-sync` — 成功后自动跑 `python -m backend.garmin_sync`。
+
+```bash
+# 兑换 + 兼容占位 + 拉数据 一条龙
+uv run python -m backend.garmin_ticket_login --url "$PASTED_URL" --compat --run-sync
+```
+
+**已经有 `native-oauth2.json`？** 只需迁移进 garth：
+```bash
+uv run python -m scripts.migrate_garmin_token
+```
+（`scripts/migrate_garmin_token.py` 跟 `backend/garmin_ticket_login.py`
+共用同一套迁移逻辑。）
+
+**恢复：** 别手改 `.venv` 硬编码票据——`uv sync` 会覆盖。若改过，用
+`uv sync --reinstall-package pirate-garmin` 恢复上游行为。
 
 ### 3.3 MCP tools
 
