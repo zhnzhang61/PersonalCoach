@@ -5,8 +5,9 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from backend.agentic_coach import AgenticCoach
 from backend.cognitive_memory_engine import MemoryOS
 from backend.data_processor import DataProcessor
 from backend.google_calendar import GoogleCalendar
+from backend.langsmith_setup import langsmith_status, startup_log_line
 from backend.seed_models import (
     refit_aerobic_decoupling_baseline,
     refit_cadence_baseline,
@@ -41,7 +43,24 @@ REFIT_REGISTRY: dict[str, Any] = {
 }
 
 
-app = FastAPI(title="PersonalCoach API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """FastAPI startup/shutdown hook (modern lifespan pattern, not the
+    deprecated `@app.on_event("startup")`). Currently only emits the
+    LangSmith wiring status — but this is the place to add any future
+    "do once per process at the right moment, after env vars are
+    fully resolved" logic. `print()` because uvicorn `--reload`
+    surfaces stdout reliably; `logger.info()` gets swallowed in some
+    setups."""
+    print(startup_log_line(), flush=True)
+    yield
+    # No shutdown work yet. Place to add: graceful flushing of the
+    # JSONL trace, closing the CME sqlite connection cleanly, etc.
+
+
+app = FastAPI(
+    title="PersonalCoach API", version="0.1.0", lifespan=_lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1857,3 +1876,22 @@ def consolidate_memory(body: ConsolidateInput) -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, Literal["ok"]]:
     return {"status": "ok"}
+
+
+@app.get("/api/admin/observability")
+def observability_status() -> dict[str, Any]:
+    """LangSmith tracing status (PR E). Lets the operator / agent
+    check whether spans are flowing without having to grep env vars
+    or restart the server. Body shape matches `langsmith_status()`
+    and NEVER echoes the API key value (would leak a secret on a
+    forgotten port-forward).
+
+    **Local-only by convention.** Lives under `/api/admin/*` so a
+    future auth middleware can match by path prefix. Reveals
+    binary "is LangSmith wired" + project name + endpoint URL —
+    minor information disclosure, but if this server is ever bound
+    to a non-loopback interface, gate this endpoint behind the
+    same auth as `/api/memory/*` writes."""
+    return langsmith_status()
+
+
