@@ -5,8 +5,9 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +43,24 @@ REFIT_REGISTRY: dict[str, Any] = {
 }
 
 
-app = FastAPI(title="PersonalCoach API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """FastAPI startup/shutdown hook (modern lifespan pattern, not the
+    deprecated `@app.on_event("startup")`). Currently only emits the
+    LangSmith wiring status — but this is the place to add any future
+    "do once per process at the right moment, after env vars are
+    fully resolved" logic. `print()` because uvicorn `--reload`
+    surfaces stdout reliably; `logger.info()` gets swallowed in some
+    setups."""
+    print(startup_log_line(), flush=True)
+    yield
+    # No shutdown work yet. Place to add: graceful flushing of the
+    # JSONL trace, closing the CME sqlite connection cleanly, etc.
+
+
+app = FastAPI(
+    title="PersonalCoach API", version="0.1.0", lifespan=_lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1860,20 +1878,20 @@ def healthz() -> dict[str, Literal["ok"]]:
     return {"status": "ok"}
 
 
-@app.get("/api/debug/observability")
+@app.get("/api/admin/observability")
 def observability_status() -> dict[str, Any]:
     """LangSmith tracing status (PR E). Lets the operator / agent
     check whether spans are flowing without having to grep env vars
     or restart the server. Body shape matches `langsmith_status()`
-    and never echoes the API key value (would leak a secret on a
-    forgotten port-forward)."""
+    and NEVER echoes the API key value (would leak a secret on a
+    forgotten port-forward).
+
+    **Local-only by convention.** Lives under `/api/admin/*` so a
+    future auth middleware can match by path prefix. Reveals
+    binary "is LangSmith wired" + project name + endpoint URL —
+    minor information disclosure, but if this server is ever bound
+    to a non-loopback interface, gate this endpoint behind the
+    same auth as `/api/memory/*` writes."""
     return langsmith_status()
 
 
-# Module-level emit so the wiring is obvious in uvicorn's startup
-# output. Three states: ON / MISCONFIGURED / OFF — see
-# langsmith_setup.startup_log_line for the contract. Using print()
-# rather than logging because uvicorn's default logger doesn't
-# surface app-side logger.info() in `--reload` mode, and we want
-# this line to be hard to miss.
-print(startup_log_line(), flush=True)

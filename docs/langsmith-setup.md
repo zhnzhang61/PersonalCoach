@@ -36,10 +36,24 @@ Add to your shell rc (`~/.zshrc` / `~/.bashrc`) or `.envrc` (if
 you use direnv):
 
 ```bash
-export LANGSMITH_TRACING=true
+export LANGSMITH_TRACING=true                  # must be lowercase "true"
 export LANGSMITH_API_KEY=lsv2_pt_...           # from step 1
-export LANGSMITH_PROJECT=personalcoach          # optional, organizes traces
+export LANGSMITH_PROJECT=personalcoach         # optional, organizes traces
 ```
+
+**Important — `LANGSMITH_TRACING` must be the literal lowercase
+string `"true"`.** langsmith does a strict `var_result == "true"`
+check; values like `1`, `yes`, `on`, or `True` (capital T) are
+REJECTED. The startup log line surfaces this misconfiguration
+explicitly so you don't waste time wondering why traces aren't
+flowing.
+
+**Legacy `LANGCHAIN_*` names also work** — langsmith reads
+`LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT`
+as fallbacks. So if you followed an older LangChain tutorial and
+already have those exported, this module picks them up too. The
+debug endpoint's `tracing_flag_source` / `api_key_source` fields
+tell you which variant was actually read.
 
 Restart your shell so the new vars are exported. Then restart the
 backend:
@@ -51,16 +65,17 @@ uv run uvicorn backend.api_server:app --reload --port 8765
 You should see one line in the startup output:
 
 ```
-LangSmith tracing: ON (project=personalcoach, endpoint=https://api.smith.langchain.com)
+LangSmith tracing: ON (project=personalcoach, source=LANGSMITH_TRACING, endpoint=https://api.smith.langchain.com)
 ```
 
-Three other states this line can show — they tell you what's wrong:
+Four states this line can show — they tell you what's wrong:
 
-| Line                                                          | What's wrong                                                                              |
-| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `LangSmith tracing: OFF (LANGSMITH_TRACING not set)`          | env var didn't make it into the process (forgot to restart shell, or `--reload` in stale) |
-| `LangSmith tracing: MISCONFIGURED — ... API_KEY is missing`   | flag is on but no key — spans drop silently. Re-check the API key export.                 |
-| `LangSmith tracing: ON (project=default, endpoint=...)`       | working, but `LANGSMITH_PROJECT` wasn't set — traces land under "default"                 |
+| Line                                                              | What's wrong                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `LangSmith tracing: OFF (no LANGSMITH_TRACING / LANGCHAIN_TRACING set)` | env var didn't make it into the process (forgot to restart shell)   |
+| `LangSmith tracing: MISCONFIGURED — flag is 'X' but langsmith requires lowercase 'true'` | typo (`=1`, `=True`, etc.) — change to lowercase `true`  |
+| `LangSmith tracing: MISCONFIGURED — tracing flag is set but no API key found` | flag is correct but no key in either namespace — spans 401 silently |
+| `LangSmith tracing: ON (project=default, source=LANGCHAIN_TRACING, ...)` | working, but on the legacy namespace and no project name set        |
 
 ## 3. Verify
 
@@ -69,7 +84,7 @@ Two ways to confirm spans are actually flowing:
 **A. Via the API:**
 
 ```bash
-curl -s http://localhost:8765/api/debug/observability | python3 -m json.tool
+curl -s http://localhost:8765/api/admin/observability | python3 -m json.tool
 ```
 
 Should return:
@@ -77,11 +92,24 @@ Should return:
 {
   "tracing_enabled": true,
   "tracing_flag": "true",
+  "tracing_flag_source": "LANGSMITH_TRACING",
   "api_key_set": true,
+  "api_key_source": "LANGSMITH_API_KEY",
   "project": "personalcoach",
   "endpoint": "https://api.smith.langchain.com"
 }
 ```
+
+`tracing_flag_source` / `api_key_source` tell you which env-var
+name was actually picked up (`LANGSMITH_TRACING_V2` vs
+`LANGSMITH_TRACING` vs `LANGCHAIN_TRACING_V2` vs `LANGCHAIN_TRACING`).
+If you set `LANGCHAIN_*` but the source says `LANGSMITH_*`, you
+have an empty `LANGSMITH_*` masking the legacy export — pick one.
+
+The endpoint lives at `/api/admin/observability` (not `/api/debug/`)
+so a future auth middleware can match the `/api/admin/*` namespace
+by path prefix. Local-only by convention; if you ever expose this
+server publicly, gate behind auth.
 
 `api_key_set: true` confirms the key was found (the value itself
 is never echoed — it's a secret).
