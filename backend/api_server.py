@@ -1772,26 +1772,46 @@ def propose_model(topic_id: str) -> dict[str, Any]:
 
 @app.post("/api/memory/models/refit/{model_key}")
 def refit_model(model_key: str) -> dict[str, Any]:
-    """Manually trigger a stat-derived model refit. PR P1 ships only
-    one model (`recovery.hrv_14d_baseline`); P6 will add more, and
-    a background cron will replace the manual trigger.
+    """Manually trigger a stat-derived model refit. A background
+    cron will eventually replace the manual trigger; until then this
+    is the single way to refresh a model's params after new data
+    syncs.
 
     Returns `{ok: false, reason: "insufficient_data"}` when the
     underlying data window is too thin to characterize. Caller can
     poll later or wait for nightly refresh."""
-    from backend.seed_models import refit_hrv_14d_baseline
-
-    if model_key == "recovery.hrv_14d_baseline":
-        result = refit_hrv_14d_baseline(memory_engine, processor)
-        if result is None:
-            return {"ok": False, "reason": "insufficient_data"}
-        return {"ok": True, "model_key": result, "model": memory_engine.get_model(result)}
-
-    raise HTTPException(
-        404,
-        f"no stat refit fn registered for model_key={model_key!r}. "
-        f"Known stat-derived: recovery.hrv_14d_baseline.",
+    from backend.seed_models import (
+        refit_aerobic_decoupling_baseline,
+        refit_cadence_baseline,
+        refit_hrv_14d_baseline,
     )
+
+    # Registry of stat-derived models. Adding a new one means: write
+    # the refit_* function in seed_models, register it here, ship
+    # docs. A future cron job will iterate this dict on a nightly
+    # schedule — keeping it dict-shaped (vs an if-chain) lets that
+    # iteration be one for-loop.
+    refit_registry: dict[str, Any] = {
+        "recovery.hrv_14d_baseline": refit_hrv_14d_baseline,
+        "aerobic.decoupling_baseline": refit_aerobic_decoupling_baseline,
+        "cadence.baseline": refit_cadence_baseline,
+    }
+
+    fn = refit_registry.get(model_key)
+    if fn is None:
+        raise HTTPException(
+            404,
+            f"no stat refit fn registered for model_key={model_key!r}. "
+            f"Known stat-derived: {sorted(refit_registry)}.",
+        )
+    result = fn(memory_engine, processor)
+    if result is None:
+        return {"ok": False, "reason": "insufficient_data"}
+    return {
+        "ok": True,
+        "model_key": result,
+        "model": memory_engine.get_model(result),
+    }
 
 
 # --- Pending Clarifications ---
