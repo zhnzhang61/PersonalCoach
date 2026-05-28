@@ -86,10 +86,26 @@ class TestRefitSleepDebt14d:
         assert params["units"] == "hours"
         assert params["target_hours"] == 8.0
         assert params["window_days"] == 14
-        # Debt: 3×1.5 + 2×1.0 + 2×0.5 = 4.5 + 2.0 + 1.0 = 7.5
-        assert params["total_debt_hours_14d"] == pytest.approx(7.5, abs=0.01)
+        # Debt: 3×1.5 + 2×1.0 + 2×0.5 = 4.5 + 2.0 + 1.0 = 7.5.
+        # Field name is "_in_window" (not "_14d") because the sum
+        # is over `n_samples` measured nights, not over the full
+        # 14-day window. With n=12 here both happen to nearly
+        # coincide, but the contract is the n_samples sum.
+        assert params["total_debt_hours_in_window"] == pytest.approx(
+            7.5, abs=0.01
+        )
         # Nights below target = 7 (6.5×3 + 7.0×2 + 7.5×2)
-        assert params["nights_below_target_14d"] == 7
+        assert params["nights_below_target_in_window"] == 7
+        # Invariant — total_debt equals exactly the
+        # sum(max(0, target - s) for s in samples). Pin this so a
+        # future refactor that re-derives in a different basis
+        # (e.g. extrapolates to a 14-night equivalent) regresses
+        # visibly.
+        sleep = [6.5, 6.5, 6.5, 7.0, 7.0, 7.5, 7.5,
+                 8.0, 8.0, 8.0, 8.5, 8.5]
+        assert params["total_debt_hours_in_window"] == pytest.approx(
+            sum(max(0.0, 8.0 - s) for s in sleep), abs=0.01
+        )
         # n>=7 → warning bands present
         assert "low_warning" in params
         assert "high_warning" in params
@@ -120,8 +136,8 @@ class TestRefitSleepDebt14d:
         dp.get_health_stats.return_value = _ledger_with_sleep(sleep)
         refit_sleep_debt_14d(mem, dp)
         got = mem.get_model("sleep.debt_14d")
-        assert got["params_json"]["total_debt_hours_14d"] == 0.0
-        assert got["params_json"]["nights_below_target_14d"] == 0
+        assert got["params_json"]["total_debt_hours_in_window"] == 0.0
+        assert got["params_json"]["nights_below_target_in_window"] == 0
 
     def test_second_call_updates_in_place(self, mem):
         from backend.seed_models import refit_sleep_debt_14d
@@ -141,7 +157,7 @@ class TestRefitSleepDebt14d:
         second = mem.get_model("sleep.debt_14d")
         assert first["model_id"] == second["model_id"]
         assert second["n_samples"] == 12
-        assert second["params_json"]["nights_below_target_14d"] == 0
+        assert second["params_json"]["nights_below_target_in_window"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -215,6 +231,57 @@ class TestBucketMileageByIsoWeek:
         weeks = _bucket_mileage_by_iso_week(rows)
         assert weeks[0][2] == 6.0  # bad row dropped
 
+    def test_aggregates_across_iso_year_boundary(self):
+        """2025-12-29 is Monday of ISO 2026-W01 (NOT 2025-W53). The
+        bucketer must group it with Jan 5 2026 sequentially and
+        assign a continuous week_index across the year change. A
+        refactor that swapped `isocalendar()` for `strftime('%U')`
+        would correctly aggregate within each week but mis-order
+        the cross-year sequence — regression test for that."""
+        import datetime
+        from backend.seed_models import _bucket_mileage_by_iso_week
+
+        rows = []
+        d = datetime.date.fromisoformat("2025-12-29")
+        for _ in range(14):
+            rows.append({
+                "date": d.isoformat(),
+                "sleep_hours": 7, "rhr": 50, "hrv": 70,
+                "stress": 20, "run_miles": 3.0, "run_mins": 0,
+                "sleep_score": 80,
+            })
+            d += datetime.timedelta(days=1)
+        weeks = _bucket_mileage_by_iso_week(rows)
+        assert len(weeks) == 2
+        assert weeks[0][1] == "2026-W01"
+        assert weeks[1][1] == "2026-W02"
+        # Sequential index continuous across the year change.
+        assert weeks[0][0] == 0
+        assert weeks[1][0] == 1
+
+    def test_zero_mile_rest_week_keeps_bucket(self):
+        """A rest week (intentional, miles=0) should produce a
+        0-bucket, NOT be skipped. The bucketer filters miles=None
+        (data gap) but keeps miles=0 (real observation).
+
+        Pin: without this, a refactor that swapped `miles is None`
+        for `not miles` (truthy check) would silently drop rest
+        weeks, collapsing a `30 → 0 → 0 → 25` taper-then-comeback
+        into a `30 → 25` two-point regression with wildly different
+        slope."""
+        from backend.seed_models import _bucket_mileage_by_iso_week
+
+        # Three full weeks starting on a Monday.
+        rows = _ledger_with_miles(
+            [3.0] * 7 + [0.0] * 7 + [3.0] * 7,
+            start_date="2026-01-05",
+        )
+        weeks = _bucket_mileage_by_iso_week(rows)
+        assert len(weeks) == 3
+        assert weeks[0][2] == 21.0
+        assert weeks[1][2] == 0.0  # rest week present, not dropped
+        assert weeks[2][2] == 21.0
+
 
 class TestRefitCycleWeeklyVolumeDiff:
     def test_skips_below_3_weeks(self, mem):
@@ -222,9 +289,24 @@ class TestRefitCycleWeeklyVolumeDiff:
 
         dp = MagicMock()
         # 1 week of data
-        dp.get_health_stats.return_value = _ledger_with_miles([3.0] * 7)
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            [3.0] * 7, start_date="2026-01-05",
+        )
         assert refit_cycle_weekly_volume_diff(mem, dp) is None
         assert mem.get_model("cycle.weekly_volume_diff") is None
+
+    def test_skips_at_exactly_2_weeks(self, mem):
+        """Pin both sides of the n >= 3 boundary so a regression that
+        tightens to `len < 4` or loosens to `len < 2` regresses
+        visibly — same shape as PR #88's `test_warning_bands_appear_
+        at_n_7` boundary pin."""
+        from backend.seed_models import refit_cycle_weekly_volume_diff
+
+        dp = MagicMock()
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            [3.0] * 14, start_date="2026-01-05",
+        )
+        assert refit_cycle_weekly_volume_diff(mem, dp) is None
 
     def test_creates_model_with_positive_slope(self, mem):
         """Mileage ramps 20 → 25 → 30 → 35 over 4 weeks → slope=5/wk,
@@ -245,14 +327,18 @@ class TestRefitCycleWeeklyVolumeDiff:
         assert got["n_samples"] == 4
         params = got["params_json"]
         assert params["units"] == "miles_per_week"
-        assert params["slope"] == pytest.approx(5.0, abs=0.05)
+        # Tolerances tightened to match storage precision (slope /
+        # r²: round(_, 2); weekly_change_pct: round(_, 1)) — see
+        # PR #88 lesson on loose-abs hiding boundary regressions.
+        assert params["slope"] == pytest.approx(5.0, abs=0.01)
         # Perfect linear ramp → r² = 1.0
-        assert params["r2"] == pytest.approx(1.0, abs=0.001)
+        assert params["r2"] == pytest.approx(1.0, abs=0.01)
         # Mean = 27.5, slope = 5 → 18.18%
         assert params["weekly_change_pct"] == pytest.approx(18.2, abs=0.1)
         assert len(params["weeks_used"]) == 4
-        assert params["weeks_used"][0]["miles"] == pytest.approx(20.0, abs=0.05)
-        assert params["weeks_used"][-1]["miles"] == pytest.approx(35.0, abs=0.05)
+        # Weekly mileage stored at round(_, 2) — match.
+        assert params["weeks_used"][0]["miles"] == pytest.approx(20.0, abs=0.01)
+        assert params["weeks_used"][-1]["miles"] == pytest.approx(35.0, abs=0.01)
 
     def test_negative_slope_when_tapering(self, mem):
         from backend.seed_models import refit_cycle_weekly_volume_diff
@@ -266,10 +352,11 @@ class TestRefitCycleWeeklyVolumeDiff:
         dp.get_health_stats.return_value = _ledger_with_miles(all_miles)
         refit_cycle_weekly_volume_diff(mem, dp)
         got = mem.get_model("cycle.weekly_volume_diff")
-        assert got["params_json"]["slope"] == pytest.approx(-6.0, abs=0.05)
+        # Storage rounds slope to 2 decimals, pct to 1 decimal — match.
+        assert got["params_json"]["slope"] == pytest.approx(-6.0, abs=0.01)
         # Mean = 18, slope = -6 → -33.3%
         assert got["params_json"]["weekly_change_pct"] == pytest.approx(
-            -33.3, abs=0.5
+            -33.3, abs=0.1
         )
 
     def test_zero_volume_degenerate(self, mem):
@@ -288,7 +375,13 @@ class TestRefitCycleWeeklyVolumeDiff:
         assert got["params_json"]["weekly_change_pct"] == 0.0
 
     def test_caps_at_volume_weeks_window(self, mem):
-        """Only the most recent _VOLUME_WEEKS=6 weeks contribute."""
+        """Only the most recent _VOLUME_WEEKS=6 weeks contribute.
+
+        Uses ISO 2026-W02 as the start so the entire 10-week window
+        sits well before today (2026-W22+) — keeps the test
+        deterministic across calendar dates without mocking
+        date.today() and unaffected by the current-week filter
+        (no overlap with today's ISO week)."""
         from backend.seed_models import refit_cycle_weekly_volume_diff
 
         dp = MagicMock()
@@ -296,22 +389,128 @@ class TestRefitCycleWeeklyVolumeDiff:
         miles_each_day = []
         for week_miles in range(10, 20):  # 10, 11, ..., 19
             miles_each_day.extend([week_miles / 7] * 7)
-        dp.get_health_stats.return_value = _ledger_with_miles(miles_each_day)
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            miles_each_day, start_date="2026-01-05"
+        )
         refit_cycle_weekly_volume_diff(mem, dp)
         got = mem.get_model("cycle.weekly_volume_diff")
         assert got["n_samples"] == 6
-        # Most recent 6 weeks = 14, 15, 16, 17, 18, 19 → slope = 1.0
-        assert got["params_json"]["slope"] == pytest.approx(1.0, abs=0.05)
+        # Most recent 6 weeks = 14, 15, 16, 17, 18, 19 → slope = 1.0.
+        # Tightened tolerance to abs=0.01 to match the production
+        # code's round(slope, 2) storage precision (per PR #88
+        # lesson — loose abs hides off-by-one regressions).
+        assert got["params_json"]["slope"] == pytest.approx(1.0, abs=0.01)
+
+    def test_constant_non_zero_volume_r2_fallback(self, mem):
+        """Steady 25 mi/wk for 6 weeks. linear_regression returns
+        slope=0 + ss_tot=0 → r2 falls through the `else 1.0` branch.
+        Pin both that the model still publishes AND that r²=1.0 (a
+        perfectly steady runner has perfect "no trend" fit).
+
+        Regression target: a refactor that drops the `if ss_tot > 0`
+        guard would ZeroDivisionError on every steady-state runner.
+        Without this test, the failure mode only surfaces in
+        production."""
+        from backend.seed_models import refit_cycle_weekly_volume_diff
+
+        dp = MagicMock()
+        # 6 weeks of 25 mi/wk = 150mi total, well clear of the
+        # current-iso-week filter (start in 2026-W02).
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            [25 / 7] * 42, start_date="2026-01-05",
+        )
+        refit_cycle_weekly_volume_diff(mem, dp)
+        got = mem.get_model("cycle.weekly_volume_diff")
+        assert got is not None
+        assert got["params_json"]["slope"] == pytest.approx(0.0, abs=0.01)
+        assert got["params_json"]["r2"] == pytest.approx(1.0, abs=0.01)
+        assert got["params_json"]["weekly_change_pct"] == 0.0
+
+    def test_low_volume_pct_floored_at_5mi(self, mem):
+        """Return-from-injury regime: weeks [0.5, 1.0, 1.0, 1.5,
+        1.5, 2.0] mi. Mean ≈ 1.25, slope ≈ 0.27. Without the
+        denominator floor at 5 mi/wk, weekly_change_pct would
+        explode to ~21.6% — agent reads it as "ramping fast, deload"
+        when the absolute change is clinically irrelevant.
+
+        With the _LOW_VOLUME_FLOOR_MI=5 floor, the denominator
+        clamps to 5 → pct = 0.27 / 5 * 100 = ~5.4%. The slope
+        itself is unchanged (raw absolute is the honest signal at
+        low volume; pct is the safety net)."""
+        from backend.seed_models import refit_cycle_weekly_volume_diff
+
+        dp = MagicMock()
+        # 6 weeks, totals [0.5, 1.0, 1.0, 1.5, 1.5, 2.0] mi.
+        # Spread each total evenly over 7 days.
+        targets = [0.5, 1.0, 1.0, 1.5, 1.5, 2.0]
+        all_miles = []
+        for total in targets:
+            all_miles.extend([total / 7] * 7)
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            all_miles, start_date="2026-01-05",
+        )
+        refit_cycle_weekly_volume_diff(mem, dp)
+        got = mem.get_model("cycle.weekly_volume_diff")
+        # Slope still ~0.27 mi/wk (un-floored — absolute is honest).
+        assert got["params_json"]["slope"] == pytest.approx(0.27, abs=0.05)
+        # pct now floored: 0.27 / 5.0 * 100 ≈ 5.4% (not 21.6%).
+        assert got["params_json"]["weekly_change_pct"] == pytest.approx(
+            5.4, abs=0.5
+        )
+
+    def test_drops_current_iso_week_from_regression(self, mem, monkeypatch):
+        """The current (in-progress) ISO week must NOT contribute
+        to the regression — otherwise a Monday-morning refit on a
+        steady 25mi/wk runner produces a misleading downward slope
+        because the current week is `0` (no run logged yet today).
+
+        We mock date.today() to a known Monday so the test data
+        deterministically straddles "completed" vs "current" weeks."""
+        import datetime as _dt
+        from backend import seed_models
+
+        # Pin "today" to Monday 2026-02-09 (ISO 2026-W07). Build
+        # 6 full weeks of 25 mi (W01-W06) plus 1 row at today's
+        # date carrying 0 miles (mimics the cron firing on a fresh
+        # Monday). Without the drop-current-week filter, slope
+        # would swing negative; with the filter, slope stays 0.
+        class FakeDate(_dt.date):
+            @classmethod
+            def today(cls):
+                return _dt.date(2026, 2, 9)
+        monkeypatch.setattr(seed_models, "date", FakeDate)
+
+        from backend.seed_models import refit_cycle_weekly_volume_diff
+
+        # 6 completed weeks (W01-W06: 2025-12-29 .. 2026-02-08)
+        # + 1 day at today (2026-02-09, W07, 0 miles).
+        rows = _ledger_with_miles(
+            [25 / 7] * 42 + [0.0], start_date="2025-12-29",
+        )
+        dp = MagicMock()
+        dp.get_health_stats.return_value = rows
+        refit_cycle_weekly_volume_diff(mem, dp)
+        got = mem.get_model("cycle.weekly_volume_diff")
+        assert got is not None
+        # Slope should reflect 6 completed weeks of steady 25 → 0
+        # (NOT slope downward toward the partial 0-mile current week).
+        assert got["params_json"]["slope"] == pytest.approx(0.0, abs=0.01)
+        # Evidence shouldn't include the current week's label.
+        assert "2026-W07" not in got["evidence_json"]["weeks"]
 
     def test_second_call_updates_in_place(self, mem):
         from backend.seed_models import refit_cycle_weekly_volume_diff
 
         dp = MagicMock()
-        dp.get_health_stats.return_value = _ledger_with_miles([3.0] * 28)
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            [3.0] * 28, start_date="2026-01-05",
+        )
         refit_cycle_weekly_volume_diff(mem, dp)
         first = mem.get_model("cycle.weekly_volume_diff")
 
-        dp.get_health_stats.return_value = _ledger_with_miles([5.0] * 28)
+        dp.get_health_stats.return_value = _ledger_with_miles(
+            [5.0] * 28, start_date="2026-01-05",
+        )
         refit_cycle_weekly_volume_diff(mem, dp)
         second = mem.get_model("cycle.weekly_volume_diff")
         assert first["model_id"] == second["model_id"]
@@ -329,7 +528,12 @@ class TestRefitEndpointBatch2:
         api_server.processor.get_health_stats.return_value = []
         resp = client.post("/api/memory/models/refit/sleep.debt_14d")
         assert resp.status_code == 422
-        assert resp.json()["detail"]["reason"] == "insufficient_data"
+        # Pin BOTH halves of the body contract — a refactor that
+        # dropped `ok` or flipped it to True would break any client
+        # branching on `detail.ok`.
+        detail = resp.json()["detail"]
+        assert detail["ok"] is False
+        assert detail["reason"] == "insufficient_data"
 
     def test_cycle_volume_routes_and_422_on_no_data(self, client):
         import backend.api_server as api_server
@@ -337,7 +541,9 @@ class TestRefitEndpointBatch2:
         api_server.processor.get_health_stats.return_value = []
         resp = client.post("/api/memory/models/refit/cycle.weekly_volume_diff")
         assert resp.status_code == 422
-        assert resp.json()["detail"]["reason"] == "insufficient_data"
+        detail = resp.json()["detail"]
+        assert detail["ok"] is False
+        assert detail["reason"] == "insufficient_data"
 
     def test_registry_includes_new_keys(self):
         """Module-level REFIT_REGISTRY pinned to include both new

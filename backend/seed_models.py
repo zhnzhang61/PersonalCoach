@@ -514,6 +514,15 @@ _SLEEP_LOOKBACK_DAYS = 14
 # Fewer than 3 weeks of data → can't characterize a slope.
 _VOLUME_WEEKS = 6
 
+# Floor for the `weekly_change_pct` denominator. Below this weekly
+# mileage, percent-change becomes a misleading amplifier — a 0.27
+# mi/wk delta on a 1mi mean reads as +27% (alarming) but is
+# clinically irrelevant. Clamping the divisor at 5 mi/wk means the
+# pct only ever describes meaningful absolute changes; below that
+# threshold the agent should reason from `slope` (raw mi/wk) and
+# `weeks_used` directly instead of trusting the percentage.
+_LOW_VOLUME_FLOOR_MI = 5.0
+
 
 def refit_sleep_debt_14d(memory_engine: Any, data_processor: Any) -> str | None:
     """Sleep baseline + debt over the last 14 days. Mirrors the
@@ -557,11 +566,19 @@ def refit_sleep_debt_14d(memory_engine: Any, data_processor: Any) -> str | None:
     params["units"] = "hours"
     params["target_hours"] = _SLEEP_TARGET_HOURS
     params["window_days"] = _SLEEP_LOOKBACK_DAYS
+    # Field names say "_in_window" rather than "_14d" because the
+    # values are summed over the qualifying nights (`n_used`), NOT
+    # over the full 14-day window. Watch-not-worn nights are
+    # filtered out; if the user wore the watch 8 of 14 nights,
+    # these totals reflect those 8 nights, not the missing 6. The
+    # agent reads `n_used` (top-level on the model row) alongside
+    # these and quotes them honestly ("16 hours of debt across 8
+    # measured nights").
     total_debt = sum(
         max(0.0, _SLEEP_TARGET_HOURS - s) for s in samples
     )
-    params["total_debt_hours_14d"] = round(total_debt, 1)
-    params["nights_below_target_14d"] = sum(
+    params["total_debt_hours_in_window"] = round(total_debt, 1)
+    params["nights_below_target_in_window"] = sum(
         1 for s in samples if s < _SLEEP_TARGET_HOURS
     )
     evidence = {"dates": dates}
@@ -649,11 +666,21 @@ def refit_cycle_weekly_volume_diff(
     """
     rows = data_processor.get_health_stats() or []
     weeks = _bucket_mileage_by_iso_week(rows)
-    # Take the most recent _VOLUME_WEEKS completed weeks. The
-    # current (partial) week is included — its lower mileage
-    # reflects "what's in the book so far" and the agent can
-    # interpret. Dropping it would mean a 0-mile end and a
-    # misleading downward slope at every refit.
+    # Drop the current (in-progress) ISO week from the regression.
+    # `compile_health_ledger` emits a row per calendar day including
+    # today, so the current week's bucket always reflects "what's in
+    # the book so far" — typically 0 on a Monday morning refit. Left
+    # in, that biases the slope downward at every Monday-morning
+    # cron: a steady 25mi/wk runner reads as "tapering at -3.6 mi/wk"
+    # right after the week rolls over. Dropping it means the slope
+    # always covers complete weeks. The most-recent COMPLETED week's
+    # mileage is still available to the agent via the model's
+    # `weeks_used` list (it's the last entry after the drop).
+    today_iso = date.today().isocalendar()
+    weeks = [
+        w for w in weeks
+        if (int(w[1][:4]), int(w[1][6:])) != (today_iso[0], today_iso[1])
+    ]
     weeks = weeks[-_VOLUME_WEEKS:]
     if len(weeks) < 3:
         return None
@@ -680,7 +707,17 @@ def refit_cycle_weekly_volume_diff(
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
 
     mean_y = statistics.fmean(ys)
-    weekly_change_pct = (slope / mean_y * 100) if mean_y > 0 else 0.0
+    # Floor the denominator at _LOW_VOLUME_FLOOR_MI so percent-change
+    # doesn't explode in low-volume regimes (return-from-injury,
+    # taper, off-season). Without this, [0.5, 1.0, 1.0, 1.5, 1.5,
+    # 2.0] yields +22% per week — agent would read it as "ramping
+    # fast, deload recommended" when the absolute change is
+    # clinically irrelevant. Above 5 mi/wk the floor never bites
+    # (mean_y > floor), so this only affects the regime where
+    # absolute mileage matters more than percent anyway.
+    weekly_change_pct = (
+        slope / max(mean_y, _LOW_VOLUME_FLOOR_MI) * 100
+    ) if mean_y > 0 else 0.0
 
     n = len(weeks)
     # Looser confidence ladder than the per-night models: 6 weeks
