@@ -5,7 +5,7 @@ PR P1 ships the pattern-store schema + one seed model
 read raw Garmin sensor data → compute rolling stat → write/update
 the model row → MCP tool surfaces it to the agent.
 
-PR P6 adds two more on the same scaffold (§5 of coach_brain_design):
+PR P6 batch 1 added two on the same scaffold (§5 of coach_brain_design):
 - `aerobic.decoupling_baseline` (mean_std) — pace/HR drift on easy
   runs. Lower = better aerobic fitness. Comparing today's run to
   this baseline tells the agent whether the HR drift is normal for
@@ -13,6 +13,21 @@ PR P6 adds two more on the same scaffold (§5 of coach_brain_design):
 - `cadence.baseline` (mean_std) — typical steady-state cadence on
   easy effort. Drops below baseline often correlate with fatigue,
   shoe change, or terrain shift.
+
+PR P6 batch 2 adds two more:
+- `sleep.debt_14d` (mean_std) — 14-day rolling sleep baseline +
+  total debt against an 8h target + count of below-target nights.
+  Mirrors hrv_14d's shape since both move on the same timescale.
+- `cycle.weekly_volume_diff` (linear_trend) — slope of weekly
+  mileage over the last 6 weeks. One number ("ramping at +3.5
+  mi/wk") replaces the agent doing week-vs-week math each turn.
+
+Still pending (deferred from P6 batch 2 because user data is too
+thin to characterize meaningfully):
+- `tempo.pace_hr_table` — typical pace at each HR band on tempo
+  days. Needs either tagged `lap_categories` (currently sparse —
+  user mostly does easy runs + the occasional marathon) OR an
+  HR-band heuristic. Revisit when there's data.
 
 Future stat-derived models (`heat.pace_drop_at_temp`,
 `menstrual.hrv_phase_response`, etc.) follow the same shape — each
@@ -47,6 +62,15 @@ the contract documented since the shape varies):
                                        decoupling excludes — see
                                        comments on the compute
                                        helpers for why)
+  - `sleep.debt_14d`                → `{"dates": ["YYYY-MM-DD", ...]}`
+                                       (one date per qualifying
+                                       night, same shape as HRV
+                                       since both share the
+                                       health-ledger source)
+  - `cycle.weekly_volume_diff`      → `{"weeks": ["YYYY-Www", ...]}`
+                                       (ISO calendar weeks; the
+                                       weeks_used field in params
+                                       has the {week, miles} pairs)
 """
 
 from __future__ import annotations
@@ -458,6 +482,249 @@ def refit_cadence_baseline(
             model_type="mean_std",
             params_json=params,
             n_samples=len(samples),
+            confidence=confidence,
+            evidence_json=evidence,
+            derivation_method="stat",
+            status=status,
+        )
+    return model_key
+
+
+# ---------------------------------------------------------------------------
+# PR P6 batch 2 — sleep debt + weekly volume trend
+# ---------------------------------------------------------------------------
+
+
+# Conventional "full night" target. Used to compute the per-night
+# deficit that aggregates into `total_debt_hours_14d`. 8.0 is the
+# generic adult-runner ceiling — could be tightened to a user
+# preference later (athlete_profile already has a place for this);
+# for now the value is conservative enough that high-volume runners
+# still accrue some deficit on a typical week, which is the signal
+# the agent uses.
+_SLEEP_TARGET_HOURS = 8.0
+
+# Look-back for sleep + volume. Same 14-day window the HRV baseline
+# uses — sleep and HRV move on similar timescales (a single bad
+# night doesn't define a baseline; a fortnight does).
+_SLEEP_LOOKBACK_DAYS = 14
+
+# Number of completed weeks the volume trend characterizes. 6 weeks
+# covers a typical mesocycle (4 weeks build + 1 deload + this week).
+# Fewer than 3 weeks of data → can't characterize a slope.
+_VOLUME_WEEKS = 6
+
+
+def refit_sleep_debt_14d(memory_engine: Any, data_processor: Any) -> str | None:
+    """Sleep baseline + debt over the last 14 days. Mirrors the
+    hrv_14d baseline shape (mean_std + n_used + warning bands at
+    n>=7), plus three sleep-specific fields in params_json:
+      - `target_hours` (_SLEEP_TARGET_HOURS) — the threshold used
+        for debt accounting; pinned in params so the agent reads
+        the same definition the model was computed against.
+      - `total_debt_hours_14d` — sum of max(0, target - actual)
+        over qualifying nights. A 14-day total, not per-night.
+      - `nights_below_target_14d` — count of nights with
+        actual < target (useful for "you've had 5 short nights
+        in two weeks" phrasing).
+
+    Returns the model_key on successful refit; None when fewer than
+    7 nights of valid sleep data in the window (matches HRV's floor
+    — sleep and HRV share the same data window so the threshold
+    should match)."""
+    rows = data_processor.get_health_stats() or []
+    window = rows[-_SLEEP_LOOKBACK_DAYS:]
+    samples: list[float] = []
+    dates: list[str] = []
+    for r in window:
+        sleep_h = r.get("sleep_hours")
+        if sleep_h is None:
+            continue
+        try:
+            sleep_h = float(sleep_h)
+        except (TypeError, ValueError):
+            continue
+        if sleep_h <= 0:
+            # Garmin sometimes reports 0 for nights where the watch
+            # wasn't worn — distinct from "slept 0 hours". Skip.
+            continue
+        samples.append(sleep_h)
+        dates.append(r["date"])
+    if len(samples) < 7:
+        return None
+
+    params, confidence, status = _compute_baseline_params(samples)
+    params["units"] = "hours"
+    params["target_hours"] = _SLEEP_TARGET_HOURS
+    params["window_days"] = _SLEEP_LOOKBACK_DAYS
+    total_debt = sum(
+        max(0.0, _SLEEP_TARGET_HOURS - s) for s in samples
+    )
+    params["total_debt_hours_14d"] = round(total_debt, 1)
+    params["nights_below_target_14d"] = sum(
+        1 for s in samples if s < _SLEEP_TARGET_HOURS
+    )
+    evidence = {"dates": dates}
+
+    model_key = "sleep.debt_14d"
+    existing = memory_engine.get_model(model_key)
+    if existing:
+        memory_engine.update_model_params(
+            model_key,
+            params_json=params,
+            n_samples=len(samples),
+            confidence=confidence,
+            evidence_json=evidence,
+            status=status,
+        )
+    else:
+        memory_engine.create_model(
+            model_key=model_key,
+            name="14 天睡眠基线 + 赤字",
+            category="Health/Sleep",
+            model_type="mean_std",
+            params_json=params,
+            n_samples=len(samples),
+            confidence=confidence,
+            evidence_json=evidence,
+            derivation_method="stat",
+            status=status,
+        )
+    return model_key
+
+
+def _bucket_mileage_by_iso_week(
+    rows: list[dict],
+) -> list[tuple[int, str, float]]:
+    """Bucket health-ledger rows into ISO calendar weeks.
+
+    Returns a list of `(week_index, week_label, total_miles)` tuples,
+    earliest first. `week_index` is sequential from 0 across the
+    returned list so the linear regression below can use it as the
+    x axis (avoids the ISO week-of-year edge case at year boundaries).
+    `week_label` is human-readable: 'YYYY-Www' (ISO 8601).
+    """
+    by_iso: dict[tuple[int, int], float] = {}
+    for r in rows:
+        d = r.get("date")
+        miles = r.get("run_miles")
+        if not d or miles is None:
+            continue
+        try:
+            iso = date.fromisoformat(d).isocalendar()
+        except (TypeError, ValueError):
+            continue
+        key = (iso[0], iso[1])  # (year, week)
+        by_iso[key] = by_iso.get(key, 0.0) + float(miles)
+    # Sort by (year, week); assign sequential index.
+    ordered = sorted(by_iso.items())
+    out: list[tuple[int, str, float]] = []
+    for i, ((yr, wk), miles) in enumerate(ordered):
+        out.append((i, f"{yr}-W{wk:02d}", round(miles, 2)))
+    return out
+
+
+def refit_cycle_weekly_volume_diff(
+    memory_engine: Any, data_processor: Any
+) -> str | None:
+    """Week-over-week mileage trend from the last _VOLUME_WEEKS
+    completed weeks. linear_trend on (week_index, total_miles)
+    so the agent can answer 'am I ramping or tapering?' with one
+    number (slope) instead of comparing two weeks each turn.
+
+    params_json:
+      - `slope`: miles/week change (positive = ramping)
+      - `intercept`: regression baseline (x=0)
+      - `weekly_change_pct`: percent change per week relative to
+        the mean. Easier for the agent to quote than raw miles
+        when weeks vary widely in absolute volume.
+      - `r2`: fit quality. Low r2 = volume is volatile, the
+        "trend" might just be noise. The agent should hedge.
+      - `weeks_used`: list of `{week, miles}` dicts; one per
+        observation. Lets the agent quote actual numbers
+        ("last week 28mi, this week 32mi").
+
+    Returns None when fewer than 3 weeks of data are available
+    (need at least 3 points for a meaningful slope + r2).
+    """
+    rows = data_processor.get_health_stats() or []
+    weeks = _bucket_mileage_by_iso_week(rows)
+    # Take the most recent _VOLUME_WEEKS completed weeks. The
+    # current (partial) week is included — its lower mileage
+    # reflects "what's in the book so far" and the agent can
+    # interpret. Dropping it would mean a 0-mile end and a
+    # misleading downward slope at every refit.
+    weeks = weeks[-_VOLUME_WEEKS:]
+    if len(weeks) < 3:
+        return None
+
+    # Re-index so x runs 0..n-1 over the windowed weeks (regardless
+    # of original index from the full ledger).
+    xs = list(range(len(weeks)))
+    ys = [miles for _, _, miles in weeks]
+    if all(y == 0 for y in ys):
+        # Degenerate: no running at all — slope is zero, r2
+        # undefined. Still want to publish the model so the agent
+        # sees "0 mi/week with high confidence" rather than
+        # "no model".
+        slope, intercept, r2 = 0.0, 0.0, 1.0
+    else:
+        lr = statistics.linear_regression(xs, ys)
+        slope = lr.slope
+        intercept = lr.intercept
+        # Pearson r² — manual since statistics doesn't expose it on
+        # the LinearRegression result. r2 = 1 - SS_res/SS_tot.
+        mean_y = statistics.fmean(ys)
+        ss_tot = sum((y - mean_y) ** 2 for y in ys)
+        ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
+
+    mean_y = statistics.fmean(ys)
+    weekly_change_pct = (slope / mean_y * 100) if mean_y > 0 else 0.0
+
+    n = len(weeks)
+    # Looser confidence ladder than the per-night models: 6 weeks
+    # IS a full mesocycle, so all-of-window is high-confidence.
+    if n >= 6:
+        confidence = "high"
+    elif n >= 4:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    status = "Stable" if n >= 4 else "Forming"
+
+    params = {
+        "slope": round(slope, 2),
+        "intercept": round(intercept, 2),
+        "weekly_change_pct": round(weekly_change_pct, 1),
+        "r2": round(r2, 2),
+        "units": "miles_per_week",
+        "weeks_used": [
+            {"week": label, "miles": miles}
+            for _, label, miles in weeks
+        ],
+    }
+    evidence = {"weeks": [label for _, label, _ in weeks]}
+
+    model_key = "cycle.weekly_volume_diff"
+    existing = memory_engine.get_model(model_key)
+    if existing:
+        memory_engine.update_model_params(
+            model_key,
+            params_json=params,
+            n_samples=n,
+            confidence=confidence,
+            evidence_json=evidence,
+            status=status,
+        )
+    else:
+        memory_engine.create_model(
+            model_key=model_key,
+            name="周里程趋势",
+            category="Running/Volume",
+            model_type="linear_trend",
+            params_json=params,
+            n_samples=n,
             confidence=confidence,
             evidence_json=evidence,
             derivation_method="stat",

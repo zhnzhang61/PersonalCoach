@@ -21,7 +21,9 @@ from backend.google_calendar import GoogleCalendar
 from backend.seed_models import (
     refit_aerobic_decoupling_baseline,
     refit_cadence_baseline,
+    refit_cycle_weekly_volume_diff,
     refit_hrv_14d_baseline,
+    refit_sleep_debt_14d,
 )
 
 # Registry of stat-derived models. Importable so a future nightly
@@ -33,6 +35,9 @@ REFIT_REGISTRY: dict[str, Any] = {
     "recovery.hrv_14d_baseline": refit_hrv_14d_baseline,
     "aerobic.decoupling_baseline": refit_aerobic_decoupling_baseline,
     "cadence.baseline": refit_cadence_baseline,
+    # PR P6 batch 2
+    "sleep.debt_14d": refit_sleep_debt_14d,
+    "cycle.weekly_volume_diff": refit_cycle_weekly_volume_diff,
 }
 
 
