@@ -24,11 +24,29 @@ Design notes:
 - Each function is idempotent: create model on first call, update
   in place on subsequent calls. Caller doesn't need to check existence.
 - `params_json` shape is per `model_type`. mean_std uses
-  {mean, sd, n_used, low_warning, high_warning}. Other shapes
-  documented per function.
+  {mean, sd, n_used} always, plus {low_warning, high_warning} at
+  n_used >= 7 (band suppressed below that — too noisy with few
+  samples). Other shapes documented per function.
 - P6 models gate on a sample-count floor (n_used >= 3) so a single
   noisy run doesn't poison the baseline. Status flips
   Forming → Stable around n_used >= 8.
+
+`evidence_json` shape (per model_key — keep this list in sync as
+new models land; a generic "what fed this baseline?" tool needs
+the contract documented since the shape varies):
+
+  - `recovery.hrv_14d_baseline`     → `{"dates": ["YYYY-MM-DD", ...]}`
+                                       (one date per night with HRV
+                                       in the window)
+  - `aerobic.decoupling_baseline`   → `{"activity_ids": [int, ...]}`
+                                       (one activity_id per
+                                       qualifying easy/long run)
+  - `cadence.baseline`              → `{"activity_ids": [int, ...]}`
+                                       (same as decoupling, but
+                                       includes treadmills which
+                                       decoupling excludes — see
+                                       comments on the compute
+                                       helpers for why)
 """
 
 from __future__ import annotations
@@ -152,10 +170,18 @@ def _aerobic_hr_ceiling(data_processor: Any) -> float:
     """Return the HR ceiling above which a run no longer counts as
     "aerobic / easy" for baseline purposes. Reads the user's
     lactate-threshold HR from the athlete profile when available;
-    falls back to a generic ceiling otherwise."""
+    falls back to a generic 155 bpm ceiling otherwise.
+
+    Catches only the "profile not bootstrapped yet" exceptions —
+    fresh install, semantic memory not seeded, missing file. Real
+    failures (DB lock, schema migration error, buggy refactor) will
+    propagate so they don't silently demote a fit user's ceiling
+    from 165 → 155 bpm and skew the baseline sample set.
+    """
     try:
         profile = data_processor.get_athlete_profile_full() or {}
-    except Exception:
+    except (AttributeError, KeyError, FileNotFoundError):
+        # Profile not bootstrapped yet — genuine fallback case.
         profile = {}
     lt = (profile.get("fitness") or {}).get("lactate_threshold_hr")
     if isinstance(lt, (int, float)) and lt > 0:
@@ -188,6 +214,13 @@ def _compute_run_decoupling_pct(
         return None
     # Restrict to samples with both HR and forward motion. Speed > 0.5
     # m/s (≈ slow jog) filters out pauses / stop-and-go around lights.
+    # Side effect: treadmill runs without a footpod (Speed_mps=0 from
+    # zero-distance deltas) drop to zero surviving samples → return
+    # None and never contribute to the baseline. Intentional —
+    # decoupling math requires pace, which treadmills don't provide.
+    # The cadence baseline does NOT filter on speed, so treadmill
+    # cadence DOES contribute there (treadmill cadence is meaningful
+    # without GPS).
     df = df_raw[
         df_raw["HeartRate"].notna()
         & df_raw["Speed_mps"].notna()
@@ -196,7 +229,14 @@ def _compute_run_decoupling_pct(
     n = len(df)
     if n < 60:
         return None
-    midpoint = df["Second"].iloc[n // 2]
+    # Split on wall-clock midpoint of the run, not row position.
+    # Walk-pause clusters (lights / hills / GPS dropouts) shift row
+    # density across the run; using iloc[n//2] would split into two
+    # halves with unequal time spans, biasing decoupling toward
+    # whichever side saw the steeper HR trajectory. Wall-clock split
+    # matches the conventional "first half vs second half" definition
+    # the agent's coaching prompts quote.
+    midpoint = (df["Second"].iloc[0] + df["Second"].iloc[-1]) / 2.0
     h1_df = df[df["Second"] <= midpoint]
     h2_df = df[df["Second"] > midpoint]
     if len(h1_df) < 30 or len(h2_df) < 30:
@@ -219,7 +259,13 @@ def _compute_run_avg_cadence(
 ) -> float | None:
     """Average cadence (steps per minute) for a run, from raw
     telemetry. Returns None when telemetry is missing or we don't
-    have at least 60 valid samples (~10 min @ 10s downsample)."""
+    have at least 60 valid samples (~10 min @ 10s downsample).
+
+    Note (deliberate asymmetry vs decoupling): this does NOT filter
+    on Speed_mps, so treadmill runs DO contribute to the cadence
+    baseline. Cadence is meaningful without GPS — your feet still
+    move whether you're outdoors or on a belt. Decoupling needs pace
+    and so excludes treadmills; cadence doesn't and so includes them."""
     df_raw, _ = data_processor.get_activity_telemetry(activity_id)
     if df_raw is None or df_raw.empty:
         return None
@@ -257,6 +303,13 @@ def _compute_baseline_params(samples: list[float]) -> tuple[dict, str, str]:
     looser than the HRV model's (HRV refits daily; these refit
     per-run) but the spirit is the same: pin a confidence the agent
     can quote.
+
+    `low_warning` / `high_warning` (mean ± 2σ) are ONLY emitted at
+    n >= 7. At n=3 the population SD estimate is wildly unstable —
+    one outlier swings the band by 50%. Emitting the bands at low-n
+    would tempt the agent to quote a "your normal range is X to Y"
+    answer built on noise. Keeping `mean` + `sd` at all n is fine:
+    they're descriptive, not threshold-y.
     """
     n_used = len(samples)
     mean_v = statistics.fmean(samples)
@@ -268,16 +321,17 @@ def _compute_baseline_params(samples: list[float]) -> tuple[dict, str, str]:
     else:
         confidence = "low"
     status = "Stable" if n_used >= 8 else "Forming"
-    params = {
+    params: dict[str, Any] = {
         "mean": round(mean_v, 1),
         "sd": round(sd_v, 1),
         "n_used": n_used,
-        # ±2σ — pin user-facing "out-of-band" thresholds so the agent
-        # can quote them as concrete numbers rather than re-deriving
-        # in prose.
-        "low_warning": round(mean_v - 2 * sd_v, 1),
-        "high_warning": round(mean_v + 2 * sd_v, 1),
     }
+    if n_used >= 7:
+        # ±2σ — pin user-facing "out-of-band" thresholds so the
+        # agent can quote them as concrete numbers rather than
+        # re-deriving in prose. Suppressed below n=7 (see docstring).
+        params["low_warning"] = round(mean_v - 2 * sd_v, 1)
+        params["high_warning"] = round(mean_v + 2 * sd_v, 1)
     return params, confidence, status
 
 

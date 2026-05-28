@@ -73,8 +73,17 @@ def _make_telemetry(
 
 def _mock_run(activity_id, *, duration_s=2000, avg_hr=140, date="2026-05-15"):
     """A minimal RunActivity-like stand-in for the fields refit
-    functions actually touch."""
-    r = MagicMock()
+    functions actually touch.
+
+    Uses `spec=RunActivity` so attribute access matches the real
+    dataclass — if a future PR adds a field to RunActivity and
+    `_is_aerobic_run` starts reading it, accessing it on a bare
+    MagicMock would return a truthy mock (silent pass); spec-mode
+    raises AttributeError until the test sets the new field, making
+    the gap visible."""
+    from backend.data_processor import RunActivity
+
+    r = MagicMock(spec=RunActivity)
     r.activity_id = activity_id
     r.duration_s = duration_s
     r.avg_hr = avg_hr
@@ -103,10 +112,15 @@ class TestComputeRunDecouplingPct:
         assert _compute_run_decoupling_pct(1, dp) is None
 
     def test_positive_decoupling_when_hr_drifts_up(self):
-        """HR ramps 140→160 at constant speed → second half HR is
-        higher than first half → positive decoupling (pace/HR ratio
-        in 2nd half is worse). Magnitude ≈ (h2/h1 - 1) * 100, where
-        h1 ≈ 145/3.0 and h2 ≈ 155/3.0 → ~6.9%."""
+        """HR ramps 140→160 linearly across 200 samples at constant
+        Speed_mps=3.0. Analytic values for a wall-clock midpoint
+        split (samples 0..99 vs 100..199):
+            h1_mean_hr = 140 + (20/199) * (sum 0..99 / 100) = 144.975
+            h2_mean_hr = 140 + (20/199) * (sum 100..199 / 100) = 155.025
+            decoupling = (155.025 - 144.975) / 144.975 * 100 = 6.93%
+        Tight tolerance — anything outside 6.85-7.0 indicates a
+        boundary / off-by-one bug in the split (row-position vs
+        wall-clock, inclusive vs exclusive, etc.)."""
         from backend.seed_models import _compute_run_decoupling_pct
 
         dp = MagicMock()
@@ -116,7 +130,7 @@ class TestComputeRunDecouplingPct:
         )
         result = _compute_run_decoupling_pct(1, dp)
         assert result is not None
-        assert result == pytest.approx(6.9, abs=0.5)
+        assert result == pytest.approx(6.93, abs=0.05)
 
     def test_negative_decoupling_when_hr_drops(self):
         """Going downhill or warming up properly → HR drops over
@@ -133,8 +147,7 @@ class TestComputeRunDecouplingPct:
         assert result < 0
 
     def test_zero_decoupling_when_hr_steady(self):
-        """Constant HR + constant speed → 0 decoupling within a
-        rounding hair."""
+        """Constant HR + constant speed → exactly 0 decoupling."""
         from backend.seed_models import _compute_run_decoupling_pct
 
         dp = MagicMock()
@@ -143,7 +156,7 @@ class TestComputeRunDecouplingPct:
             None,
         )
         result = _compute_run_decoupling_pct(1, dp)
-        assert result == pytest.approx(0.0, abs=0.1)
+        assert result == pytest.approx(0.0, abs=0.001)
 
     def test_returns_none_below_60_valid_samples(self):
         """50 samples isn't enough — emitting one would skew the
@@ -183,7 +196,7 @@ class TestComputeRunAvgCadence:
             _make_telemetry(n_samples=200, cadence=178), None,
         )
         result = _compute_run_avg_cadence(1, dp)
-        assert result == pytest.approx(178.0, abs=0.5)
+        assert result == pytest.approx(178.0, abs=0.01)
 
     def test_filters_below_100_spm(self):
         """Cadence below 100 spm is walking / paused — exclude. A
@@ -197,7 +210,7 @@ class TestComputeRunAvgCadence:
         dp.get_activity_telemetry.return_value = (df, None)
         result = _compute_run_avg_cadence(1, dp)
         # Should be ~178, not the weighted mean with the 60s.
-        assert result == pytest.approx(178.0, abs=0.5)
+        assert result == pytest.approx(178.0, abs=0.01)
 
     def test_returns_none_when_telemetry_missing(self):
         from backend.seed_models import _compute_run_avg_cadence
@@ -254,7 +267,8 @@ class TestAerobicHrCeiling:
             "fitness": {"lactate_threshold_hr": 170},
         }
         # 170 * 0.92 = 156.4
-        assert _aerobic_hr_ceiling(dp) == pytest.approx(156.4)
+        # 170 * 0.92 = 156.4 exactly under float (no rounding).
+        assert _aerobic_hr_ceiling(dp) == pytest.approx(156.4, abs=1e-9)
 
     def test_falls_back_when_lt_missing(self):
         from backend.seed_models import _aerobic_hr_ceiling
@@ -263,14 +277,41 @@ class TestAerobicHrCeiling:
         dp.get_athlete_profile_full.return_value = {"fitness": {}}
         assert _aerobic_hr_ceiling(dp) == 155.0
 
-    def test_falls_back_when_profile_raises(self):
-        """Garmin sync didn't populate user_data yet — getter may
-        raise. Don't crash the whole refit; fall back."""
+    def test_falls_back_when_profile_file_missing(self):
+        """Fresh install: semantic profile JSON not yet written →
+        FileNotFoundError. Fall back to the generic ceiling. This
+        is the genuine 'profile not bootstrapped' case the narrow
+        catch is meant to cover."""
         from backend.seed_models import _aerobic_hr_ceiling
 
         dp = MagicMock()
-        dp.get_athlete_profile_full.side_effect = RuntimeError("no profile")
+        dp.get_athlete_profile_full.side_effect = FileNotFoundError("no file")
         assert _aerobic_hr_ceiling(dp) == 155.0
+
+    def test_falls_back_when_profile_key_missing(self):
+        """Partially-populated profile dict raises KeyError on
+        access — also a bootstrap case."""
+        from backend.seed_models import _aerobic_hr_ceiling
+
+        dp = MagicMock()
+        dp.get_athlete_profile_full.side_effect = KeyError("fitness")
+        assert _aerobic_hr_ceiling(dp) == 155.0
+
+    def test_unexpected_exception_propagates(self):
+        """Real failures (DB lock, schema migration error, buggy
+        refactor) must NOT silently demote the ceiling — that would
+        skew the baseline sample set and make the model invisibly
+        wrong. Original bare `except Exception` swallowed these;
+        the narrowed catch lets them surface so the operator sees
+        the actual problem."""
+        from backend.seed_models import _aerobic_hr_ceiling
+
+        dp = MagicMock()
+        dp.get_athlete_profile_full.side_effect = RuntimeError(
+            "DB locked"
+        )
+        with pytest.raises(RuntimeError, match="DB locked"):
+            _aerobic_hr_ceiling(dp)
 
     def test_falls_back_on_zero_lt(self):
         """`lactate_threshold_hr=0` (Garmin reports 0 when uncertain)
@@ -348,13 +389,38 @@ class TestRefitAerobicDecouplingBaseline:
         assert got["confidence"] == "low"  # 5 < 8
         assert got["n_samples"] == 5
         params = got["params_json"]
-        assert {"mean", "sd", "n_used", "low_warning", "high_warning",
-                "units", "aerobic_hr_ceiling_used", "lookback_days"} <= set(params.keys())
+        # At n=5 < 7 the warning bands are intentionally suppressed
+        # (see _compute_baseline_params docstring) — mean/sd/n_used
+        # always present, low/high_warning only at n >= 7.
+        assert {"mean", "sd", "n_used", "units",
+                "aerobic_hr_ceiling_used", "lookback_days"} <= set(params.keys())
+        assert "low_warning" not in params
+        assert "high_warning" not in params
         assert params["units"] == "percent"
         assert params["n_used"] == 5
-        assert params["aerobic_hr_ceiling_used"] == pytest.approx(156.4, abs=0.1)
+        assert params["aerobic_hr_ceiling_used"] == pytest.approx(156.4, abs=1e-9)
         # Decoupling values should be positive (HR ramps up in synthetic data)
         assert params["mean"] > 0
+
+    def test_warning_bands_appear_at_n_7(self, mem):
+        """Warning bands materialize as soon as n_used hits the
+        suppression floor (7). Pin both directions: absent at 6,
+        present at 7."""
+        from backend.seed_models import refit_aerobic_decoupling_baseline
+
+        dp = _aerobic_dp_with_runs(6)
+        refit_aerobic_decoupling_baseline(mem, dp)
+        got6 = mem.get_model("aerobic.decoupling_baseline")
+        assert "low_warning" not in got6["params_json"]
+        assert "high_warning" not in got6["params_json"]
+
+        dp = _aerobic_dp_with_runs(7)
+        refit_aerobic_decoupling_baseline(mem, dp)
+        got7 = mem.get_model("aerobic.decoupling_baseline")
+        assert "low_warning" in got7["params_json"]
+        assert "high_warning" in got7["params_json"]
+        assert got7["params_json"]["low_warning"] < got7["params_json"]["mean"]
+        assert got7["params_json"]["high_warning"] > got7["params_json"]["mean"]
 
     def test_status_flips_stable_at_8_samples(self, mem):
         from backend.seed_models import refit_aerobic_decoupling_baseline
@@ -438,29 +504,39 @@ class TestRefitCadenceBaseline:
 
 
 class TestRefitEndpoint:
-    def test_routes_new_decoupling_key(self, client):
+    def test_routes_new_decoupling_key_returns_422_on_no_data(self, client):
         """POST /api/memory/models/refit/aerobic.decoupling_baseline
-        must reach refit_aerobic_decoupling_baseline (not 404). The
-        endpoint registry is a dict; pin both new keys."""
+        must reach refit_aerobic_decoupling_baseline (not 404). With
+        no runs in scope, the registered fn returns None →
+        endpoint emits 422 (distinct from 200, so cron / curl -f
+        can alert). Body retains the ok/reason shape for human
+        parsing."""
         import backend.api_server as api_server
 
-        # processor.list_runs returns nothing → insufficient_data,
-        # but the route still resolved → not 404. That's the contract
-        # we care about here.
         api_server.processor.list_runs.return_value = []
         resp = client.post("/api/memory/models/refit/aerobic.decoupling_baseline")
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is False
-        assert resp.json()["reason"] == "insufficient_data"
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail["ok"] is False
+        assert detail["reason"] == "insufficient_data"
 
-    def test_routes_new_cadence_key(self, client):
+    def test_routes_new_cadence_key_returns_422_on_no_data(self, client):
         import backend.api_server as api_server
 
         api_server.processor.list_runs.return_value = []
         resp = client.post("/api/memory/models/refit/cadence.baseline")
-        assert resp.status_code == 200
-        assert resp.json()["ok"] is False
-        assert resp.json()["reason"] == "insufficient_data"
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail["ok"] is False
+
+    def test_hrv_baseline_also_returns_422_on_no_data(self, client):
+        """Regression-pin the original HRV key — it's in the same
+        registry now, must obey the same insufficient_data contract."""
+        import backend.api_server as api_server
+
+        api_server.processor.get_health_stats.return_value = []
+        resp = client.post("/api/memory/models/refit/recovery.hrv_14d_baseline")
+        assert resp.status_code == 422
 
     def test_unknown_key_still_404s(self, client):
         """Adding new keys shouldn't accidentally widen the route to
@@ -472,3 +548,18 @@ class TestRefitEndpoint:
         detail = resp.json()["detail"]
         assert "aerobic.decoupling_baseline" in detail
         assert "cadence.baseline" in detail
+        assert "recovery.hrv_14d_baseline" in detail
+
+    def test_registry_is_module_level_importable(self):
+        """A future nightly cron will `from backend.api_server import
+        REFIT_REGISTRY` and iterate it. Without module-scope, the
+        dict is trapped in the handler's local frame and the cron
+        can't see it. Pin the import path."""
+        from backend.api_server import REFIT_REGISTRY
+
+        assert "recovery.hrv_14d_baseline" in REFIT_REGISTRY
+        assert "aerobic.decoupling_baseline" in REFIT_REGISTRY
+        assert "cadence.baseline" in REFIT_REGISTRY
+        # Values are callables (the refit functions themselves).
+        for fn in REFIT_REGISTRY.values():
+            assert callable(fn)
