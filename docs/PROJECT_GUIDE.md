@@ -102,7 +102,7 @@ graph TB
 
 **Status:** Phase 0 → Phase 3 of the coach-brain roadmap complete. All
 four agent input streams live; 5 stat-derived models in the store;
-763 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
+768 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
 for the roadmap detail and [§4](#4-engineering-debt) for what's left.
 
 ---
@@ -388,7 +388,7 @@ context.
 
 #### 3.4.3 Prompt versioning
 
-`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v9**).
+`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v10**).
 The system prompt is built per-turn by `_build_prompt(state)` — it
 prepends today's date (tz-aware, honors `PERSONAL_COACH_TZ`) in front
 of the static persona so the agent never schedules workouts in the
@@ -407,10 +407,10 @@ different.
 
 **Reading traces by version:**
 ```bash
-# all turns on v9 today
-jq -c 'select(.prompt_version == "v9")' data/traces/$(date +%F).jsonl
+# all turns on v10 today
+jq -c 'select(.prompt_version == "v10")' data/traces/$(date +%F).jsonl
 # drift check — version label vs actual content hash
-jq -c 'select(.prompt_version == "v9" and .prompt_hash != "<current>")' \
+jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
   data/traces/$(date +%F).jsonl
 ```
 The canonical hash is logged at AgenticCoach init (grep startup output).
@@ -419,6 +419,7 @@ The canonical hash is logged at AgenticCoach init (grep startup output).
 
 | Version | Date | What changed | PR |
 |---|---|---|---|
+| **v10** | 2026-05-29 | Daily check-in (P3 perceived stream) wired into the agent. `_prefetch_review_health` / `_prefetch_review_workout` / `_prefetch_make_plan` now all pull `get_recent_checkins(days=7)`. The "perceived" section of `_SYSTEM_PROMPT` now describes the daily check-in as a third user-authored layer (4 sliders + notes) and pins the **don't-re-ask rule**: read `get_recent_checkins` before asking "how do you feel today" / "今天感觉如何"; if today's row exists, cite the values and reason from them — only ask for detail beyond the sliders or when today's row is genuinely missing. Fixes the P3 orphan where the check-in tool existed since #83 but the coach never consumed it, so it kept re-asking the user what they'd already filled in. | [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96) |
 | **v9** | 2026-05-29 | Athlete-profile (A) + cycle-config (B) intake block appended to `_SYSTEM_PROMPT`, rendered from `coach_intake` slots via `render_intake_prompt_section()` (good/vague standard per area). Instructs: read `get_coach_profile`/`get_cycle_config`, judge required + specific-enough, on a missing/vague required area ask ONE follow-up and STOP (record the answer only after the user replies next turn — never fabricate it), don't re-ask `pending_count>0` gaps. `make_plan` also gained an instruction bullet. Editing a slot exemplar in `coach_intake.py` now triggers this contract. | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | Per-turn date-header wrapper (`_HEADER_TEMPLATE`) in front of `_SYSTEM_PROMPT`. Pins "Today is YYYY-MM-DD (Weekday)" + relative-time directive in English + Chinese (`今天 / 明天 / 后天 / 这周`) + "never schedule in the past". Today via `datetime.now(_user_tz()).date()` (honors `PERSONAL_COACH_TZ`, falls back to process-local). Hash now covers wrapper + persona with a sentinel date. Fixed a real bug: agent wrote a "今天 easy run" to 2026-05-14 with no date anchor. | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
 | v7 | 2026-05-13 | Codex P2: explicit list of which Garmin per-run interpretive labels are filtered at the MCP boundary (`aerobicTrainingEffect`, `anaerobicTrainingEffect`, `activityTrainingLoad`, `trainingEffectLabel`, `aerobicTrainingEffectMessage`) AND which long-term baselines are NOT (`vo2max_running`, `lactate_threshold_hr`, `lactate_threshold_pace`). Replaced v6's vague "you won't see them". | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |

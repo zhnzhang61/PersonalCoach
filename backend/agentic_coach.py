@@ -74,7 +74,7 @@ from backend.trace_logger import TraceLogger, prompt_hash as _prompt_hash
 # that ran" (e.g., uncommitted edit).
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION = "v9"
+PROMPT_VERSION = "v10"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ not per-run guesses. Use them as reference points:
   • `lactate_threshold_hr` / `lactate_threshold_pace` — anchor for
     threshold work ("today's tempo at HR 170 was just under LT 173")
 
-### perceived — TWO layers, both authored by the user, both valid
+### perceived — three layers, all authored by the user, all valid
 
 **Medium-term mapping (`athlete_profile.fitness.medium_term_hr_effort_map`)**
 The user's *current expected* HR ↔ effort mapping. Each band has a
@@ -134,8 +134,23 @@ What the user *actually labeled* a specific run as, after running it.
   • `lap_categories[]` — one label per lap (parallel to laps array)
   • `notes` — free-form context
 
-Both use the same RPE vocabulary as the zones (Steady Effort, Marathon,
-etc.) — see the Vocabulary Trap section below.
+The first two use the same RPE vocabulary as the zones (Steady Effort,
+Marathon, etc.) — see the Vocabulary Trap section below.
+
+**Daily check-in (`get_recent_checkins`)**
+The user's *daily* subjective state, filled on the Health tab. 4 sliders
+(0–5) for `sleep_quality`, `soreness`, `mood`, `motivation`, plus optional
+`notes`. This is the SUBJECTIVE companion to `get_readiness` (which is
+OBJECTIVE: Garmin sleep / HRV / RHR / stress) — never collapse the two.
+
+**Rule:** before asking "how do you feel today?" / "今天感觉如何？", ALWAYS
+read `get_recent_checkins(days=7)` first. If today's row is present, cite
+the specific values ("睡眠 4/5, 酸痛 0, 动力 5") and reason from them — do
+NOT re-ask the high-level question. Only ask for detail beyond what the
+sliders cover (e.g., "酸痛 0 — 大腿前侧有没有？") or when today's row is
+genuinely missing. The user already answered the high-level question by
+filling the card; re-asking it makes the coach feel oblivious to the data
+it has — the same anti-pattern as re-asking a filled coach-intake area.
 
 ### planned
 
@@ -419,6 +434,10 @@ def _prefetch_review_workout(
     plan: list[tuple[str, dict]] = [
         ("get_athlete_profile", {}),
         ("get_coach_profile", {}),
+        # Subjective state — the day-of check-in colors the run review.
+        # Without it the coach re-asks "今天感觉如何" instead of citing the
+        # 4 sliders the user already filled.
+        ("get_recent_checkins", {"days": 7}),
         ("get_run_detail", {"activity_id": activity_id}),
         ("get_run_telemetry", {"activity_id": activity_id, "downsample_sec": 30}),
     ]
@@ -439,6 +458,10 @@ def _prefetch_make_plan() -> list[tuple[str, dict]]:
         ("get_coach_profile", {}),
         ("get_cycle_config", {}),
         ("get_readiness", {}),
+        # Subjective recovery / energy this past week colors what we can
+        # safely schedule — pair the subjective check-in with the objective
+        # readiness/load.
+        ("get_recent_checkins", {"days": 7}),
         ("get_training_load", {"window_days": 28}),
         ("list_blocks", {}),
         (
@@ -458,6 +481,9 @@ def _prefetch_review_health() -> list[tuple[str, dict]]:
     return [
         ("get_athlete_profile", {}),
         ("get_readiness", {}),
+        # The subjective half of recovery — without it review_health re-asks
+        # "今天感觉如何" instead of citing the sliders the user filled.
+        ("get_recent_checkins", {"days": 7}),
         ("get_training_load", {"window_days": 28}),
         ("recall_topics", {"status": "active"}),
     ]
