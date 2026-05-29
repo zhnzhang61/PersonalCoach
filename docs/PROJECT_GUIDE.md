@@ -29,6 +29,7 @@ that drifted as the code moved. Reflects the **current** state
     - [3.4.2 Coach chat](#342-coach-chat--session-design) — session-bounded chat
     - [3.4.3 Prompt versioning](#343-prompt-versioning)
     - [3.4.4 Observability](#344-observability--traces--langsmith) — JSONL traces + LangSmith
+    - [3.4.5 Planned — profile + cycle config capture](#345-planned--athlete-profile-a--cycle-config-b-capture) — A/B intake into the CME
 - [4. Engineering debt](#4-engineering-debt) — CI, tests, tracing, repo reorg, open gaps **(longest)**
 - [5. Appendix](#5-appendix) — storage tour, provider routing, doc history
 
@@ -490,6 +491,174 @@ review their data policy before enabling with sensitive data. The API
 key is env-only (never in a tracked file). The `/api/admin/observability`
 endpoint returns project + endpoint but never the key.
 
+#### 3.4.5 Planned — athlete profile (A) + cycle config (B) capture
+
+> **Status: designed, not built.** This subsection is the spec the
+> implementation PRs will follow. Everything in §3.4.1–3.4.4 is the
+> *continuous* stream (C) — the eyes. This is the missing *intake*: the
+> enrollment form (A) and this cycle's battle plan (B).
+
+##### Why
+
+Frame it as a human coach taking on a new athlete. A coach asks ~25
+questions before writing a single workout, and those questions fall into
+three natures:
+
+- **A — static profile.** Asked once; rarely changes. "Who are you."
+- **B — per-cycle config.** Re-asked each training cycle; fixed within a
+  cycle. "How do we lay out *this* campaign."
+- **C — continuous.** Re-sampled constantly. "Today's / this week's real
+  state."
+
+Almost everything built in Phases 0–3 feeds **C** (decoupling / cadence /
+sleep / volume baselines = "fitness is moving, keep recomputing"). But the
+questions a coach asks *first* — A and B — have no structured home: goal
+date lives in Calendar, everything else is scattered in chat or simply
+never captured. So the agent has sharp eyes (weekly state) but no
+enrollment form (A) and no campaign map (B). This feature gives it both,
+stored in the CME, retrievable on demand, with the agent judging whether
+each slot is filled *and specific enough* and following up when it isn't.
+
+##### The intake (becomes `PROFILE_SLOTS` / `CYCLE_SLOTS`)
+
+**A — static profile (8 slots, ranked by importance):**
+
+1. **`injury_history`** — past injuries (stress fracture, ITB, plantar,
+   Achilles), surgeries. The #1 safety gate; caps volume and ramp rate.
+   Append-only.
+2. **`medical`** — conditions (asthma / cardiac / anemia), meds, and known
+   max HR. Sets the objective baseline; some conditions are hard limits.
+3. **`background`** — years running, marathons done. Training age = the
+   biggest lever on "how fast can I push you up."
+4. **`demographics`** — age, sex. Recovery capacity + physiological floor.
+5. **`gut_fueling`** — GI tolerance on long runs, caffeine tolerance.
+   A marathon is a fueling event; half of bonking is fuel. (constitution
+   = static; execution = C)
+6. **`psychology`** — bonk/DNF history, resilience to hard sessions, past
+   taper response ("dead legs" vs "sharp"). Decides whether they finish
+   the cycle.
+7. **`coaching_prefs`** — coached before? structure vs flexibility? HR-
+   driven vs pace-driven? communication cadence?
+8. **`devices`** — GPS watch / HR strap? The meta-question: what can we
+   even measure.
+
+**B — per-cycle config (11 slots, ranked by importance):**
+
+1. **`goal`** — which race, when, target result (finish / sub-X / BQ),
+   hard or soft date? The anchor everything derives from. "Sub-3:30 in 20
+   weeks" and "first marathon someday" are different plans.
+2. **`starting_volume`** — current days/week, weekly mileage, longest run
+   in the last month, how long it's been stable. Safe ramp (10% / ACWR)
+   starts from the *current* base, not the target. (confirmed once at
+   cycle start, then handed to C)
+3. **`blackout_dates`** — travel / vacation / surgery / PT / absolutely-
+   can't-train days. Build *around* them, don't collide.
+4. **`weekly_availability`** — which days can train, which are fixed vs
+   flexible (e.g. "5 days, long run must be Sunday, Wed always rest").
+5. **`session_time_caps`** — weekday vs weekend single-session ceiling
+   (45 min weekday, 2.5 h Sunday?). Caps how long the long run can grow.
+6. **`quality_capacity`** — which days can be hard (need recovery after),
+   how many quality sessions per week the body tolerates.
+7. **`race_details`** — course profile (flat / hills / altitude), expected
+   temp, start time, surface. Drives the specialization block; flat-cool
+   vs hilly-hot are two preparations.
+8. **`life_load`** — foreseeable big events in the cycle (work crunch,
+   move, baby, exam, long trip). Flag them up front, not after a blowup.
+9. **`downweek_pref`** — 3:1 or 4:1 down-week rhythm; reaction to a down
+   week (some get anxious when volume drops).
+10. **`tuneup_races`** — willing to run a mid-cycle half / 10k as a fitness
+    test + race rehearsal? when?
+11. **`strength_crosstrain`** — strength / core / mobility this cycle?
+    bike / swim / other sport? Affects durability and recovery budget.
+
+*(C is **not** part of this build — it's the existing streams + models:
+current pain (asked every session), sleep/stress, RHR/HRV/weight, the
+moving easy-pace anchor, current long-run length, quality tolerance,
+recent PRs/benchmarks, long-run fueling execution, ad-hoc schedule
+disruptions.)*
+
+##### Storage — lossless episode + embeddable conclusion
+
+The user gives answers; the agent must persist them in the CME so they
+survive across sessions. Two CME columns do the work:
+
+- **`episodes.context_json`** holds the **lossless raw text** of what the
+  user said (`{area, raw_text}`). Nothing is paraphrased away.
+- **`topics.name`** is a fine-grained, **embeddable** label (LLM-generated)
+  and **`topics.working_conclusion`** is the distilled current answer for
+  that area. The name is fine enough that the embedding model can find the
+  backing episodes from it later.
+
+##### Write path — `record_coach_fact(area, raw_text)` (eager)
+
+The agent writes a fact the moment it learns it (no batching to session
+close):
+
+1. Create an **episode** — `event_type='profile' | 'cycle_config'`,
+   `context_json={area, raw_text}` (lossless).
+2. Embedding-search topics **within that `root_category`**:
+   - **≥ high threshold** → same fact → **update** that topic's
+     `working_conclusion` + link the new episode.
+   - **between low and high** → **park a `pending_clarification`**: "is
+     this an update to X, or a new fact?" (confirm-below-threshold — never
+     silently merge an ambiguous match).
+   - **< low threshold** → **create a new topic** in that area (one area
+     can hold several topics, e.g. `injury_history` with multiple sites).
+
+##### Read + coverage — `get_coach_profile()` / `get_cycle_config()`
+
+Returns `{area: {conclusion, filled, updated_at}, gaps: [...]}`.
+
+Coverage is a **hard judgment by `root_category`**, *not* similarity:
+iterate the canonical area list (the 8 / 11 above); any area with no
+topic carrying a non-empty `working_conclusion` is a `gap`. Embeddings
+decide *which topic within an area* a new fact belongs to; the canonical
+list decides *whether the area is covered at all*.
+
+##### Conflict → re-review
+
+A topic can already have a conclusion that a new event contradicts. When
+the agent detects a mismatch between a new event and an area's conclusion:
+`get_topic_episodes(topic)` to pull the raw backing episodes → re-review →
+
+- **confident** → rewrite the conclusion via `record_coach_fact` (update
+  branch).
+- **ambiguous** → mark the topic `Conflicting` + park a
+  `pending_clarification` for the user.
+
+##### Prompt section (behavior change, `PROMPT_VERSION` v8 → v9)
+
+The agent gains an explicit loop:
+
+1. **Read** `get_coach_profile` + `get_cycle_config` — `make_plan` *must*
+   read both before planning; `review_workout` reads profile.
+2. **Judge per task** which areas are *required* and whether each is
+   *specific enough* — with good/vague exemplars baked into the prompt for
+   the critical slots, e.g.
+   - `goal`: ✅ "Berlin 2026-09-21, sub-3:30, fixed date" / ❌ "想跑个马拉松"
+   - `starting_volume`: ✅ "40 mi/wk, 5 runs, longest 16 mi, stable 8 mo" /
+     ❌ "跑得还行"
+3. **Follow up** — a missing or vague *required* area → ask **one**
+   targeted question before planning, and `record_coach_fact` the answer
+   eagerly. Non-critical gaps → park a `pending_clarification` to ask
+   later, don't block.
+
+The guideline is deliberately tight: tell the agent exactly when to ask
+(required + missing/vague) and when *not* to (covered, or non-critical —
+park it), so it neither plans on air nor interrogates the user.
+
+##### Recommended build split (prompt blast-radius isolation)
+
+- **PR-1 (backend only, zero behavior change)** — taxonomy constants
+  (`PROFILE_SLOTS` / `CYCLE_SLOTS`), `record_coach_fact`, the read helpers,
+  the hard-coverage algorithm, the embedding-threshold write logic, tests.
+  Safe; doesn't touch the agent.
+- **PR-2 (behavior change)** — the 3 MCP tools (`record_coach_fact`,
+  `get_coach_profile`, `get_cycle_config` + `get_topic_episodes` if not
+  already exposed), the prompt section, `PROMPT_VERSION` v8 → v9 (+
+  changelog row), prefetch wiring (`make_plan` prefetch reads profile +
+  cycle config), tests. The prompt half lands for review before merge.
+
 ---
 
 ## 4. Engineering debt
@@ -575,6 +744,11 @@ Backend is now a `backend/` package (was a flat top-level dump);
 
 ### 4.6 Post-substrate features (sequenced after Phase 3)
 
+- **Athlete profile (A) + cycle config (B) capture** — the next
+  high-leverage build: A/B intake into the CME so the agent has an
+  enrollment form + campaign map, not just the continuous (C) eyes. Full
+  spec in [§3.4.5](#345-planned--athlete-profile-a--cycle-config-b-capture).
+  Recommended PR-1 (backend) + PR-2 (agent/prompt) split.
 - **§6 advice trail** — what the coach said, did the user accept it,
   what happened. ~2–3 days.
 - **§8 goal feasibility** — projection + plan adjustment from completed
