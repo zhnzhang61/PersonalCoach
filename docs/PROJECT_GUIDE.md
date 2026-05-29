@@ -102,7 +102,7 @@ graph TB
 
 **Status:** Phase 0 → Phase 3 of the coach-brain roadmap complete. All
 four agent input streams live; 5 stat-derived models in the store;
-759 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
+763 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
 for the roadmap detail and [§4](#4-engineering-debt) for what's left.
 
 ---
@@ -419,7 +419,7 @@ The canonical hash is logged at AgenticCoach init (grep startup output).
 
 | Version | Date | What changed | PR |
 |---|---|---|---|
-| **v9** | 2026-05-29 | Athlete-profile (A) + cycle-config (B) intake block appended to `_SYSTEM_PROMPT`, rendered from `coach_intake` slots via `render_intake_prompt_section()` (good/vague standard per area). Instructs: read `get_coach_profile`/`get_cycle_config`, judge required + specific-enough, ask ONE follow-up + `record_coach_fact` on a missing/vague required area, don't re-ask `pending_count>0` gaps. `make_plan` also gained an instruction bullet. Editing a slot exemplar in `coach_intake.py` now triggers this contract. | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
+| **v9** | 2026-05-29 | Athlete-profile (A) + cycle-config (B) intake block appended to `_SYSTEM_PROMPT`, rendered from `coach_intake` slots via `render_intake_prompt_section()` (good/vague standard per area). Instructs: read `get_coach_profile`/`get_cycle_config`, judge required + specific-enough, on a missing/vague required area ask ONE follow-up and STOP (record the answer only after the user replies next turn — never fabricate it), don't re-ask `pending_count>0` gaps. `make_plan` also gained an instruction bullet. Editing a slot exemplar in `coach_intake.py` now triggers this contract. | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | Per-turn date-header wrapper (`_HEADER_TEMPLATE`) in front of `_SYSTEM_PROMPT`. Pins "Today is YYYY-MM-DD (Weekday)" + relative-time directive in English + Chinese (`今天 / 明天 / 后天 / 这周`) + "never schedule in the past". Today via `datetime.now(_user_tz()).date()` (honors `PERSONAL_COACH_TZ`, falls back to process-local). Hash now covers wrapper + persona with a sentinel date. Fixed a real bug: agent wrote a "今天 easy run" to 2026-05-14 with no date anchor. | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
 | v7 | 2026-05-13 | Codex P2: explicit list of which Garmin per-run interpretive labels are filtered at the MCP boundary (`aerobicTrainingEffect`, `anaerobicTrainingEffect`, `activityTrainingLoad`, `trainingEffectLabel`, `aerobicTrainingEffectMessage`) AND which long-term baselines are NOT (`vo2max_running`, `lactate_threshold_hr`, `lactate_threshold_pace`). Replaced v6's vague "you won't see them". | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
 | v6 | 2026-05-13 | Removed the "SILENTLY IGNORE…" block + forbidden-field bullet list — those fields are now filtered at the MCP data layer (see §4.2), so prompt rules aren't load-bearing. Renamed `hr_zones` → `medium_term_hr_effort_map` in the prompt to match the projected key. | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
@@ -659,18 +659,21 @@ The agent gains an explicit loop:
    - `starting_volume`: ✅ "40 mi/wk, 5 runs, longest 16 mi, stable 8 mo" /
      ❌ "跑得还行"
 3. **Follow up** — a missing or vague *required* area → ask **one**
-   targeted question before planning, and `record_coach_fact` the answer
-   eagerly. Non-critical gaps → don't block; the area stays in `gaps` and
-   re-surfaces next time coverage is read. A gap with `pending_count > 0` was
-   already answered but parked (ambiguous match) — nudge the user to resolve
-   the parked decision, don't re-ask the question.
+   targeted question and **stop** (output only the question; don't plan this
+   turn). `record_coach_fact` the answer only *after* the user replies on a
+   later turn — **never** record an answer they haven't given (a single ReAct
+   turn can't ask-and-answer; fabricating the reply would write a hallucinated
+   fact into the CME). Non-critical gaps → don't block; the area stays in
+   `gaps` and re-surfaces next time coverage is read. A gap with
+   `pending_count > 0` was already answered but parked (ambiguous match) —
+   nudge the user to resolve the parked decision, don't re-ask the question.
 
 The exemplars are NOT hand-written into the system prompt — they live
 per-slot in `backend/coach_intake.py` and this whole block is produced by
-`render_intake_prompt_section()` (built in PR-1, dormant). PR-2 splices that
-output into `_SYSTEM_PROMPT` and bumps `PROMPT_VERSION` v8 → v9. Consequence:
-once wired, **editing a slot's exemplar is a prompt edit** and falls under
-the §3.4.3 contract (bump the version + add a changelog row).
+`render_intake_prompt_section()`, spliced into `_SYSTEM_PROMPT` at
+`PROMPT_VERSION` v9. Consequence: **editing a slot's exemplar is a prompt
+edit** and falls under the §3.4.3 contract (bump the version + add a
+changelog row).
 
 The guideline is deliberately tight: tell the agent exactly when to ask
 (required + missing/vague) and when *not* to (covered, or non-critical —

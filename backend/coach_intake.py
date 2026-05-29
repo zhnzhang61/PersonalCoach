@@ -257,8 +257,9 @@ def render_intake_prompt_section() -> str:
         review_workout reads profile) before reasoning;
       - per task, judge which areas are REQUIRED and whether each is
         SPECIFIC ENOUGH (the ✅/❌ standard below);
-      - a missing / vague REQUIRED area → ask ONE targeted follow-up, then
-        record_coach_fact(area, raw_text) the answer eagerly;
+      - a missing / vague REQUIRED area → ask ONE targeted follow-up and
+        STOP (output only the question); record_coach_fact the answer only
+        AFTER the user replies next turn — never an answer they haven't given;
       - non-critical gaps → don't interrupt; leave them for later.
     """
     return f"""## 运动员档案（A）与本周期配置（B）
@@ -268,8 +269,10 @@ def render_intake_prompt_section() -> str:
 
 判断规则：
 - 按当前任务判断哪些 area 是**必需**的，以及已有结论**够不够具体**。
-- 必需但缺失 / 含糊 → 出计划前**只问一个**最关键的针对性问题；用户答了立刻\
-用 `record_coach_fact(area, raw_text)` 存下。
+- 必需但缺失 / 含糊 → **只问一个**最关键的针对性问题然后**停下**：这一轮\
+只输出问题，先别出计划。用户**下一轮**回答后，先用 \
+`record_coach_fact(area, raw_text)` 存下，再出计划。**绝不**用 \
+`record_coach_fact` 记录用户还没给的答案（别替用户脑补回答）。
 - 非必需的缺口 → 不要打断，留到以后再问。
 - 已覆盖且具体 → 直接用，别重复问。
 

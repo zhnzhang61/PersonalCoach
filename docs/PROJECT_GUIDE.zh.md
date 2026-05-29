@@ -97,7 +97,7 @@ graph TB
 ```
 
 **状态：** coach-brain 路线图 Phase 0 → Phase 3 全部完成。四个输入流全部
-就绪；模型库里有 5 个统计模型；后端 759 个测试通过。路线图细节见
+就绪；模型库里有 5 个统计模型；后端 763 个测试通过。路线图细节见
 [§3.4.1](#341-coach-brain--记忆模型四个输入流)，剩余工作见 [§4](#4-工程债)。
 
 ---
@@ -379,6 +379,7 @@ jq -c 'select(.prompt_version == "v9" and .prompt_hash != "<current>")' \
 
 | 版本 | 日期 | 改了什么 | PR |
 |---|---|---|---|
+| **v9** | 2026-05-29 | 把运动员档案（A）+ 周期配置（B）的 intake 段追加进 `_SYSTEM_PROMPT`，由 `coach_intake` 的 slot 经 `render_intake_prompt_section()` 渲染（每个 area 带 good/vague 标准）。指令：读 `get_coach_profile`/`get_cycle_config`，判断必需 + 够不够具体，缺/含糊的必需 area → **只问一个然后停下**（用户下一轮回答后再 `record_coach_fact`，绝不脑补），别重复问 `pending_count>0` 的 gap。`make_plan` 也加了一条指令。以后改 `coach_intake.py` 里的 slot 范例也触发这条契约。 | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | 在 `_SYSTEM_PROMPT` 前加每轮渲染的日期 header（`_HEADER_TEMPLATE`）。前置 "Today is YYYY-MM-DD (Weekday)" + 中英文相对时间指令（`今天 / 明天 / 后天 / 这周`）+ "绝不把训练排到过去"。今天用 `datetime.now(_user_tz()).date()`（认 `PERSONAL_COACH_TZ`，否则进程本地 tz）。hash 改为覆盖 wrapper + 人设（用 sentinel date）。修了一个真 bug：agent 把"今天 easy run"排到了 2026-05-14，因为它没有日期锚点。 | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
 | v7 | 2026-05-13 | Codex P2：明确列出哪些 Garmin 单跑解读性标签在 MCP 边界被过滤（`aerobicTrainingEffect`、`anaerobicTrainingEffect`、`activityTrainingLoad`、`trainingEffectLabel`、`aerobicTrainingEffectMessage`），以及哪些长期 baseline 不过滤（`vo2max_running`、`lactate_threshold_hr`、`lactate_threshold_pace`）。取代 v6 含糊的"你看不到它们"。 | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
 | v6 | 2026-05-13 | 删掉 "SILENTLY IGNORE…" 块 + 禁用字段清单——这些字段现在在 MCP 数据层过滤（见 §4.2），prompt 规则不再 load-bearing。prompt 里 `hr_zones` → `medium_term_hr_effort_map` 对齐投影后的 key。 | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
@@ -585,16 +586,17 @@ agent 拿到一个明确的循环：
    - `goal`：✅ "Berlin 2026-09-21，sub-3:30，日期固定" / ❌ "想跑个马拉松"
    - `starting_volume`：✅ "周 40mi，5 次，最长 16mi，稳定 8 个月" /
      ❌ "跑得还行"
-3. **追问**——缺 / 含糊的*必需* area → 出计划前**当场问一个**针对性问题，
-   答了就立刻 `record_coach_fact`。非必需缺口 → 不阻塞，area 留在 `gaps` 里，
-   下次读覆盖度时再浮出来。`pending_count > 0` 的 gap 是「答过、但 park 了」——
-   去 nudge 用户 resolve 那条决策，别重复问同一个问题。
+3. **追问**——缺 / 含糊的*必需* area → **只问一个**针对性问题然后**停下**
+   （这一轮只输出问题，先别出计划）。用户**下一轮**回答后再 `record_coach_fact`
+   存下——**绝不**记录用户还没给的答案（一个 ReAct turn 没法又问又答；脑补回答
+   会把幻觉事实写进 CME）。非必需缺口 → 不阻塞，area 留在 `gaps` 里，下次读覆盖度
+   时再浮出来。`pending_count > 0` 的 gap 是「答过、但 park 了」——去 nudge 用户
+   resolve 那条决策，别重复问同一个问题。
 
 范例**不是**手写进 system prompt 的——它们按 slot 存在 `backend/coach_intake.py`
-里，整段 prompt 由 `render_intake_prompt_section()` 生成（PR-1 已写、休眠）。
-PR-2 把它的输出拼进 `_SYSTEM_PROMPT` 并把 `PROMPT_VERSION` 从 v8 bump 到 v9。
-后果：一旦接上，**改某个 slot 的范例就是改 prompt**，要照 §3.4.3 走（bump 版本
-号 + 加 changelog 行）。
+里，整段 prompt 由 `render_intake_prompt_section()` 生成，拼进 `_SYSTEM_PROMPT`，
+`PROMPT_VERSION` v9。后果：**改某个 slot 的范例就是改 prompt**，要照 §3.4.3 走
+（bump 版本号 + 加 changelog 行）。
 
 guideline 故意收得很紧：明确告诉 agent 什么时候该问（必需 + 缺 / 含糊）、
 什么时候*不该*问（已覆盖、或非关键——park 起来），它既不凭空出计划，也不

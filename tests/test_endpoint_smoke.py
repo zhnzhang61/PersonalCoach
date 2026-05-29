@@ -140,6 +140,11 @@ ENDPOINTS: list[tuple] = [
     ("GET",    "/api/memory/pending",                     None, None,                  {200}),
     ("POST",   "/api/memory/pending/pnd_mock/resolve",    {"answer": "yes"}, None,       {200, 404, 422}),
     ("POST",   "/api/memory/consolidate",                 {"thread_id": "coach_20260511T000000Z"}, None, {200, 422}),
+    # §3.4.5 — coach intake (profile A + cycle config B)
+    ("GET",    "/api/memory/coach-profile",               None, None,                  {200}),
+    ("GET",    "/api/memory/cycle-config",                None, None,                  {200}),
+    ("POST",   "/api/memory/coach-fact",                  {"area": "Cycle.goal", "raw_text": "Berlin sub-3:30"}, None, {200, 400, 422}),
+    ("GET",    "/api/memory/topics/tpc_mock/episodes",    None, None,                  {200}),
 ]
 
 

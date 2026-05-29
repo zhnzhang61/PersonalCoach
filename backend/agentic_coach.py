@@ -294,9 +294,12 @@ Use:
   REQUIRED areas are filled AND specific enough (esp. `Cycle.goal`,
   `Cycle.starting_volume`, `Cycle.weekly_availability`,
   `Cycle.blackout_dates`). If a required area is a gap or too vague, ask
-  ONE targeted follow-up FIRST and `record_coach_fact` the answer — don't
-  plan on air. A gap with `pending_count > 0` was already answered but
-  parked; nudge the user to resolve it instead of re-asking.
+  ONE targeted follow-up and **STOP** — output only the question, do NOT
+  produce a plan this turn. `record_coach_fact` the answer only AFTER the
+  user replies (a later turn); NEVER `record_coach_fact` an answer the user
+  hasn't given (don't imagine their reply). A gap with `pending_count > 0`
+  was already answered but parked; nudge the user to resolve it instead of
+  re-asking.
 - The user's cycle phase (`current_block.phase`) and weeks remaining.
 - ACWR band — push if sweet, hold if caution, taper if danger.
 - Today's readiness score.
