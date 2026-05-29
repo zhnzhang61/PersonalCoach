@@ -201,3 +201,60 @@ class TestDeleteSessionGuard:
         assert result["thread_id"] == "coach_20260510T172021Z"
         assert result["checkpoints_deleted"] == 0
         assert result["session_meta_deleted"] == 0
+
+
+class TestCoachIntakeWiring:
+    """§3.4.5 PR-2: the intake block is spliced into the persona, the
+    version is bumped, and the prefetch plans read the A/B coverage."""
+
+    def test_prompt_version_bumped_to_v9(self):
+        from backend.agentic_coach import PROMPT_VERSION
+
+        assert PROMPT_VERSION == "v9"
+
+    def test_system_prompt_contains_intake_block(self):
+        from backend.agentic_coach import _SYSTEM_PROMPT
+        from backend.coach_intake import render_intake_prompt_section
+
+        # the rendered block is appended verbatim
+        assert render_intake_prompt_section() in _SYSTEM_PROMPT
+        # spot-check markers + a known exemplar
+        assert "get_coach_profile" in _SYSTEM_PROMPT
+        assert "get_cycle_config" in _SYSTEM_PROMPT
+        assert "Berlin 2026-09-21" in _SYSTEM_PROMPT
+
+    def test_make_plan_prefetch_reads_profile_and_cycle(self):
+        from backend.agentic_coach import _prefetch_make_plan
+
+        tools = [t for t, _ in _prefetch_make_plan()]
+        assert "get_coach_profile" in tools
+        assert "get_cycle_config" in tools
+
+    def test_review_workout_prefetch_reads_profile(self):
+        from backend.agentic_coach import _prefetch_review_workout
+
+        tools = [t for t, _ in _prefetch_review_workout(123, "2026-05-20")]
+        assert "get_coach_profile" in tools
+
+    def test_prompt_hash_covers_intake_block(self, tmp_chat_db):
+        """The hash must cover the appended intake block, so an exemplar
+        edit in coach_intake.py shows up as a prompt change (and forces a
+        PROMPT_VERSION bump per §3.4.3)."""
+        from backend.agentic_coach import (
+            _HEADER_TEMPLATE,
+            _SYSTEM_PROMPT,
+            AgenticCoach,
+        )
+        from backend.coach_intake import render_intake_prompt_section
+        from backend.trace_logger import prompt_hash
+
+        coach = AgenticCoach(db_path=tmp_chat_db, skip_api_probe=True)
+        block = render_intake_prompt_section()
+        assert block in _SYSTEM_PROMPT
+        # Hashing the persona with the intake block stripped out must differ
+        # → the block is genuinely part of the hashed/versioned prompt.
+        base = _SYSTEM_PROMPT.replace("\n\n" + block, "")
+        header = _HEADER_TEMPLATE.format(
+            today_iso="0000-00-00", weekday="Sentinel"
+        )
+        assert coach._prompt_hash != prompt_hash(header + "\n\n" + base)
