@@ -538,19 +538,30 @@ agent 一学到事实就立刻写（不攒到 session 关闭）：
 2. 在该 `root_category` **内** embedding 检索 topics：
    - **≥ 高阈值** → 同一事实 → **更新**那个 topic 的 `working_conclusion`
      + link 新 episode。
-   - **低阈值 ~ 高阈值之间** → **park 一条 `pending_clarification`**：
-     "这是更新 X 还是新事实？"（threshold-confirm——绝不静默合并模糊匹配）。
+   - **低阈值 ~ 高阈值之间** → **park 一条 `topic_decision`（kind=`new_topic`）**：
+     「更新 X 还是新事实？」——`topic_decisions` 带结构化的 `candidates` +
+     `record_coach_fact` 需要的 merge-vs-create_new 解析（`pending_clarifications`
+     只是个扁平问题队列，没有 resolve 路径）。threshold-confirm——绝不静默合并
+     模糊匹配。*（embedding 调用失败、而该 area 已有 topic 时也走这条：park 而
+     不是 fork 一个会在覆盖度里盖掉真 topic 的副本。）*
    - **< 低阈值** → 在这个 area 内**新建** topic（一个 area 可多 topic，
      比如 `injury_history` 有好几处伤）。
 
 ##### 读 + 覆盖度 — `get_coach_profile()` / `get_cycle_config()`
 
-返回 `{area: {conclusion, filled, updated_at}, gaps: [...]}`。
+返回 `{areas: [{area, label, question, filled, conclusion, updated_at,
+topic_ids, pending_count}], gaps: [{area, label, question, pending_count}],
+filled_count, pending_count, total}`。
 
 覆盖度是**按 `root_category` 的硬判断**，*不靠*相似度：遍历 canonical area
 清单（上面的 8 / 11 块），任何一个 area 下没有 `working_conclusion` 非空的
 topic = `gap`。embedding 决定*一个 area 内新事实归到哪个 topic*；canonical
 清单决定*这个 area 到底覆没覆盖*。
+
+每个 area 的 `pending_count` = 它名下「park 了但还没 resolve」的 coach fact。
+一个 `pending_count > 0` 的 gap，意味着用户**答了**、但匹配模棱两可被 park
+了——这样 PR-2 能区分「从没问过」（去问）和「答过、park 了」（去 resolve 那条
+决策，别重复问）。纯 SQL，不碰 embedding。
 
 ##### 冲突 → 重审
 
@@ -558,8 +569,10 @@ topic = `gap`。embedding 决定*一个 area 内新事实归到哪个 topic*；c
 不符时：`get_topic_episodes(topic)` 捞回背后的原文 episode → 重审 →
 
 - **有把握** → 走更新分支用 `record_coach_fact` 改写结论。
-- **模棱两可** → 把 topic 标 `Conflicting` + 给用户 park 一条
-  `pending_clarification`。
+- **模棱两可** → `promote_topic_to_conflicting`（status → `Conflicting` +
+  `open_question`）；冲突的 topic 会在 `retrieve_working_context` 里浮出来让
+  agent 追问。（这条用 topic 自己的 `Conflicting` 状态，不写
+  `pending_clarifications`——Phase 2b 已经把冲突写那张表的路径去掉了。）
 
 ##### Prompt 段（行为变更，`PROMPT_VERSION` v8 → v9）
 
@@ -573,8 +586,9 @@ agent 拿到一个明确的循环：
    - `starting_volume`：✅ "周 40mi，5 次，最长 16mi，稳定 8 个月" /
      ❌ "跑得还行"
 3. **追问**——缺 / 含糊的*必需* area → 出计划前**当场问一个**针对性问题，
-   答了就立刻 `record_coach_fact`。非必需缺口 → park 一条
-   `pending_clarification` 以后问，不阻塞。
+   答了就立刻 `record_coach_fact`。非必需缺口 → 不阻塞，area 留在 `gaps` 里，
+   下次读覆盖度时再浮出来。`pending_count > 0` 的 gap 是「答过、但 park 了」——
+   去 nudge 用户 resolve 那条决策，别重复问同一个问题。
 
 范例**不是**手写进 system prompt 的——它们按 slot 存在 `backend/coach_intake.py`
 里，整段 prompt 由 `render_intake_prompt_section()` 生成（PR-1 已写、休眠）。

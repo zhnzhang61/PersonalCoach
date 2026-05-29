@@ -230,6 +230,29 @@ class TestCoverage:
         assert mem.get_coach_profile()["filled_count"] == 0
         assert mem.get_cycle_config()["filled_count"] == 0
 
+    def test_empty_db_pending_count_zero(self, mem):
+        prof = mem.get_coach_profile()
+        assert prof["pending_count"] == 0
+        assert all(a["pending_count"] == 0 for a in prof["areas"])
+        assert all(g["pending_count"] == 0 for g in prof["gaps"])
+
+    def test_gap_with_pending_count(self, mem):
+        # park a fact into an area that has no topic → it stays a gap, but
+        # pending_count surfaces it as "answered, awaiting resolution" (the
+        # distinction PR-2 needs so it doesn't re-ask).
+        cand = [{"topic_id": "tpc_x", "name": "x", "status": "Resolved", "score": 0.70}]
+        with _patch_match(mem, None, cand):
+            mem.record_coach_fact("Profile.demographics", "三十多")
+        prof = mem.get_coach_profile()
+        demo = next(a for a in prof["areas"] if a["area"] == "Profile.demographics")
+        assert demo["filled"] is False
+        assert demo["pending_count"] == 1
+        gap = next(g for g in prof["gaps"] if g["area"] == "Profile.demographics")
+        assert gap["pending_count"] == 1
+        assert prof["pending_count"] == 1
+        # a parked decision in a Profile area must not leak into Cycle coverage
+        assert mem.get_cycle_config()["pending_count"] == 0
+
 
 # ==========================================================================
 # C. record_coach_fact — branches + lossless storage
@@ -425,3 +448,55 @@ class TestResolveLinksEpisode:
             if a["area"] == "Profile.injury_history"
         )
         assert new_tid in injury["topic_ids"]
+
+
+# ==========================================================================
+# F. embedding failure → park (not fork) so a duplicate can't shadow the real
+#    topic in coverage (most-recent-wins)
+# ==========================================================================
+class TestEmbeddingFailure:
+    def test_find_matching_topic_raise_flag(self, mem):
+        mem.create_topic(
+            name="x", root_category="Cycle.goal",
+            status="Resolved", working_conclusion="x",
+        )
+        with patch(
+            "backend.cognitive_memory_engine.call_embedding",
+            side_effect=RuntimeError("embedding 429"),
+        ):
+            # default: swallow the failure as "no match"
+            assert mem.find_matching_topic("q") == (None, [])
+            # raise_on_embed_error=True: propagate so the eager caller can park
+            with pytest.raises(RuntimeError):
+                mem.find_matching_topic("q", raise_on_embed_error=True)
+
+    def test_embed_failure_parks_when_area_has_topic(self, mem):
+        existing = mem.create_topic(
+            name="goal old", root_category="Cycle.goal",
+            status="Resolved", working_conclusion="旧目标",
+        )
+        with patch.object(
+            mem, "find_matching_topic", side_effect=RuntimeError("429")
+        ):
+            res = mem.record_coach_fact("Cycle.goal", "改成 Chicago 2026")
+        assert res["action"] == "parked"
+        assert res["embed_error"] is True
+        # the area's existing topics are surfaced as candidates (no score)
+        assert any(c["topic_id"] == existing for c in res["candidates"])
+        pend = mem.list_pending_decisions()
+        assert len(pend) == 1
+        assert pend[0]["proposal"]["embed_error"] is True
+        # NO new topic forked — area still has exactly one topic
+        assert len([t for t in mem.list_topics() if t["root_category"] == "Cycle.goal"]) == 1
+        # episode is still lossless on disk even though it's unlinked for now
+        assert res["episode_id"]
+
+    def test_embed_failure_creates_when_area_empty(self, mem):
+        # nothing to match against → forking is safe, don't block the user
+        with patch.object(
+            mem, "find_matching_topic", side_effect=RuntimeError("429")
+        ):
+            res = mem.record_coach_fact("Cycle.goal", "Berlin sub-3:30")
+        assert res["action"] == "created"
+        assert res["embed_error"] is True
+        assert mem.get_topic(res["topic_id"])["working_conclusion"] == "Berlin sub-3:30"

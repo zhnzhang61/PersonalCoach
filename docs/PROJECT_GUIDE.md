@@ -601,21 +601,34 @@ close):
 2. Embedding-search topics **within that `root_category`**:
    - **≥ high threshold** → same fact → **update** that topic's
      `working_conclusion` + link the new episode.
-   - **between low and high** → **park a `pending_clarification`**: "is
-     this an update to X, or a new fact?" (confirm-below-threshold — never
-     silently merge an ambiguous match).
+   - **between low and high** → **park a `topic_decision` (kind=`new_topic`)**:
+     "update X, or a new fact?" — `topic_decisions` carries the structured
+     `candidates` + the merge-vs-create_new resolution `record_coach_fact`
+     needs (`pending_clarifications` is a flat question queue with no resolve
+     path). Confirm-below-threshold — never silently merge an ambiguous match.
+     *(Same path on an embedding-call failure when the area already has
+     topics: park rather than fork a duplicate that would shadow the real one
+     in coverage.)*
    - **< low threshold** → **create a new topic** in that area (one area
      can hold several topics, e.g. `injury_history` with multiple sites).
 
 ##### Read + coverage — `get_coach_profile()` / `get_cycle_config()`
 
-Returns `{area: {conclusion, filled, updated_at}, gaps: [...]}`.
+Returns `{areas: [{area, label, question, filled, conclusion, updated_at,
+topic_ids, pending_count}], gaps: [{area, label, question, pending_count}],
+filled_count, pending_count, total}`.
 
 Coverage is a **hard judgment by `root_category`**, *not* similarity:
 iterate the canonical area list (the 8 / 11 above); any area with no
 topic carrying a non-empty `working_conclusion` is a `gap`. Embeddings
 decide *which topic within an area* a new fact belongs to; the canonical
 list decides *whether the area is covered at all*.
+
+`pending_count` per area = parked-but-unresolved coach facts for it. A gap
+with `pending_count > 0` means the user *did* answer but the match was
+ambiguous and got parked — so PR-2 can tell "never asked" (ask) from
+"answered, parked" (resolve the decision, don't re-ask). Pure SQL, no
+embeddings.
 
 ##### Conflict → re-review
 
@@ -625,8 +638,11 @@ the agent detects a mismatch between a new event and an area's conclusion:
 
 - **confident** → rewrite the conclusion via `record_coach_fact` (update
   branch).
-- **ambiguous** → mark the topic `Conflicting` + park a
-  `pending_clarification` for the user.
+- **ambiguous** → `promote_topic_to_conflicting` (status → `Conflicting` +
+  `open_question`); the conflicting topic surfaces in
+  `retrieve_working_context` for the agent to raise. (This path uses the
+  topic's own `Conflicting` state, not `pending_clarifications` — Phase 2b
+  removed conflict writes to that table.)
 
 ##### Prompt section (behavior change, `PROMPT_VERSION` v8 → v9)
 
@@ -641,8 +657,10 @@ The agent gains an explicit loop:
      ❌ "跑得还行"
 3. **Follow up** — a missing or vague *required* area → ask **one**
    targeted question before planning, and `record_coach_fact` the answer
-   eagerly. Non-critical gaps → park a `pending_clarification` to ask
-   later, don't block.
+   eagerly. Non-critical gaps → don't block; the area stays in `gaps` and
+   re-surfaces next time coverage is read. A gap with `pending_count > 0` was
+   already answered but parked (ambiguous match) — nudge the user to resolve
+   the parked decision, don't re-ask the question.
 
 The exemplars are NOT hand-written into the system prompt — they live
 per-slot in `backend/coach_intake.py` and this whole block is produced by

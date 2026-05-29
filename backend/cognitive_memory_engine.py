@@ -1428,6 +1428,7 @@ class MemoryOS:
         top_k: int = 5,
         threshold: float | None = None,
         root_category: str | None = None,
+        raise_on_embed_error: bool = False,
     ) -> tuple[str | None, list[dict]]:
         """
         Find the topic most semantically similar to `query_text`.
@@ -1461,9 +1462,15 @@ class MemoryOS:
         try:
             query_vec = call_embedding([query_text], provider=self.TOPIC_EMBED_PROVIDER)[0]
         except Exception as e:
-            # Embedding failure: return no match rather than crashing consolidation.
-            # Caller will treat it as "no match" and fall back to create-new.
+            # Embedding failure. For batch consolidation (default) we swallow
+            # it as "no match" and the caller falls back to create-new — it
+            # dedupes later, so a transient miss is harmless. record_coach_fact
+            # is eager with no such backstop, so it passes raise_on_embed_error
+            # to PARK instead of forking a duplicate that would shadow the real
+            # topic in coverage (most-recent-wins).
             print(f"[CME] topic match embedding failed: {e}")
+            if raise_on_embed_error:
+                raise
             return (None, [])
 
         scored: list[dict] = []
@@ -1817,12 +1824,18 @@ class MemoryOS:
             context={"area": area, "raw_text": raw_text},
         )
 
-        # 2. area-scoped embedding match (two-threshold decision)
-        auto, candidates = self.find_matching_topic(
-            raw_text,
-            threshold=self.COACH_FACT_HIGH_THRESHOLD,
-            root_category=area,
-        )
+        # 2. area-scoped embedding match (two-threshold decision). raise on an
+        #    embedding failure so we can PARK rather than fork — see below.
+        embed_failed = False
+        try:
+            auto, candidates = self.find_matching_topic(
+                raw_text,
+                threshold=self.COACH_FACT_HIGH_THRESHOLD,
+                root_category=area,
+                raise_on_embed_error=True,
+            )
+        except Exception:
+            auto, candidates, embed_failed = None, [], True
         best_score = candidates[0]["score"] if candidates else 0.0
 
         if auto:  # score ≥ HIGH → same fact, update in place
@@ -1834,9 +1847,28 @@ class MemoryOS:
                 "topic_id": auto,
                 "episode_id": episode_id,
                 "score": best_score,
+                "embed_error": False,
             }
 
-        if best_score >= self.COACH_FACT_LOW_THRESHOLD:  # ambiguous → park
+        # Decide park-vs-create. Two reasons to park (let the user
+        # disambiguate) rather than create a fresh topic:
+        #   (a) ambiguous score (LOW ≤ best < HIGH), or
+        #   (b) the embedding call FAILED and the area already has topics we
+        #       couldn't compare against — creating now would fork a duplicate
+        #       that shadows the real topic in coverage (most-recent-wins).
+        # When embedding failed we have no scored candidates, so surface the
+        # area's existing topics (no score) for the user to pick from.
+        park = best_score >= self.COACH_FACT_LOW_THRESHOLD
+        if embed_failed:
+            candidates = [
+                {"topic_id": t["topic_id"], "name": t["name"],
+                 "status": t["status"], "score": None}
+                for t in self.list_topics()
+                if t["root_category"] == area
+            ]
+            park = bool(candidates)  # only park if there's something to match
+
+        if park:
             decision_id = self.park_topic_decision(
                 kind="new_topic",
                 proposal={
@@ -1847,6 +1879,7 @@ class MemoryOS:
                     "area": area,
                     "raw_text": raw_text,
                     "episode_id": episode_id,
+                    "embed_error": embed_failed,
                 },
                 candidates=candidates,
             )
@@ -1856,9 +1889,11 @@ class MemoryOS:
                 "episode_id": episode_id,
                 "candidates": candidates,
                 "score": best_score,
+                "embed_error": embed_failed,
             }
 
-        # score < LOW (or no topics in area) → distinct fact, new topic
+        # score < LOW (or area empty even on embed failure) → distinct fact,
+        # new topic
         topic_id = self.create_topic(
             name=name,
             root_category=area,
@@ -1871,17 +1906,39 @@ class MemoryOS:
             "topic_id": topic_id,
             "episode_id": episode_id,
             "score": best_score,
+            "embed_error": embed_failed,
         }
+
+    def _pending_coach_facts_by_area(self) -> dict[str, int]:
+        """Count unresolved record_coach_fact decisions per area. A parked
+        (ambiguous) fact creates no topic, so coverage alone can't tell
+        'never asked' from 'asked, answered, parked'. PR-2 reads this to avoid
+        re-asking a question the user already answered — nudge them to resolve
+        the pending decision instead."""
+        rows = self.conn.execute(
+            """SELECT json_extract(proposal_json, '$.area') AS area,
+                      COUNT(*) AS n
+               FROM topic_decisions
+               WHERE status = 'pending' AND kind = 'new_topic'
+                 AND json_extract(proposal_json, '$.area') IS NOT NULL
+               GROUP BY area"""
+        ).fetchall()
+        return {r["area"]: r["n"] for r in rows}
 
     def _coverage_for_slots(self, slots: tuple[CoachSlot, ...]) -> dict:
         """Hard coverage over an ordered slot list. Pure SQL, no embeddings.
         An area is 'filled' iff it has ≥1 topic with a non-blank
         working_conclusion — a hard judgment by root_category, never by
-        similarity. Returns numeric counts + pre-formatted labels/questions
-        side by side so the same payload serves the UI and the agent prompt."""
+        similarity. `pending_count` per area = parked-but-unresolved coach
+        facts (a gap with pending_count>0 means the user answered but the
+        match was ambiguous → resolve, don't re-ask). Returns numeric counts +
+        pre-formatted labels/questions side by side so the same payload serves
+        the UI and the agent prompt."""
+        pending_by_area = self._pending_coach_facts_by_area()
         areas_out: list[dict] = []
         gaps: list[dict] = []
         filled_count = 0
+        pending_count = 0
         for slot in slots:
             rows = self.conn.execute(
                 """SELECT topic_id, working_conclusion, updated_at
@@ -1893,6 +1950,8 @@ class MemoryOS:
                 r for r in rows if (r["working_conclusion"] or "").strip()
             ]
             filled = bool(filled_rows)
+            n_pending = pending_by_area.get(slot.area, 0)
+            pending_count += n_pending
             areas_out.append(
                 {
                     "area": slot.area,
@@ -1904,6 +1963,7 @@ class MemoryOS:
                     else None,
                     "updated_at": filled_rows[0]["updated_at"] if filled else None,
                     "topic_ids": [r["topic_id"] for r in filled_rows],
+                    "pending_count": n_pending,
                 }
             )
             if filled:
@@ -1914,19 +1974,23 @@ class MemoryOS:
                         "area": slot.area,
                         "label": slot.label,
                         "question": slot.question,
+                        "pending_count": n_pending,
                     }
                 )
         return {
             "areas": areas_out,
             "gaps": gaps,
             "filled_count": filled_count,
+            "pending_count": pending_count,
             "total": len(slots),
         }
 
     def get_coach_profile(self) -> dict:
         """Static athlete profile (A) coverage — PROJECT_GUIDE §3.4.5.
-        {areas:[{area,label,question,filled,conclusion,updated_at,topic_ids}],
-         gaps:[{area,label,question}], filled_count, total}."""
+        {areas:[{area,label,question,filled,conclusion,updated_at,topic_ids,
+        pending_count}], gaps:[{area,label,question,pending_count}],
+        filled_count, pending_count, total}. A gap with pending_count>0 was
+        answered but parked (ambiguous) — resolve, don't re-ask."""
         return self._coverage_for_slots(PROFILE_SLOTS)
 
     def get_cycle_config(self) -> dict:
