@@ -493,10 +493,12 @@ endpoint returns project + endpoint but never the key.
 
 #### 3.4.5 Planned — athlete profile (A) + cycle config (B) capture
 
-> **Status: designed, not built.** This subsection is the spec the
-> implementation PRs will follow. Everything in §3.4.1–3.4.4 is the
-> *continuous* stream (C) — the eyes. This is the missing *intake*: the
-> enrollment form (A) and this cycle's battle plan (B).
+> **Status: PR-1 (backend) built; PR-2 (agent/prompt) pending.** The CME
+> layer below — taxonomy, `record_coach_fact`, read helpers, hard coverage —
+> ships in `backend/coach_intake.py` + `cognitive_memory_engine.py`; the
+> agent doesn't call it yet (no behavior change until PR-2). Everything in
+> §3.4.1–3.4.4 is the *continuous* stream (C) — the eyes. This is the missing
+> *intake*: the enrollment form (A) and this cycle's battle plan (B).
 
 ##### Why
 
@@ -633,8 +635,7 @@ The agent gains an explicit loop:
 1. **Read** `get_coach_profile` + `get_cycle_config` — `make_plan` *must*
    read both before planning; `review_workout` reads profile.
 2. **Judge per task** which areas are *required* and whether each is
-   *specific enough* — with good/vague exemplars baked into the prompt for
-   the critical slots, e.g.
+   *specific enough* — against the per-slot good/vague standard, e.g.
    - `goal`: ✅ "Berlin 2026-09-21, sub-3:30, fixed date" / ❌ "想跑个马拉松"
    - `starting_volume`: ✅ "40 mi/wk, 5 runs, longest 16 mi, stable 8 mo" /
      ❌ "跑得还行"
@@ -643,16 +644,32 @@ The agent gains an explicit loop:
    eagerly. Non-critical gaps → park a `pending_clarification` to ask
    later, don't block.
 
+The exemplars are NOT hand-written into the system prompt — they live
+per-slot in `backend/coach_intake.py` and this whole block is produced by
+`render_intake_prompt_section()` (built in PR-1, dormant). PR-2 splices that
+output into `_SYSTEM_PROMPT` and bumps `PROMPT_VERSION` v8 → v9. Consequence:
+once wired, **editing a slot's exemplar is a prompt edit** and falls under
+the §3.4.3 contract (bump the version + add a changelog row).
+
 The guideline is deliberately tight: tell the agent exactly when to ask
 (required + missing/vague) and when *not* to (covered, or non-critical —
 park it), so it neither plans on air nor interrogates the user.
 
 ##### Recommended build split (prompt blast-radius isolation)
 
-- **PR-1 (backend only, zero behavior change)** — taxonomy constants
-  (`PROFILE_SLOTS` / `CYCLE_SLOTS`), `record_coach_fact`, the read helpers,
-  the hard-coverage algorithm, the embedding-threshold write logic, tests.
-  Safe; doesn't touch the agent.
+- **PR-1 (backend only, zero behavior change) — ✅ built.**
+  `backend/coach_intake.py` is the single source of truth for A/B: 8 + 11
+  `CoachSlot`s (area + label + question + ✅good / ❌vague exemplar), the
+  lookups, and `render_intake_prompt_section()` — a *pure* function that
+  builds the §3.4.5 prompt block from the slots so the good/vague standard
+  lives in exactly one place. The render helper is **dormant** in PR-1
+  (nothing imports it → no LLM-visible change); PR-2 splices it in and bumps
+  the version. Plus `MemoryOS.record_coach_fact` (lossless episode +
+  two-threshold write: `COACH_FACT_HIGH/LOW_THRESHOLD` = 0.80 / 0.60),
+  area-scoped `find_matching_topic(root_category=…)`, `get_coach_profile` /
+  `get_cycle_config` (pure-SQL hard coverage), the parked-episode link in
+  `resolve_topic_decision`, and `tests/test_cme_coach_facts.py`. Doesn't
+  touch the agent.
 - **PR-2 (behavior change)** — the 3 MCP tools (`record_coach_fact`,
   `get_coach_profile`, `get_cycle_config` + `get_topic_episodes` if not
   already exposed), the prompt section, `PROMPT_VERSION` v8 → v9 (+

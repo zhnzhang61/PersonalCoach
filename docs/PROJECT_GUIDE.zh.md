@@ -448,9 +448,11 @@ jq -c 'select(.prompt_version == "v8" and .prompt_hash != "<current>")' \
 
 #### 3.4.5 计划中 — 运动员档案 (A) + 周期配置 (B) 采集
 
-> **状态：已设计，未实现。** 这一节是实现 PR 要照着做的 spec。§3.4.1–3.4.4
-> 全是*持续*流（C）——眼睛。这里补的是缺失的*入学环节*：入学表（A）和这一程
-> 的作战图（B）。
+> **状态：PR-1（后端）已实现；PR-2（agent/prompt）待做。** 下面的 CME 层——
+> taxonomy、`record_coach_fact`、读 helper、硬覆盖——已落在
+> `backend/coach_intake.py` + `cognitive_memory_engine.py`；agent 还没调它
+> （PR-2 之前零行为变更）。§3.4.1–3.4.4 全是*持续*流（C）——眼睛。这里补的是
+> 缺失的*入学环节*：入学表（A）和这一程的作战图（B）。
 
 ##### 为什么
 
@@ -565,8 +567,8 @@ agent 拿到一个明确的循环：
 
 1. **读** `get_coach_profile` + `get_cycle_config`——`make_plan` 出计划前
    *必读*两个；`review_workout` 读 profile。
-2. **按任务判断**哪些 area 是*必需的*、每个*够不够具体*——给关键 slot 在
-   prompt 里配 good/vague 范例，例如：
+2. **按任务判断**哪些 area 是*必需的*、每个*够不够具体*——对照每个 slot 的
+   good/vague 标准，例如：
    - `goal`：✅ "Berlin 2026-09-21，sub-3:30，日期固定" / ❌ "想跑个马拉松"
    - `starting_volume`：✅ "周 40mi，5 次，最长 16mi，稳定 8 个月" /
      ❌ "跑得还行"
@@ -574,15 +576,28 @@ agent 拿到一个明确的循环：
    答了就立刻 `record_coach_fact`。非必需缺口 → park 一条
    `pending_clarification` 以后问，不阻塞。
 
+范例**不是**手写进 system prompt 的——它们按 slot 存在 `backend/coach_intake.py`
+里，整段 prompt 由 `render_intake_prompt_section()` 生成（PR-1 已写、休眠）。
+PR-2 把它的输出拼进 `_SYSTEM_PROMPT` 并把 `PROMPT_VERSION` 从 v8 bump 到 v9。
+后果：一旦接上，**改某个 slot 的范例就是改 prompt**，要照 §3.4.3 走（bump 版本
+号 + 加 changelog 行）。
+
 guideline 故意收得很紧：明确告诉 agent 什么时候该问（必需 + 缺 / 含糊）、
 什么时候*不该*问（已覆盖、或非关键——park 起来），它既不凭空出计划，也不
 把用户当犯人审。
 
 ##### 建议拆 PR（隔离 prompt blast radius）
 
-- **PR-1（纯后端，零行为变更）** — taxonomy 常量
-  （`PROFILE_SLOTS` / `CYCLE_SLOTS`）+ `record_coach_fact` + 读 helper +
-  硬覆盖度算法 + embedding-threshold 写逻辑 + 测试。安全，不碰 agent。
+- **PR-1（纯后端，零行为变更）— ✅ 已实现。** `backend/coach_intake.py` 是
+  A/B 的单一真相源：8 + 11 个 `CoachSlot`（area + label + 问题 + ✅好 / ❌含糊
+  范例）+ 查找表 + `render_intake_prompt_section()`——一个**纯函数**，从 slot
+  拼出 §3.4.5 的 prompt 段，让 good/vague 标准只有一份。这个渲染函数在 PR-1 里
+  **休眠**（没人 import → LLM 不可见、零变更）；PR-2 才把它拼进 prompt 并 bump
+  版本。再加 `MemoryOS.record_coach_fact`（无损 episode + 双阈值写：
+  `COACH_FACT_HIGH/LOW_THRESHOLD` = 0.80 / 0.60）+ area 范围的
+  `find_matching_topic(root_category=…)` + `get_coach_profile` /
+  `get_cycle_config`（纯 SQL 硬覆盖）+ `resolve_topic_decision` 里 park 的
+  episode 回链 + `tests/test_cme_coach_facts.py`。不碰 agent。
 - **PR-2（行为变更）** — 3 个 MCP 工具（`record_coach_fact`、
   `get_coach_profile`、`get_cycle_config`，若 `get_topic_episodes` 还没暴露
   也补上）+ prompt 段 + `PROMPT_VERSION` v8 → v9（+ changelog 行）+ prefetch
