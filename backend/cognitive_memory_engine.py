@@ -23,6 +23,14 @@ import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
+from backend.coach_intake import (
+    ALL_AREAS,
+    CYCLE_SLOTS,
+    PROFILE_SLOTS,
+    SLOT_BY_AREA,
+    CoachSlot,
+    event_type_for_area,
+)
 from backend.llm_provider import call_embedding, call_llm, cosine_similarity
 from backend.trace_logger import TraceLogger
 
@@ -1371,6 +1379,14 @@ class MemoryOS:
     MATCH_THRESHOLD: float = 0.80  # cosine sim above this → auto-merge
     TOPIC_EMBED_PROVIDER: str = "gemini"
 
+    # record_coach_fact uses two thresholds (vs the single MATCH_THRESHOLD)
+    # so an ambiguous match doesn't silently merge OR silently fork:
+    #   score ≥ HIGH         → same fact, update the existing topic in place
+    #   LOW ≤ score < HIGH   → ambiguous, park a decision ("update X or new?")
+    #   score < LOW          → distinct fact, create a new topic in the area
+    COACH_FACT_HIGH_THRESHOLD: float = 0.80
+    COACH_FACT_LOW_THRESHOLD: float = 0.60
+
     @staticmethod
     def _topic_signature_text(topic: dict) -> str:
         """The text that represents a topic in embedding space."""
@@ -1411,6 +1427,8 @@ class MemoryOS:
         query_text: str,
         top_k: int = 5,
         threshold: float | None = None,
+        root_category: str | None = None,
+        raise_on_embed_error: bool = False,
     ) -> tuple[str | None, list[dict]]:
         """
         Find the topic most semantically similar to `query_text`.
@@ -1420,6 +1438,10 @@ class MemoryOS:
             top_k: candidates to return when no auto-match is confident enough.
             threshold: cosine similarity above which we auto-merge. None uses
                        MATCH_THRESHOLD.
+            root_category: when set, only topics in this category are scored.
+                       record_coach_fact uses this to keep matching scoped to
+                       one intake area (e.g. a new injury fact can only merge
+                       into an existing injury_history topic, never into goal).
 
         Returns:
             (auto_match_topic_id_or_None, ranked_candidates_with_scores)
@@ -1432,15 +1454,23 @@ class MemoryOS:
             threshold = self.MATCH_THRESHOLD
 
         topics = self.list_topics()
+        if root_category is not None:
+            topics = [t for t in topics if t["root_category"] == root_category]
         if not topics or not (query_text and query_text.strip()):
             return (None, [])
 
         try:
             query_vec = call_embedding([query_text], provider=self.TOPIC_EMBED_PROVIDER)[0]
         except Exception as e:
-            # Embedding failure: return no match rather than crashing consolidation.
-            # Caller will treat it as "no match" and fall back to create-new.
+            # Embedding failure. For batch consolidation (default) we swallow
+            # it as "no match" and the caller falls back to create-new — it
+            # dedupes later, so a transient miss is harmless. record_coach_fact
+            # is eager with no such backstop, so it passes raise_on_embed_error
+            # to PARK instead of forking a duplicate that would shadow the real
+            # topic in coverage (most-recent-wins).
             print(f"[CME] topic match embedding failed: {e}")
+            if raise_on_embed_error:
+                raise
             return (None, [])
 
         scored: list[dict] = []
@@ -1571,6 +1601,15 @@ class MemoryOS:
                 if updates:
                     self.update_topic(target_topic_id, **updates)
                     self._invalidate_topic_cache(target_topic_id)
+                # record_coach_fact parks decisions carrying the lossless
+                # episode it already created; on merge, link that episode to
+                # the chosen topic so the raw text is reachable via
+                # get_topic_episodes. Guarded: consolidation-parked proposals
+                # have no episode_id, so this is a no-op for them.
+                if proposal.get("episode_id"):
+                    self.add_topic_episode_link(
+                        target_topic_id, proposal["episode_id"]
+                    )
             elif kind == "conflict":
                 self.promote_topic_to_conflicting(
                     target_topic_id,
@@ -1603,6 +1642,11 @@ class MemoryOS:
                     status=proposal.get("status", "Open"),
                     working_conclusion=proposal.get("working_conclusion"),
                 )
+                # record_coach_fact parks the lossless episode it created; on
+                # create_new, link it to the freshly-made topic. Guarded:
+                # consolidation-parked proposals carry no episode_id (no-op).
+                if proposal.get("episode_id"):
+                    self.add_topic_episode_link(result_tid, proposal["episode_id"])
             elif kind == "new_model":
                 # PR P2: confirm the LLM-proposed model — create the
                 # model row and link it back to the source topic. The
@@ -1720,6 +1764,238 @@ class MemoryOS:
         )
         self.conn.commit()
         return result_tid
+
+    # ==================================================================
+    # Coach intake — athlete profile (A) + cycle config (B) capture
+    # (PROJECT_GUIDE §3.4.5). The continuous (C) stream lives in the
+    # data_processor / models layer, not here.
+    # ==================================================================
+    def record_coach_fact(
+        self,
+        area: str,
+        raw_text: str,
+        conclusion: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """
+        Eagerly capture one athlete-profile / cycle-config fact. Two CME
+        columns carry it: episodes.context_json holds the LOSSLESS raw text;
+        topics.working_conclusion holds the distilled answer for `area`, on a
+        topic whose root_category == area.
+
+        Flow:
+          1. Create a lossless episode (event_type 'profile'|'cycle_config',
+             context = {area, raw_text}).
+          2. Embedding-match `raw_text` against existing topics IN THIS area:
+               score ≥ HIGH        → update that topic's conclusion + link ep.
+               LOW ≤ score < HIGH  → park a 'new_topic' decision (update X /
+                                     new fact?) — never silently merge.
+               score < LOW / none  → create a new topic in the area + link ep.
+
+        Args:
+            area: qualified coach-intake area (see coach_intake.ALL_AREAS).
+            raw_text: what the user said, stored verbatim. Required.
+            conclusion: distilled answer to store on the topic. The agent
+                (PR-2) passes a clean one-liner; defaults to raw_text.
+            name: fine-grained embeddable topic name (LLM-generated in PR-2);
+                defaults to "<label>: <raw_text snippet>".
+
+        Returns:
+            {"action": "updated"|"created"|"parked", "episode_id", "score",
+             plus "topic_id" (updated/created) or
+             "decision_id"+"candidates" (parked)}.
+
+        Raises:
+            ValueError on an unknown area or empty raw_text.
+        """
+        if area not in ALL_AREAS:
+            raise ValueError(f"Unknown coach-intake area: {area!r}")
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            raise ValueError("record_coach_fact requires non-empty raw_text")
+
+        conclusion = (conclusion or raw_text).strip()
+        slot = SLOT_BY_AREA[area]
+        name = (name or "").strip() or f"{slot.label}: {raw_text[:40]}"
+
+        # 1. lossless episode
+        episode_id = self.create_episode(
+            event_type=event_type_for_area(area),
+            context={"area": area, "raw_text": raw_text},
+        )
+
+        # 2. area-scoped embedding match (two-threshold decision). raise on an
+        #    embedding failure so we can PARK rather than fork — see below.
+        embed_failed = False
+        try:
+            auto, candidates = self.find_matching_topic(
+                raw_text,
+                threshold=self.COACH_FACT_HIGH_THRESHOLD,
+                root_category=area,
+                raise_on_embed_error=True,
+            )
+        except Exception:
+            auto, candidates, embed_failed = None, [], True
+        best_score = candidates[0]["score"] if candidates else 0.0
+
+        if auto:  # score ≥ HIGH → same fact, update in place
+            self.update_topic(auto, working_conclusion=conclusion)
+            self._invalidate_topic_cache(auto)
+            self.add_topic_episode_link(auto, episode_id)
+            return {
+                "action": "updated",
+                "topic_id": auto,
+                "episode_id": episode_id,
+                "score": best_score,
+                "embed_error": False,
+            }
+
+        # Decide park-vs-create. Two reasons to park (let the user
+        # disambiguate) rather than create a fresh topic:
+        #   (a) ambiguous score (LOW ≤ best < HIGH), or
+        #   (b) the embedding call FAILED and the area already has topics we
+        #       couldn't compare against — creating now would fork a duplicate
+        #       that shadows the real topic in coverage (most-recent-wins).
+        # When embedding failed we have no scored candidates, so surface the
+        # area's existing topics (no score) for the user to pick from.
+        park = best_score >= self.COACH_FACT_LOW_THRESHOLD
+        if embed_failed:
+            candidates = [
+                {"topic_id": t["topic_id"], "name": t["name"],
+                 "status": t["status"], "score": None}
+                for t in self.list_topics()
+                if t["root_category"] == area
+            ]
+            park = bool(candidates)  # only park if there's something to match
+
+        if park:
+            decision_id = self.park_topic_decision(
+                kind="new_topic",
+                proposal={
+                    "name": name,
+                    "root_category": area,
+                    "status": "Resolved",
+                    "working_conclusion": conclusion,
+                    "area": area,
+                    "raw_text": raw_text,
+                    "episode_id": episode_id,
+                    "embed_error": embed_failed,
+                },
+                candidates=candidates,
+            )
+            return {
+                "action": "parked",
+                "decision_id": decision_id,
+                "episode_id": episode_id,
+                "candidates": candidates,
+                "score": best_score,
+                "embed_error": embed_failed,
+            }
+
+        # score < LOW (or area empty even on embed failure) → distinct fact,
+        # new topic
+        topic_id = self.create_topic(
+            name=name,
+            root_category=area,
+            status="Resolved",
+            working_conclusion=conclusion,
+        )
+        self.add_topic_episode_link(topic_id, episode_id)
+        return {
+            "action": "created",
+            "topic_id": topic_id,
+            "episode_id": episode_id,
+            "score": best_score,
+            "embed_error": embed_failed,
+        }
+
+    def _pending_coach_facts_by_area(self) -> dict[str, int]:
+        """Count unresolved record_coach_fact decisions per area. A parked
+        (ambiguous) fact creates no topic, so coverage alone can't tell
+        'never asked' from 'asked, answered, parked'. PR-2 reads this to avoid
+        re-asking a question the user already answered — nudge them to resolve
+        the pending decision instead."""
+        rows = self.conn.execute(
+            """SELECT json_extract(proposal_json, '$.area') AS area,
+                      COUNT(*) AS n
+               FROM topic_decisions
+               WHERE status = 'pending' AND kind = 'new_topic'
+                 AND json_extract(proposal_json, '$.area') IS NOT NULL
+               GROUP BY area"""
+        ).fetchall()
+        return {r["area"]: r["n"] for r in rows}
+
+    def _coverage_for_slots(self, slots: tuple[CoachSlot, ...]) -> dict:
+        """Hard coverage over an ordered slot list. Pure SQL, no embeddings.
+        An area is 'filled' iff it has ≥1 topic with a non-blank
+        working_conclusion — a hard judgment by root_category, never by
+        similarity. `pending_count` per area = parked-but-unresolved coach
+        facts (a gap with pending_count>0 means the user answered but the
+        match was ambiguous → resolve, don't re-ask). Returns numeric counts +
+        pre-formatted labels/questions side by side so the same payload serves
+        the UI and the agent prompt."""
+        pending_by_area = self._pending_coach_facts_by_area()
+        areas_out: list[dict] = []
+        gaps: list[dict] = []
+        filled_count = 0
+        pending_count = 0
+        for slot in slots:
+            rows = self.conn.execute(
+                """SELECT topic_id, working_conclusion, updated_at
+                   FROM topics WHERE root_category = ?
+                   ORDER BY updated_at DESC""",
+                (slot.area,),
+            ).fetchall()
+            filled_rows = [
+                r for r in rows if (r["working_conclusion"] or "").strip()
+            ]
+            filled = bool(filled_rows)
+            n_pending = pending_by_area.get(slot.area, 0)
+            pending_count += n_pending
+            areas_out.append(
+                {
+                    "area": slot.area,
+                    "label": slot.label,
+                    "question": slot.question,
+                    "filled": filled,
+                    "conclusion": filled_rows[0]["working_conclusion"]
+                    if filled
+                    else None,
+                    "updated_at": filled_rows[0]["updated_at"] if filled else None,
+                    "topic_ids": [r["topic_id"] for r in filled_rows],
+                    "pending_count": n_pending,
+                }
+            )
+            if filled:
+                filled_count += 1
+            else:
+                gaps.append(
+                    {
+                        "area": slot.area,
+                        "label": slot.label,
+                        "question": slot.question,
+                        "pending_count": n_pending,
+                    }
+                )
+        return {
+            "areas": areas_out,
+            "gaps": gaps,
+            "filled_count": filled_count,
+            "pending_count": pending_count,
+            "total": len(slots),
+        }
+
+    def get_coach_profile(self) -> dict:
+        """Static athlete profile (A) coverage — PROJECT_GUIDE §3.4.5.
+        {areas:[{area,label,question,filled,conclusion,updated_at,topic_ids,
+        pending_count}], gaps:[{area,label,question,pending_count}],
+        filled_count, pending_count, total}. A gap with pending_count>0 was
+        answered but parked (ambiguous) — resolve, don't re-ask."""
+        return self._coverage_for_slots(PROFILE_SLOTS)
+
+    def get_cycle_config(self) -> dict:
+        """Per-cycle config (B) coverage — same shape as get_coach_profile."""
+        return self._coverage_for_slots(CYCLE_SLOTS)
 
     def promote_topic_to_conflicting(
         self,

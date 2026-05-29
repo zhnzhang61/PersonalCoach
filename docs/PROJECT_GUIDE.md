@@ -493,10 +493,12 @@ endpoint returns project + endpoint but never the key.
 
 #### 3.4.5 Planned — athlete profile (A) + cycle config (B) capture
 
-> **Status: designed, not built.** This subsection is the spec the
-> implementation PRs will follow. Everything in §3.4.1–3.4.4 is the
-> *continuous* stream (C) — the eyes. This is the missing *intake*: the
-> enrollment form (A) and this cycle's battle plan (B).
+> **Status: PR-1 (backend) built; PR-2 (agent/prompt) pending.** The CME
+> layer below — taxonomy, `record_coach_fact`, read helpers, hard coverage —
+> ships in `backend/coach_intake.py` + `cognitive_memory_engine.py`; the
+> agent doesn't call it yet (no behavior change until PR-2). Everything in
+> §3.4.1–3.4.4 is the *continuous* stream (C) — the eyes. This is the missing
+> *intake*: the enrollment form (A) and this cycle's battle plan (B).
 
 ##### Why
 
@@ -599,21 +601,34 @@ close):
 2. Embedding-search topics **within that `root_category`**:
    - **≥ high threshold** → same fact → **update** that topic's
      `working_conclusion` + link the new episode.
-   - **between low and high** → **park a `pending_clarification`**: "is
-     this an update to X, or a new fact?" (confirm-below-threshold — never
-     silently merge an ambiguous match).
+   - **between low and high** → **park a `topic_decision` (kind=`new_topic`)**:
+     "update X, or a new fact?" — `topic_decisions` carries the structured
+     `candidates` + the merge-vs-create_new resolution `record_coach_fact`
+     needs (`pending_clarifications` is a flat question queue with no resolve
+     path). Confirm-below-threshold — never silently merge an ambiguous match.
+     *(Same path on an embedding-call failure when the area already has
+     topics: park rather than fork a duplicate that would shadow the real one
+     in coverage.)*
    - **< low threshold** → **create a new topic** in that area (one area
      can hold several topics, e.g. `injury_history` with multiple sites).
 
 ##### Read + coverage — `get_coach_profile()` / `get_cycle_config()`
 
-Returns `{area: {conclusion, filled, updated_at}, gaps: [...]}`.
+Returns `{areas: [{area, label, question, filled, conclusion, updated_at,
+topic_ids, pending_count}], gaps: [{area, label, question, pending_count}],
+filled_count, pending_count, total}`.
 
 Coverage is a **hard judgment by `root_category`**, *not* similarity:
 iterate the canonical area list (the 8 / 11 above); any area with no
 topic carrying a non-empty `working_conclusion` is a `gap`. Embeddings
 decide *which topic within an area* a new fact belongs to; the canonical
 list decides *whether the area is covered at all*.
+
+`pending_count` per area = parked-but-unresolved coach facts for it. A gap
+with `pending_count > 0` means the user *did* answer but the match was
+ambiguous and got parked — so PR-2 can tell "never asked" (ask) from
+"answered, parked" (resolve the decision, don't re-ask). Pure SQL, no
+embeddings.
 
 ##### Conflict → re-review
 
@@ -623,8 +638,11 @@ the agent detects a mismatch between a new event and an area's conclusion:
 
 - **confident** → rewrite the conclusion via `record_coach_fact` (update
   branch).
-- **ambiguous** → mark the topic `Conflicting` + park a
-  `pending_clarification` for the user.
+- **ambiguous** → `promote_topic_to_conflicting` (status → `Conflicting` +
+  `open_question`); the conflicting topic surfaces in
+  `retrieve_working_context` for the agent to raise. (This path uses the
+  topic's own `Conflicting` state, not `pending_clarifications` — Phase 2b
+  removed conflict writes to that table.)
 
 ##### Prompt section (behavior change, `PROMPT_VERSION` v8 → v9)
 
@@ -633,15 +651,23 @@ The agent gains an explicit loop:
 1. **Read** `get_coach_profile` + `get_cycle_config` — `make_plan` *must*
    read both before planning; `review_workout` reads profile.
 2. **Judge per task** which areas are *required* and whether each is
-   *specific enough* — with good/vague exemplars baked into the prompt for
-   the critical slots, e.g.
+   *specific enough* — against the per-slot good/vague standard, e.g.
    - `goal`: ✅ "Berlin 2026-09-21, sub-3:30, fixed date" / ❌ "想跑个马拉松"
    - `starting_volume`: ✅ "40 mi/wk, 5 runs, longest 16 mi, stable 8 mo" /
      ❌ "跑得还行"
 3. **Follow up** — a missing or vague *required* area → ask **one**
    targeted question before planning, and `record_coach_fact` the answer
-   eagerly. Non-critical gaps → park a `pending_clarification` to ask
-   later, don't block.
+   eagerly. Non-critical gaps → don't block; the area stays in `gaps` and
+   re-surfaces next time coverage is read. A gap with `pending_count > 0` was
+   already answered but parked (ambiguous match) — nudge the user to resolve
+   the parked decision, don't re-ask the question.
+
+The exemplars are NOT hand-written into the system prompt — they live
+per-slot in `backend/coach_intake.py` and this whole block is produced by
+`render_intake_prompt_section()` (built in PR-1, dormant). PR-2 splices that
+output into `_SYSTEM_PROMPT` and bumps `PROMPT_VERSION` v8 → v9. Consequence:
+once wired, **editing a slot's exemplar is a prompt edit** and falls under
+the §3.4.3 contract (bump the version + add a changelog row).
 
 The guideline is deliberately tight: tell the agent exactly when to ask
 (required + missing/vague) and when *not* to (covered, or non-critical —
@@ -649,10 +675,19 @@ park it), so it neither plans on air nor interrogates the user.
 
 ##### Recommended build split (prompt blast-radius isolation)
 
-- **PR-1 (backend only, zero behavior change)** — taxonomy constants
-  (`PROFILE_SLOTS` / `CYCLE_SLOTS`), `record_coach_fact`, the read helpers,
-  the hard-coverage algorithm, the embedding-threshold write logic, tests.
-  Safe; doesn't touch the agent.
+- **PR-1 (backend only, zero behavior change) — ✅ built.**
+  `backend/coach_intake.py` is the single source of truth for A/B: 8 + 11
+  `CoachSlot`s (area + label + question + ✅good / ❌vague exemplar), the
+  lookups, and `render_intake_prompt_section()` — a *pure* function that
+  builds the §3.4.5 prompt block from the slots so the good/vague standard
+  lives in exactly one place. The render helper is **dormant** in PR-1
+  (nothing imports it → no LLM-visible change); PR-2 splices it in and bumps
+  the version. Plus `MemoryOS.record_coach_fact` (lossless episode +
+  two-threshold write: `COACH_FACT_HIGH/LOW_THRESHOLD` = 0.80 / 0.60),
+  area-scoped `find_matching_topic(root_category=…)`, `get_coach_profile` /
+  `get_cycle_config` (pure-SQL hard coverage), the parked-episode link in
+  `resolve_topic_decision`, and `tests/test_cme_coach_facts.py`. Doesn't
+  touch the agent.
 - **PR-2 (behavior change)** — the 3 MCP tools (`record_coach_fact`,
   `get_coach_profile`, `get_cycle_config` + `get_topic_episodes` if not
   already exposed), the prompt section, `PROMPT_VERSION` v8 → v9 (+
