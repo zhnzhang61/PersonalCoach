@@ -906,6 +906,91 @@ async def resolve_decision(
     )
 
 
+# --- Coach intake: athlete profile (A) + cycle config (B), §3.4.5 ---
+
+
+@mcp.tool()
+async def get_coach_profile() -> dict:
+    """The user's STATIC athlete profile (A) — the enrollment-form facts a
+    coach asks once: injury history, medical/meds/max-HR, training age,
+    age/sex, gut/fueling tolerance, psychology/taper response, coaching
+    prefs, devices.
+
+    Returns `{areas: [{area, label, question, filled, conclusion,
+    updated_at, topic_ids, pending_count}], gaps: [...], filled_count,
+    pending_count, total}`. `areas[].area` is the qualified key you pass to
+    `record_coach_fact` (e.g. 'Profile.injury_history').
+
+    Read this before reviewing a workout. A `gap` (filled=false) you haven't
+    captured → ask if it's relevant. A gap with `pending_count > 0` was
+    already answered but parked as ambiguous — DON'T re-ask; the user needs
+    to resolve the pending decision."""
+    return await _get("/api/memory/coach-profile")
+
+
+@mcp.tool()
+async def get_cycle_config() -> dict:
+    """The user's PER-CYCLE config (B) — what a coach re-asks each training
+    cycle: goal+date, starting volume, blackout dates, weekly availability,
+    session time caps, quality capacity, race details, life load, down-week
+    preference, tune-up races, strength/cross-training.
+
+    Same shape as `get_coach_profile`. Read this (AND get_coach_profile)
+    before making a plan — you can't safely ramp without the starting
+    volume, can't schedule around blackout dates you don't have, etc.
+    Required-but-missing/vague area → ask ONE targeted follow-up first."""
+    return await _get("/api/memory/cycle-config")
+
+
+@mcp.tool()
+async def record_coach_fact(
+    area: str,
+    raw_text: str,
+    conclusion: str | None = None,
+    name: str | None = None,
+) -> dict:
+    """Persist one athlete-profile (A) / cycle-config (B) fact the user just
+    told you — call this EAGERLY the moment you learn it, don't wait for
+    session close.
+
+    `area`  — a qualified area from get_coach_profile / get_cycle_config,
+              e.g. 'Profile.injury_history', 'Cycle.goal'.
+    `raw_text` — what the user said, VERBATIM (stored losslessly).
+    `conclusion` — optional distilled one-liner stored as the area's answer
+              (defaults to raw_text). Pass a clean summary when the user's
+              phrasing is rambly.
+    `name`  — optional fine-grained topic name (defaults to a label+snippet).
+
+    Returns `{action, episode_id, ...}`:
+      - 'updated' — matched an existing fact in the area, conclusion rewritten
+      - 'created' — new fact, new topic
+      - 'parked'  — ambiguous match; a decision was queued (decision_id) for
+                    the user to confirm update-vs-new. Tell the user, don't
+                    silently pick.
+
+    Use the EXACT qualified area string; an unknown area is a 400 error."""
+    body: dict = {"area": area, "raw_text": raw_text}
+    if conclusion is not None:
+        body["conclusion"] = conclusion
+    if name is not None:
+        body["name"] = name
+    return await _post("/api/memory/coach-fact", body=body)
+
+
+@mcp.tool()
+async def get_topic_episodes(topic_id: str, limit: int = 20) -> dict:
+    """Raw backing episodes for a topic, newest first. Use when an existing
+    topic's conclusion seems to CONTRADICT something the user just said:
+    pull the original episodes (`context` carries the lossless raw text),
+    re-read them, then either rewrite the conclusion with `record_coach_fact`
+    (if you're confident) or flag the conflict.
+
+    Returns `{topic_id, episodes: [{episode_id, event_type, context,
+    timestamp, ...}]}`. topic_id comes from recall_topics / get_coach_profile
+    (the `topic_ids` field)."""
+    return await _get(f"/api/memory/topics/{topic_id}/episodes", limit=limit)
+
+
 @mcp.tool()
 async def get_recent_checkins(days: int = 7) -> dict:
     """Recent daily check-ins from the user (PR P3 — perceived layer).

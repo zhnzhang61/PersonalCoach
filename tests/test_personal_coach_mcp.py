@@ -722,3 +722,85 @@ class TestListModels:
         fake_get.responses.append({"models": []})
         _run(mcp.list_models(category=None, status=None))
         assert fake_get.calls == [("/api/memory/models", {})]
+
+
+# ---------------------------------------------------------------------------
+# Coach intake tools (§3.4.5) — get/record profile + cycle config
+# ---------------------------------------------------------------------------
+
+
+class _PostRecorder:
+    """Replacement for `_post` that records (path, body) + returns canned
+    responses in order. Anything past the canned list returns {}."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls: list[tuple[str, dict | None]] = []
+
+    async def __call__(self, path, body=None):
+        self.calls.append((path, body))
+        if self.responses:
+            return self.responses.pop(0)
+        return {}
+
+
+@pytest.fixture
+def fake_post():
+    rec = _PostRecorder()
+    with patch("backend.personal_coach_mcp._post", new=rec):
+        yield rec
+
+
+class TestCoachIntakeReadTools:
+    def test_get_coach_profile_path(self, fake_get):
+        fake_get.responses.append({"areas": [], "gaps": [], "filled_count": 0})
+        result = _run(mcp.get_coach_profile())
+        assert fake_get.calls == [("/api/memory/coach-profile", {})]
+        assert result["filled_count"] == 0
+
+    def test_get_cycle_config_path(self, fake_get):
+        fake_get.responses.append({"areas": [], "gaps": [], "total": 11})
+        result = _run(mcp.get_cycle_config())
+        assert fake_get.calls == [("/api/memory/cycle-config", {})]
+        assert result["total"] == 11
+
+    def test_get_topic_episodes_path_and_limit(self, fake_get):
+        fake_get.responses.append({"topic_id": "tpc_1", "episodes": []})
+        _run(mcp.get_topic_episodes("tpc_1", limit=5))
+        assert fake_get.calls == [
+            ("/api/memory/topics/tpc_1/episodes", {"limit": 5}),
+        ]
+
+    def test_get_topic_episodes_default_limit(self, fake_get):
+        fake_get.responses.append({"topic_id": "tpc_1", "episodes": []})
+        _run(mcp.get_topic_episodes("tpc_1"))
+        assert fake_get.calls == [
+            ("/api/memory/topics/tpc_1/episodes", {"limit": 20}),
+        ]
+
+
+class TestRecordCoachFactTool:
+    def test_minimal_body(self, fake_post):
+        fake_post.responses.append({"action": "created", "topic_id": "tpc_1"})
+        result = _run(
+            mcp.record_coach_fact("Cycle.goal", "Berlin 2026 sub-3:30")
+        )
+        path, body = fake_post.calls[0]
+        assert path == "/api/memory/coach-fact"
+        # optional fields omitted when not provided
+        assert body == {"area": "Cycle.goal", "raw_text": "Berlin 2026 sub-3:30"}
+        assert result["action"] == "created"
+
+    def test_optional_fields_forwarded(self, fake_post):
+        fake_post.responses.append({"action": "updated"})
+        _run(
+            mcp.record_coach_fact(
+                "Profile.background",
+                "跑了五年，两个全马",
+                conclusion="训练年龄 5 年，2 个全马",
+                name="跑步背景",
+            )
+        )
+        _path, body = fake_post.calls[0]
+        assert body["conclusion"] == "训练年龄 5 年，2 个全马"
+        assert body["name"] == "跑步背景"

@@ -775,3 +775,78 @@ class TestGarminRefreshToken:
     def test_refresh_requires_ticket(self, client):
         resp = client.post("/api/sync/garmin/refresh-token", json={})
         assert resp.status_code == 422
+
+
+# ===========================================================================
+# Coach intake — athlete profile (A) + cycle config (B), §3.4.5
+# ===========================================================================
+
+
+class TestCoachIntake:
+    def test_get_coach_profile_returns_engine_payload(self, client):
+        import backend.api_server as api_server
+        api_server.memory_engine.get_coach_profile.return_value = {
+            "areas": [], "gaps": [], "filled_count": 0,
+            "pending_count": 0, "total": 8,
+        }
+        resp = client.get("/api/memory/coach-profile")
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 8
+        api_server.memory_engine.get_coach_profile.assert_called_once_with()
+
+    def test_get_cycle_config_returns_engine_payload(self, client):
+        import backend.api_server as api_server
+        api_server.memory_engine.get_cycle_config.return_value = {
+            "areas": [], "gaps": [], "filled_count": 0,
+            "pending_count": 0, "total": 11,
+        }
+        resp = client.get("/api/memory/cycle-config")
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 11
+        api_server.memory_engine.get_cycle_config.assert_called_once_with()
+
+    def test_record_coach_fact_forwards_fields(self, client):
+        import backend.api_server as api_server
+        api_server.memory_engine.record_coach_fact.return_value = {
+            "action": "created", "topic_id": "tpc_1", "episode_id": "epi_1",
+        }
+        resp = client.post(
+            "/api/memory/coach-fact",
+            json={
+                "area": "Cycle.goal",
+                "raw_text": "Berlin 2026-09-21 sub-3:30",
+                "conclusion": "Berlin sub-3:30",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["action"] == "created"
+        kw = api_server.memory_engine.record_coach_fact.call_args.kwargs
+        assert kw["area"] == "Cycle.goal"
+        assert kw["raw_text"] == "Berlin 2026-09-21 sub-3:30"
+        assert kw["conclusion"] == "Berlin sub-3:30"
+        assert kw["name"] is None
+
+    def test_record_coach_fact_unknown_area_is_400(self, client):
+        import backend.api_server as api_server
+        api_server.memory_engine.record_coach_fact.side_effect = ValueError(
+            "Unknown coach-intake area: 'Bogus.area'"
+        )
+        resp = client.post(
+            "/api/memory/coach-fact",
+            json={"area": "Bogus.area", "raw_text": "x"},
+        )
+        assert resp.status_code == 400
+
+    def test_get_topic_episodes_wraps_list(self, client):
+        import backend.api_server as api_server
+        api_server.memory_engine.get_topic_episodes.return_value = [
+            {"episode_id": "epi_1", "context": {"area": "Cycle.goal"}},
+        ]
+        resp = client.get("/api/memory/topics/tpc_1/episodes?limit=5")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["topic_id"] == "tpc_1"
+        assert body["episodes"][0]["episode_id"] == "epi_1"
+        api_server.memory_engine.get_topic_episodes.assert_called_once_with(
+            "tpc_1", limit=5
+        )

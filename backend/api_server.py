@@ -1864,6 +1864,59 @@ def resolve_pending(pending_id: str, body: PendingResolve) -> dict[str, Any]:
     return {"ok": True}
 
 
+# --- Coach intake: athlete profile (A) + cycle config (B), PROJECT_GUIDE §3.4.5 ---
+
+
+class CoachFactInput(BaseModel):
+    """Body for POST /api/memory/coach-fact. `area` must be a qualified
+    coach-intake area (Profile.* / Cycle.*); the agent gets the valid set
+    from the `area` field of get_coach_profile / get_cycle_config."""
+    area: str
+    raw_text: str
+    conclusion: str | None = None
+    name: str | None = None
+
+
+@app.get("/api/memory/coach-profile")
+def get_coach_profile() -> dict[str, Any]:
+    """Static athlete-profile (A) coverage — {areas, gaps, filled_count,
+    pending_count, total}. Backs the `get_coach_profile` MCP tool + the
+    make_plan / review_workout prefetch."""
+    return memory_engine.get_coach_profile()
+
+
+@app.get("/api/memory/cycle-config")
+def get_cycle_config() -> dict[str, Any]:
+    """Per-cycle config (B) coverage — same shape as coach-profile."""
+    return memory_engine.get_cycle_config()
+
+
+@app.post("/api/memory/coach-fact")
+def record_coach_fact(body: CoachFactInput) -> dict[str, Any]:
+    """Eagerly capture one A/B fact: lossless episode + two-threshold topic
+    write. Returns {action: updated|created|parked, episode_id, ...}. 400 on
+    an unknown area or empty raw_text."""
+    try:
+        return memory_engine.record_coach_fact(
+            area=body.area,
+            raw_text=body.raw_text,
+            conclusion=body.conclusion,
+            name=body.name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/memory/topics/{topic_id}/episodes")
+def get_topic_episodes(topic_id: str, limit: int = 20) -> dict[str, Any]:
+    """Raw backing episodes for a topic, newest first — the conflict →
+    re-review fetch (§3.4.5). `context` carries the lossless raw text."""
+    return {
+        "topic_id": topic_id,
+        "episodes": memory_engine.get_topic_episodes(topic_id, limit=limit),
+    }
+
+
 # --- Consolidation ---
 
 

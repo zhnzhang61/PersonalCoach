@@ -29,7 +29,7 @@ that drifted as the code moved. Reflects the **current** state
     - [3.4.2 Coach chat](#342-coach-chat--session-design) — session-bounded chat
     - [3.4.3 Prompt versioning](#343-prompt-versioning)
     - [3.4.4 Observability](#344-observability--traces--langsmith) — JSONL traces + LangSmith
-    - [3.4.5 Planned — profile + cycle config capture](#345-planned--athlete-profile-a--cycle-config-b-capture) — A/B intake into the CME
+    - [3.4.5 Profile + cycle config capture](#345-athlete-profile-a--cycle-config-b-capture) — A/B intake into the CME
 - [4. Engineering debt](#4-engineering-debt) — CI, tests, tracing, repo reorg, open gaps **(longest)**
 - [5. Appendix](#5-appendix) — storage tour, provider routing, doc history
 
@@ -62,7 +62,7 @@ graph TB
     end
 
     subgraph APIProc["🖥️ api_server.py — :8765 (FastAPI)"]
-        API["<b>api_server.py</b><br/>~85 HTTP endpoints<br/>+ Garmin/Google OAuth"]:::proc
+        API["<b>api_server.py</b><br/>~89 HTTP endpoints<br/>+ Garmin/Google OAuth"]:::proc
         AC["<b>agentic_coach.py</b><br/>LangGraph create_react_agent<br/>SSE streaming · session threads"]:::proc
         CME["<b>cognitive_memory_engine.py</b><br/>topics · episodes · models ·<br/>decisions · pending"]:::proc
         DP["<b>data_processor.py</b><br/>RunActivity / ManualActivity<br/>.fit → derived JSON"]:::proc
@@ -72,7 +72,7 @@ graph TB
     end
 
     subgraph MCPProc["🔧 MCP subprocess (stdio)"]
-        MCP["<b>personal_coach_mcp.py</b><br/>~28 tools wrapping api_server"]:::proc
+        MCP["<b>personal_coach_mcp.py</b><br/>~32 tools wrapping api_server"]:::proc
     end
 
     Gemini["☁️ Gemini API<br/>3.1-flash-lite + embedding-2"]:::ext
@@ -102,7 +102,7 @@ graph TB
 
 **Status:** Phase 0 → Phase 3 of the coach-brain roadmap complete. All
 four agent input streams live; 5 stat-derived models in the store;
-711 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
+763 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
 for the roadmap detail and [§4](#4-engineering-debt) for what's left.
 
 ---
@@ -253,7 +253,7 @@ overwrites it. If you ever did, restore upstream behavior with
 **`personal_coach_mcp.py`** — MCP server (`@mcp.tool()` decorators),
 spawned as a stdio subprocess by `agentic_coach._ensure_agent`. Every
 tool is a thin HTTP wrapper around `api_server` (keeps one
-`DataProcessor`, avoids races). ~28 tools, grouped:
+`DataProcessor`, avoids races). ~32 tools, grouped:
 
 | Group | Tools |
 |---|---|
@@ -263,7 +263,8 @@ tool is a thin HTTP wrapper around `api_server` (keeps one
 | Calendar / planned | `get_calendar_events`, `get_workout_plan`, `get_planned_workouts`, `propose_workout_plan` |
 | External context | `get_external_events` |
 | Manual activities | `list_manual_activities`, `get_manual_activity` |
-| Memory (CME) | `recall_topics`, `search_episodes`, `get_pending_clarifications`, `get_model`, `list_models`, `propose_model_from_topic`, `list_pending_decisions`, `resolve_decision` |
+| Memory (CME) | `recall_topics`, `search_episodes`, `get_topic_episodes`, `get_pending_clarifications`, `get_model`, `list_models`, `propose_model_from_topic`, `list_pending_decisions`, `resolve_decision` |
+| Coach intake (A/B, §3.4.5) | `get_coach_profile`, `get_cycle_config`, `record_coach_fact` |
 
 **Design principle (from IMPROVEMENTS §2, now enforced):** the MCP
 layer does *projection*, not raw passthrough. Garmin's interpretive
@@ -387,7 +388,7 @@ context.
 
 #### 3.4.3 Prompt versioning
 
-`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v8**).
+`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v9**).
 The system prompt is built per-turn by `_build_prompt(state)` — it
 prepends today's date (tz-aware, honors `PERSONAL_COACH_TZ`) in front
 of the static persona so the agent never schedules workouts in the
@@ -406,10 +407,10 @@ different.
 
 **Reading traces by version:**
 ```bash
-# all turns on v8 today
-jq -c 'select(.prompt_version == "v8")' data/traces/$(date +%F).jsonl
+# all turns on v9 today
+jq -c 'select(.prompt_version == "v9")' data/traces/$(date +%F).jsonl
 # drift check — version label vs actual content hash
-jq -c 'select(.prompt_version == "v8" and .prompt_hash != "<current>")' \
+jq -c 'select(.prompt_version == "v9" and .prompt_hash != "<current>")' \
   data/traces/$(date +%F).jsonl
 ```
 The canonical hash is logged at AgenticCoach init (grep startup output).
@@ -418,6 +419,7 @@ The canonical hash is logged at AgenticCoach init (grep startup output).
 
 | Version | Date | What changed | PR |
 |---|---|---|---|
+| **v9** | 2026-05-29 | Athlete-profile (A) + cycle-config (B) intake block appended to `_SYSTEM_PROMPT`, rendered from `coach_intake` slots via `render_intake_prompt_section()` (good/vague standard per area). Instructs: read `get_coach_profile`/`get_cycle_config`, judge required + specific-enough, on a missing/vague required area ask ONE follow-up and STOP (record the answer only after the user replies next turn — never fabricate it), don't re-ask `pending_count>0` gaps. `make_plan` also gained an instruction bullet. Editing a slot exemplar in `coach_intake.py` now triggers this contract. | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | Per-turn date-header wrapper (`_HEADER_TEMPLATE`) in front of `_SYSTEM_PROMPT`. Pins "Today is YYYY-MM-DD (Weekday)" + relative-time directive in English + Chinese (`今天 / 明天 / 后天 / 这周`) + "never schedule in the past". Today via `datetime.now(_user_tz()).date()` (honors `PERSONAL_COACH_TZ`, falls back to process-local). Hash now covers wrapper + persona with a sentinel date. Fixed a real bug: agent wrote a "今天 easy run" to 2026-05-14 with no date anchor. | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
 | v7 | 2026-05-13 | Codex P2: explicit list of which Garmin per-run interpretive labels are filtered at the MCP boundary (`aerobicTrainingEffect`, `anaerobicTrainingEffect`, `activityTrainingLoad`, `trainingEffectLabel`, `aerobicTrainingEffectMessage`) AND which long-term baselines are NOT (`vo2max_running`, `lactate_threshold_hr`, `lactate_threshold_pace`). Replaced v6's vague "you won't see them". | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
 | v6 | 2026-05-13 | Removed the "SILENTLY IGNORE…" block + forbidden-field bullet list — those fields are now filtered at the MCP data layer (see §4.2), so prompt rules aren't load-bearing. Renamed `hr_zones` → `medium_term_hr_effort_map` in the prompt to match the projected key. | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
@@ -491,14 +493,15 @@ review their data policy before enabling with sensitive data. The API
 key is env-only (never in a tracked file). The `/api/admin/observability`
 endpoint returns project + endpoint but never the key.
 
-#### 3.4.5 Planned — athlete profile (A) + cycle config (B) capture
+#### 3.4.5 Athlete profile (A) + cycle config (B) capture
 
-> **Status: PR-1 (backend) built; PR-2 (agent/prompt) pending.** The CME
-> layer below — taxonomy, `record_coach_fact`, read helpers, hard coverage —
-> ships in `backend/coach_intake.py` + `cognitive_memory_engine.py`; the
-> agent doesn't call it yet (no behavior change until PR-2). Everything in
-> §3.4.1–3.4.4 is the *continuous* stream (C) — the eyes. This is the missing
-> *intake*: the enrollment form (A) and this cycle's battle plan (B).
+> **Status: built (PR-1 backend + PR-2 agent/prompt).** The CME layer
+> (`backend/coach_intake.py` + `cognitive_memory_engine.py`) AND the agent
+> wiring (3 MCP tools + `get_topic_episodes`, the intake prompt block at
+> `PROMPT_VERSION` v9, the make_plan / review_workout prefetch) are both
+> shipped. Everything in §3.4.1–3.4.4 is the *continuous* stream (C) — the
+> eyes. This is the *intake*: the enrollment form (A) and this cycle's battle
+> plan (B).
 
 ##### Why
 
@@ -656,18 +659,21 @@ The agent gains an explicit loop:
    - `starting_volume`: ✅ "40 mi/wk, 5 runs, longest 16 mi, stable 8 mo" /
      ❌ "跑得还行"
 3. **Follow up** — a missing or vague *required* area → ask **one**
-   targeted question before planning, and `record_coach_fact` the answer
-   eagerly. Non-critical gaps → don't block; the area stays in `gaps` and
-   re-surfaces next time coverage is read. A gap with `pending_count > 0` was
-   already answered but parked (ambiguous match) — nudge the user to resolve
-   the parked decision, don't re-ask the question.
+   targeted question and **stop** (output only the question; don't plan this
+   turn). `record_coach_fact` the answer only *after* the user replies on a
+   later turn — **never** record an answer they haven't given (a single ReAct
+   turn can't ask-and-answer; fabricating the reply would write a hallucinated
+   fact into the CME). Non-critical gaps → don't block; the area stays in
+   `gaps` and re-surfaces next time coverage is read. A gap with
+   `pending_count > 0` was already answered but parked (ambiguous match) —
+   nudge the user to resolve the parked decision, don't re-ask the question.
 
 The exemplars are NOT hand-written into the system prompt — they live
 per-slot in `backend/coach_intake.py` and this whole block is produced by
-`render_intake_prompt_section()` (built in PR-1, dormant). PR-2 splices that
-output into `_SYSTEM_PROMPT` and bumps `PROMPT_VERSION` v8 → v9. Consequence:
-once wired, **editing a slot's exemplar is a prompt edit** and falls under
-the §3.4.3 contract (bump the version + add a changelog row).
+`render_intake_prompt_section()`, spliced into `_SYSTEM_PROMPT` at
+`PROMPT_VERSION` v9. Consequence: **editing a slot's exemplar is a prompt
+edit** and falls under the §3.4.3 contract (bump the version + add a
+changelog row).
 
 The guideline is deliberately tight: tell the agent exactly when to ask
 (required + missing/vague) and when *not* to (covered, or non-critical —
@@ -688,11 +694,14 @@ park it), so it neither plans on air nor interrogates the user.
   `get_cycle_config` (pure-SQL hard coverage), the parked-episode link in
   `resolve_topic_decision`, and `tests/test_cme_coach_facts.py`. Doesn't
   touch the agent.
-- **PR-2 (behavior change)** — the 3 MCP tools (`record_coach_fact`,
-  `get_coach_profile`, `get_cycle_config` + `get_topic_episodes` if not
-  already exposed), the prompt section, `PROMPT_VERSION` v8 → v9 (+
-  changelog row), prefetch wiring (`make_plan` prefetch reads profile +
-  cycle config), tests. The prompt half lands for review before merge.
+- **PR-2 (behavior change) — ✅ built.** 4 MCP tools (`record_coach_fact`,
+  `get_coach_profile`, `get_cycle_config`, `get_topic_episodes`) over 4 new
+  `/api/memory/*` endpoints; the intake prompt block spliced into
+  `_SYSTEM_PROMPT` via `render_intake_prompt_section()` at `PROMPT_VERSION`
+  v9 (+ changelog row); prefetch wiring (`make_plan` reads coach-profile +
+  cycle-config, `review_workout` reads coach-profile) + a make_plan
+  instruction bullet; tests in `test_personal_coach_mcp.py`,
+  `test_api_server_behavior.py`, `test_agentic_coach_basics.py`.
 
 ---
 
@@ -782,7 +791,7 @@ Backend is now a `backend/` package (was a flat top-level dump);
 - **Athlete profile (A) + cycle config (B) capture** — the next
   high-leverage build: A/B intake into the CME so the agent has an
   enrollment form + campaign map, not just the continuous (C) eyes. Full
-  spec in [§3.4.5](#345-planned--athlete-profile-a--cycle-config-b-capture).
+  spec in [§3.4.5](#345-athlete-profile-a--cycle-config-b-capture).
   Recommended PR-1 (backend) + PR-2 (agent/prompt) split.
 - **§6 advice trail** — what the coach said, did the user accept it,
   what happened. ~2–3 days.

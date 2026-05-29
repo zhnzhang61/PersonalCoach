@@ -283,6 +283,23 @@ def _build_memory_engine_mock() -> MagicMock:
     # PR P5 — external context events (§4).
     m.list_external_events.return_value = []
     m.delete_episode.return_value = True
+    # §3.4.5 — coach intake (profile A + cycle config B). JSON-serializable
+    # defaults so the endpoint smoke test (no-500 backstop) doesn't choke on
+    # a bare MagicMock that FastAPI can't serialize. Behavior tests still set
+    # their own return_value per-test.
+    m.get_coach_profile.return_value = {
+        "areas": [], "gaps": [], "filled_count": 0,
+        "pending_count": 0, "total": 0,
+    }
+    m.get_cycle_config.return_value = {
+        "areas": [], "gaps": [], "filled_count": 0,
+        "pending_count": 0, "total": 0,
+    }
+    m.record_coach_fact.return_value = {
+        "action": "created", "topic_id": "tpc_mock",
+        "episode_id": "epi_mock", "score": 0.0,
+    }
+    m.get_topic_episodes.return_value = []
     return m
 
 

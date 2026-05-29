@@ -57,6 +57,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 # llm_provider is the ONLY module allowed to construct LangChain models.
+from backend.coach_intake import render_intake_prompt_section
 from backend.llm_provider import (
     _get_llm,  # private to other modules; in-project use is fine
     call_llm,
@@ -73,7 +74,7 @@ from backend.trace_logger import TraceLogger, prompt_hash as _prompt_hash
 # that ran" (e.g., uncommitted edit).
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION = "v8"
+PROMPT_VERSION = "v9"
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +219,13 @@ tools. Call additional tools only for what's missing.
   Good: "右膝外侧下坡刺痛处于观察期"
 """
 
+# Append the athlete-profile (A) + cycle-config (B) intake block, rendered
+# from coach_intake's slots so the good/vague standard lives in exactly one
+# place (PROJECT_GUIDE §3.4.5). This block is LLM-visible and covered by the
+# prompt_hash, so editing a slot's exemplar in coach_intake.py is a prompt
+# edit → bump PROMPT_VERSION + add a §3.4.3 changelog row.
+_SYSTEM_PROMPT += "\n\n" + render_intake_prompt_section()
+
 
 # ---------------------------------------------------------------------------
 # Default-action prompt fragments — appended after the JSON pre-fetch block.
@@ -281,6 +289,17 @@ HR 144".
 _MAKE_PLAN_INSTRUCTIONS = """### TASK: Propose the next 3-5 sessions
 
 Use:
+- Athlete profile (A) + cycle config (B) — prefetched above as
+  `get_coach_profile` / `get_cycle_config`. Before planning, check the
+  REQUIRED areas are filled AND specific enough (esp. `Cycle.goal`,
+  `Cycle.starting_volume`, `Cycle.weekly_availability`,
+  `Cycle.blackout_dates`). If a required area is a gap or too vague, ask
+  ONE targeted follow-up and **STOP** — output only the question, do NOT
+  produce a plan this turn. `record_coach_fact` the answer only AFTER the
+  user replies (a later turn); NEVER `record_coach_fact` an answer the user
+  hasn't given (don't imagine their reply). A gap with `pending_count > 0`
+  was already answered but parked; nudge the user to resolve it instead of
+  re-asking.
 - The user's cycle phase (`current_block.phase`) and weeks remaining.
 - ACWR band — push if sweet, hold if caution, taper if danger.
 - Today's readiness score.
@@ -399,6 +418,7 @@ def _prefetch_review_workout(
 ) -> list[tuple[str, dict]]:
     plan: list[tuple[str, dict]] = [
         ("get_athlete_profile", {}),
+        ("get_coach_profile", {}),
         ("get_run_detail", {"activity_id": activity_id}),
         ("get_run_telemetry", {"activity_id": activity_id, "downsample_sec": 30}),
     ]
@@ -413,6 +433,11 @@ def _prefetch_make_plan() -> list[tuple[str, dict]]:
     horizon_end = (date.today() + timedelta(days=14)).isoformat()
     return [
         ("get_athlete_profile", {}),
+        # Athlete profile (A) + cycle config (B) — §3.4.5. make_plan MUST
+        # read both: can't safely ramp without starting_volume, can't
+        # schedule around blackout_dates it doesn't have.
+        ("get_coach_profile", {}),
+        ("get_cycle_config", {}),
         ("get_readiness", {}),
         ("get_training_load", {"window_days": 28}),
         ("list_blocks", {}),
