@@ -783,6 +783,20 @@ Backend is now a `backend/` package (was a flat top-level dump);
 - **Non-running activity visibility** (swim/bike on Activity tab) — UI
   bug, not AI. `/api/runs` filters `"running" in typeKey`, so synced
   swims/bikes fall through both it and `/api/manual-activities`.
+- **Agent-tool consumption backstop** — three orphan-stream failures in a
+  row, same shape (data layer / tool built, agent never consumes it):
+  [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) (no date
+  anchor), [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) (A/B
+  intake), [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96)
+  (daily check-in tool existed since #83 but no prefetch ever included
+  it). No invariant catches "tool exists but no `_prefetch_*` references
+  it AND `_SYSTEM_PROMPT` doesn't name it." Proposed test: every
+  `@mcp.tool()` either (a) appears in some `_prefetch_*` plan OR (b) is
+  named in `_SYSTEM_PROMPT` (i.e. the agent has at least one path to
+  discover it), with a small explicit allowlist for tools that are
+  intentionally on-demand-only and not appropriate for either. ~½ day to
+  write the test + iterate the allowlist; cheap insurance against a
+  fourth instance of the same shape.
 
 (*Sync gap-resilience + stub detection shipped in #77 — `_is_stub` in
 `garmin_sync.py` + `days_back` bumped 5→30 — so it's no longer a gap.*)

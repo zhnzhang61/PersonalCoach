@@ -695,6 +695,17 @@ consolidate_memory_background 的轨迹"（CME 提案管道现在记 `topic_deci
 - **非跑步活动可见性**（Activity tab 上的游泳/骑行）— UI bug，不是 AI。
   `/api/runs` 过滤 `"running" in typeKey`，所以同步进来的游泳/骑行从它和
   `/api/manual-activities` 两边都漏掉。
+- **Agent 工具消费兜底** — 三次同形状的"孤儿流"失败：
+  [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84)（agent 没有
+  日期锚）、[#95](https://github.com/zhnzhang61/PersonalCoach/pull/95)
+  （A/B intake 工具有但 agent 不读）、
+  [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96)（每日 check-in
+  工具 #83 就建了但 agent 从来不消费）。没有 invariant 拦"工具上线了但
+  `_prefetch_*` 不引、`_SYSTEM_PROMPT` 不提"。提议一个测试：每个
+  `@mcp.tool()` 要么出现在某个 `_prefetch_*` plan，要么在 `_SYSTEM_PROMPT`
+  里被点名（agent 至少有一条发现路径）；少量真正只 on-demand 调的工具用
+  allowlist 显式标。约半天就能写好 + 调 allowlist；当作防第四次撞同一个
+  shape 的便宜保险。
 
 （*同步 gap 韧性 + stub 检测已在 #77 上线——`garmin_sync.py` 里的
 `_is_stub` + `days_back` 从 5 调到 30——所以不再是缺口。*）
