@@ -97,7 +97,7 @@ graph TB
 ```
 
 **状态：** coach-brain 路线图 Phase 0 → Phase 3 全部完成。四个输入流全部
-就绪；模型库里有 5 个统计模型；后端 763 个测试通过。路线图细节见
+就绪；模型库里有 5 个统计模型；后端 768 个测试通过。路线图细节见
 [§3.4.1](#341-coach-brain--记忆模型四个输入流)，剩余工作见 [§4](#4-工程债)。
 
 ---
@@ -352,7 +352,7 @@ context 注入。
 
 #### 3.4.3 Prompt 版本管理
 
-`agentic_coach.py` 里的 `PROMPT_VERSION` 常量（当前 **v9**）。system
+`agentic_coach.py` 里的 `PROMPT_VERSION` 常量（当前 **v10**）。system
 prompt 每轮由 `_build_prompt(state)` 构建——它在静态人设前面前置今天的日期
 （tz-aware，认 `PERSONAL_COACH_TZ`），这样 agent 不会把训练排到过去。
 trace 的 `prompt_hash` 算的是
@@ -367,10 +367,10 @@ trace 的 `prompt_hash` 算的是
 
 **按版本读 trace：**
 ```bash
-# 今天所有 v9 的轮次
-jq -c 'select(.prompt_version == "v9")' data/traces/$(date +%F).jsonl
+# 今天所有 v10 的轮次
+jq -c 'select(.prompt_version == "v10")' data/traces/$(date +%F).jsonl
 # 漂移检查——版本号 vs 实际内容 hash
-jq -c 'select(.prompt_version == "v9" and .prompt_hash != "<current>")' \
+jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
   data/traces/$(date +%F).jsonl
 ```
 权威 hash 在 AgenticCoach init 时打日志（grep startup 输出）。
@@ -379,6 +379,7 @@ jq -c 'select(.prompt_version == "v9" and .prompt_hash != "<current>")' \
 
 | 版本 | 日期 | 改了什么 | PR |
 |---|---|---|---|
+| **v10** | 2026-05-29 | 把每日 check-in（P3 perceived 流）接进 agent。`_prefetch_review_health` / `_prefetch_review_workout` / `_prefetch_make_plan` 都加了 `get_recent_checkins(days=7)`。`_SYSTEM_PROMPT` 的 perceived 段把每日 check-in 列为第三个用户自填层（4 个 0-5 滑块 + notes），并钉死**别重复问**的规矩：问"今天感觉如何"之前**先读** `get_recent_checkins`；今天已经填了就直接引用滑块值、别重复问；只有滑块覆盖不到或今天确实没填时才追问。修了 P3 时的孤儿——`get_recent_checkins` 工具 #83 就建好了，但教练从来没消费过它，所以一直在重复问用户已经填过的东西。 | [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96) |
 | **v9** | 2026-05-29 | 把运动员档案（A）+ 周期配置（B）的 intake 段追加进 `_SYSTEM_PROMPT`，由 `coach_intake` 的 slot 经 `render_intake_prompt_section()` 渲染（每个 area 带 good/vague 标准）。指令：读 `get_coach_profile`/`get_cycle_config`，判断必需 + 够不够具体，缺/含糊的必需 area → **只问一个然后停下**（用户下一轮回答后再 `record_coach_fact`，绝不脑补），别重复问 `pending_count>0` 的 gap。`make_plan` 也加了一条指令。以后改 `coach_intake.py` 里的 slot 范例也触发这条契约。 | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | 在 `_SYSTEM_PROMPT` 前加每轮渲染的日期 header（`_HEADER_TEMPLATE`）。前置 "Today is YYYY-MM-DD (Weekday)" + 中英文相对时间指令（`今天 / 明天 / 后天 / 这周`）+ "绝不把训练排到过去"。今天用 `datetime.now(_user_tz()).date()`（认 `PERSONAL_COACH_TZ`，否则进程本地 tz）。hash 改为覆盖 wrapper + 人设（用 sentinel date）。修了一个真 bug：agent 把"今天 easy run"排到了 2026-05-14，因为它没有日期锚点。 | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
 | v7 | 2026-05-13 | Codex P2：明确列出哪些 Garmin 单跑解读性标签在 MCP 边界被过滤（`aerobicTrainingEffect`、`anaerobicTrainingEffect`、`activityTrainingLoad`、`trainingEffectLabel`、`aerobicTrainingEffectMessage`），以及哪些长期 baseline 不过滤（`vo2max_running`、`lactate_threshold_hr`、`lactate_threshold_pace`）。取代 v6 含糊的"你看不到它们"。 | [#68](https://github.com/zhnzhang61/PersonalCoach/pull/68) |
@@ -694,6 +695,17 @@ consolidate_memory_background 的轨迹"（CME 提案管道现在记 `topic_deci
 - **非跑步活动可见性**（Activity tab 上的游泳/骑行）— UI bug，不是 AI。
   `/api/runs` 过滤 `"running" in typeKey`，所以同步进来的游泳/骑行从它和
   `/api/manual-activities` 两边都漏掉。
+- **Agent 工具消费兜底** — 三次同形状的"孤儿流"失败：
+  [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84)（agent 没有
+  日期锚）、[#95](https://github.com/zhnzhang61/PersonalCoach/pull/95)
+  （A/B intake 工具有但 agent 不读）、
+  [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96)（每日 check-in
+  工具 #83 就建了但 agent 从来不消费）。没有 invariant 拦"工具上线了但
+  `_prefetch_*` 不引、`_SYSTEM_PROMPT` 不提"。提议一个测试：每个
+  `@mcp.tool()` 要么出现在某个 `_prefetch_*` plan，要么在 `_SYSTEM_PROMPT`
+  里被点名（agent 至少有一条发现路径）；少量真正只 on-demand 调的工具用
+  allowlist 显式标。约半天就能写好 + 调 allowlist；当作防第四次撞同一个
+  shape 的便宜保险。
 
 （*同步 gap 韧性 + stub 检测已在 #77 上线——`garmin_sync.py` 里的
 `_is_stub` + `days_back` 从 5 调到 30——所以不再是缺口。*）

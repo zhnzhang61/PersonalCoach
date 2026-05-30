@@ -207,10 +207,12 @@ class TestCoachIntakeWiring:
     """§3.4.5 PR-2: the intake block is spliced into the persona, the
     version is bumped, and the prefetch plans read the A/B coverage."""
 
-    def test_prompt_version_bumped_to_v9(self):
+    def test_prompt_version_is_v10(self):
         from backend.agentic_coach import PROMPT_VERSION
 
-        assert PROMPT_VERSION == "v9"
+        # v9 wired the A/B intake (#95); v10 wired the daily check-in
+        # (this PR) — both behavior changes, so each bump is its own row.
+        assert PROMPT_VERSION == "v10"
 
     def test_system_prompt_contains_intake_block(self):
         from backend.agentic_coach import _SYSTEM_PROMPT
@@ -258,3 +260,46 @@ class TestCoachIntakeWiring:
             today_iso="0000-00-00", weekday="Sentinel"
         )
         assert coach._prompt_hash != prompt_hash(header + "\n\n" + base)
+
+
+class TestDailyCheckinWiring:
+    """v10: the daily check-in (P3 perceived stream) is now consumed by the
+    agent — prefetched on review_workout / make_plan / review_health, and
+    the prompt instructs reading it before asking "today how do you feel"."""
+
+    def test_prompt_describes_daily_checkin_stream(self):
+        from backend.agentic_coach import _SYSTEM_PROMPT
+
+        # the tool name + the 4 slider field names + the anti-re-ask rule
+        assert "get_recent_checkins" in _SYSTEM_PROMPT
+        for slider in ("sleep_quality", "soreness", "mood", "motivation"):
+            assert slider in _SYSTEM_PROMPT
+        # the "don't re-ask the high-level question" rule, in either language
+        assert "今天感觉如何" in _SYSTEM_PROMPT
+
+    def test_prompt_pairs_checkin_with_readiness(self):
+        """The check-in is SUBJECTIVE; readiness is OBJECTIVE; the prompt
+        must not collapse them into one (feedback_perceived_vs_intent)."""
+        from backend.agentic_coach import _SYSTEM_PROMPT
+
+        # both names appear in the perceived section
+        assert "get_readiness" in _SYSTEM_PROMPT
+        assert "SUBJECTIVE" in _SYSTEM_PROMPT and "OBJECTIVE" in _SYSTEM_PROMPT
+
+    def test_review_health_prefetch_includes_checkin(self):
+        from backend.agentic_coach import _prefetch_review_health
+
+        plan = _prefetch_review_health()
+        assert ("get_recent_checkins", {"days": 7}) in plan
+
+    def test_make_plan_prefetch_includes_checkin(self):
+        from backend.agentic_coach import _prefetch_make_plan
+
+        plan = _prefetch_make_plan()
+        assert ("get_recent_checkins", {"days": 7}) in plan
+
+    def test_review_workout_prefetch_includes_checkin(self):
+        from backend.agentic_coach import _prefetch_review_workout
+
+        plan = _prefetch_review_workout(123, "2026-05-29")
+        assert ("get_recent_checkins", {"days": 7}) in plan
