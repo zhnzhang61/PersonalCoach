@@ -314,20 +314,25 @@ export function CoachThread() {
       (r) => r.error,
     );
     if (name === "review_health") {
-      if (result?.answer) {
-        const sentence = extractFirstSentence(result.answer);
-        if (sentence) {
-          setTodaysRead({
-            status: "ready",
-            text: sentence,
-            thread_id: tid,
-          });
-        }
+      // Three outcomes to handle without ever leaving pending stuck:
+      //   1. answer + extractable sentence → write ready
+      //   2. answer but extractFirstSentence returned "" (degenerate
+      //      markdown-only / attribution-only turn) → clear; same
+      //      observable failure as no-answer from the Health-tab side
+      //   3. no result / error from callWithRetry → clear; user sees
+      //      the error in the Coach pill toast and can re-trigger
+      // Folding cases 2 and 3 into a single "no usable headline" clear
+      // keeps the spinner from sticking forever on the Health tab.
+      const sentence = result?.answer
+        ? extractFirstSentence(result.answer)
+        : "";
+      if (sentence) {
+        setTodaysRead({
+          status: "ready",
+          text: sentence,
+          thread_id: tid,
+        });
       } else {
-        // Call errored or retry exhausted. Drop the pending marker we
-        // wrote on click so the Health-tab Today's Read doesn't spin
-        // forever — the user already sees the failure in the Coach pill
-        // toast and can re-trigger from either tab.
         clearTodaysRead();
       }
     }
