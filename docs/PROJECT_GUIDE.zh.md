@@ -97,7 +97,7 @@ graph TB
 ```
 
 **状态：** coach-brain 路线图 Phase 0 → Phase 3 全部完成。四个输入流全部
-就绪；模型库里有 5 个统计模型；后端 768 个测试通过。路线图细节见
+就绪；模型库里有 5 个统计模型；后端 781 个测试通过。路线图细节见
 [§3.4.1](#341-coach-brain--记忆模型四个输入流)，剩余工作见 [§4](#4-工程债)。
 
 ---
@@ -392,9 +392,19 @@ jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
 
 - **本地 JSONL**（`trace_logger.py`）— 每轮一行写到
   `data/traces/YYYY-MM-DD.jsonl`：turn_id、prompt_version、prompt_hash、
-  user_input、final_answer、duration_ms、error。权威审计日志，不离开本机。
-  tracing 永不向调用方抛异常。**抓不到 per-tool 调用和 token 数**——这是
-  LangSmith 补的缺口。
+  user_input、final_answer、duration_ms、error，**`tool_calls`**。每条：
+  `{name, args, result|error, duration_ms?, prefetched?}`，args + result
+  默认截断到 500 字符（过 `truncate_for_trace`）。`duration_ms` 是**单次**
+  调用语义：ReAct 循环里的工具由 `ToolCallCaptureHandler`（挂在所有
+  `ainvoke` / `astream_events` 上的 LangChain callback）逐个 perf_counter
+  实测；prefetch 的工具（`_action_turn` 并行 fan-out）**没有** `duration_ms`
+  ——单个 MCP 调用不发 LangChain callback，per-call 时间没测。批次总耗时
+  另外用一条保留名汇总行 append 在后面：
+  `{name: "_prefetch_batch", prefetched: true, tool_count, duration_ms}`。
+  这样 `jq 'map(.duration_ms // empty) | add'` 给出的就是诚实的「这一轮在
+  工具上花了多久」，不会因为 prefetch 摊到每条而 N 倍重算。权威审计日志，
+  不离开本机；tracing 永不向调用方抛异常。**抓不到** per-token 流式细节
+  和完整 LLM 中间消息——那是 LangSmith 那层的活。
 - **LangSmith**（`langsmith_setup.py`，可选）— 设了 env var 后，langchain
   自动 instrument 完整的 tool-call + LLM 树（per-tool 输入输出、token 数、
   延迟、跨 prompt 版本 diff）。`GET /api/admin/observability` 报告状态

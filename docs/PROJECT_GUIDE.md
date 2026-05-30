@@ -102,7 +102,7 @@ graph TB
 
 **Status:** Phase 0 → Phase 3 of the coach-brain roadmap complete. All
 four agent input streams live; 5 stat-derived models in the store;
-768 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
+781 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
 for the roadmap detail and [§4](#4-engineering-debt) for what's left.
 
 ---
@@ -432,10 +432,23 @@ Two layers:
 
 - **Local JSONL** (`trace_logger.py`) — one row per turn to
   `data/traces/YYYY-MM-DD.jsonl`: turn_id, prompt_version, prompt_hash,
-  user_input, final_answer, duration_ms, error. Source-of-truth audit
-  log, never leaves the machine. Tracing never raises into the caller.
-  Does NOT capture per-tool calls or token counts — that's the gap
-  LangSmith fills.
+  user_input, final_answer, duration_ms, error, **`tool_calls`**. Per
+  entry: `{name, args, result|error, duration_ms?, prefetched?}` — args
+  + result truncated to 500 chars each via `truncate_for_trace`.
+  `duration_ms` is a **single-call** invariant: present on ReAct-loop
+  entries (captured by `ToolCallCaptureHandler`, a LangChain callback
+  attached to every `ainvoke` / `astream_events` call); **absent** on
+  prefetched per-tool entries — individual MCP calls in the parallel
+  `_action_turn` fan-out don't fire LangChain callbacks, so per-tool
+  timing isn't measured. Instead the fan-out total lands in one
+  reserved-name summary row appended after the batch:
+  `{name: "_prefetch_batch", prefetched: true, tool_count, duration_ms}`.
+  So `jq 'map(.duration_ms // empty) | add'` over `tool_calls` gives an
+  honest "time spent in tools this turn" without N×-overcounting
+  prefetch. Source-of-truth audit log, never leaves the machine;
+  tracing never raises into the caller. Doesn't capture per-token LLM
+  streaming or full LLM intermediate messages — that's still the
+  LangSmith layer's job when you want it.
 - **LangSmith** (`langsmith_setup.py`, opt-in) — when env vars are
   set, langchain auto-instruments the full tool-call + LLM tree
   (per-tool inputs/outputs, token counts, latency, cross-prompt-version

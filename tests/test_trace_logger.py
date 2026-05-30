@@ -245,3 +245,141 @@ class TestTurnContextManager:
                 user_input="hi",
             ):
                 pass  # if write's try/except is wrong, OSError leaks here
+
+
+# ---------------------------------------------------------------------------
+# truncate_for_trace + ToolCallCaptureHandler + tool_calls field
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateForTrace:
+    def test_short_passes_through(self):
+        from backend.trace_logger import truncate_for_trace
+        assert truncate_for_trace("hi", 10) == "hi"
+
+    def test_at_limit_passes(self):
+        from backend.trace_logger import truncate_for_trace
+        assert truncate_for_trace("x" * 10, 10) == "x" * 10
+
+    def test_over_limit_gets_suffix(self):
+        from backend.trace_logger import truncate_for_trace
+        out = truncate_for_trace("x" * 25, 10)
+        assert out.startswith("x" * 10)
+        assert "+15 more" in out  # 25 - 10 = 15 dropped
+
+    def test_none_becomes_empty(self):
+        from backend.trace_logger import truncate_for_trace
+        assert truncate_for_trace(None, 10) == ""
+
+    def test_non_string_is_stringified(self):
+        from backend.trace_logger import truncate_for_trace
+        assert truncate_for_trace({"a": 1}, 100) == "{'a': 1}"
+
+
+class TestToolCallCaptureHandler:
+    def _make(self, **overrides):
+        import uuid
+        from backend.trace_logger import ToolCallCaptureHandler
+        sink: list[dict] = []
+        h = ToolCallCaptureHandler(sink, **overrides)
+        return sink, h, uuid.uuid4()
+
+    def test_start_then_end_records_one_entry(self):
+        sink, h, rid = self._make()
+        h.on_tool_start({"name": "get_readiness"}, '{"date":"2026-05-29"}', run_id=rid)
+        # inflight before end, sink empty
+        assert sink == []
+        h.on_tool_end({"score": 75}, run_id=rid)
+        assert len(sink) == 1
+        e = sink[0]
+        assert e["name"] == "get_readiness"
+        assert e["args"] == '{"date":"2026-05-29"}'
+        assert "score" in e["result"]
+        assert "duration_ms" in e and e["duration_ms"] >= 0
+
+    def test_end_without_matching_start_is_noop(self):
+        """Defensive: a stray on_tool_end (e.g. handler attached
+        mid-stream) must not append a half-empty row or KeyError."""
+        import uuid
+        sink, h, _ = self._make()
+        h.on_tool_end("late", run_id=uuid.uuid4())
+        assert sink == []
+
+    def test_error_records_error_not_result(self):
+        sink, h, rid = self._make()
+        h.on_tool_start({"name": "get_run_detail"}, '{"activity_id":1}', run_id=rid)
+        h.on_tool_error(RuntimeError("404"), run_id=rid)
+        assert len(sink) == 1
+        assert "error" in sink[0]
+        assert "result" not in sink[0]
+        assert "404" in sink[0]["error"]
+
+    def test_serialized_none_falls_back_to_unknown(self):
+        sink, h, rid = self._make()
+        h.on_tool_start(None, "x", run_id=rid)
+        h.on_tool_end("y", run_id=rid)
+        assert sink[0]["name"] == "unknown"
+
+    def test_args_and_result_get_truncated(self):
+        sink, h, rid = self._make(args_trunc=5, result_trunc=5)
+        h.on_tool_start({"name": "telemetry"}, "x" * 20, run_id=rid)
+        h.on_tool_end("y" * 20, run_id=rid)
+        assert "+15 more" in sink[0]["args"]
+        assert "+15 more" in sink[0]["result"]
+
+    def test_concurrent_runs_correlated_by_run_id(self):
+        """Two tools in flight at the same time — common when prefetch
+        fans out or the model emits parallel tool calls. The handler
+        must correlate end→start by run_id, not by order."""
+        import uuid
+        from backend.trace_logger import ToolCallCaptureHandler
+        sink: list[dict] = []
+        h = ToolCallCaptureHandler(sink)
+        rid_a = uuid.uuid4()
+        rid_b = uuid.uuid4()
+        h.on_tool_start({"name": "A"}, "a-args", run_id=rid_a)
+        h.on_tool_start({"name": "B"}, "b-args", run_id=rid_b)
+        # B ends first (parallel order)
+        h.on_tool_end("b-result", run_id=rid_b)
+        h.on_tool_end("a-result", run_id=rid_a)
+        by_name = {e["name"]: e for e in sink}
+        assert by_name["A"]["args"] == "a-args"
+        assert by_name["A"]["result"] == "a-result"
+        assert by_name["B"]["args"] == "b-args"
+        assert by_name["B"]["result"] == "b-result"
+
+
+class TestTraceToolCallsRoundTrip:
+    def test_tool_calls_default_empty(self):
+        from backend.trace_logger import Trace
+        t = Trace(
+            turn_id="x", thread_id="y", timestamp="z",
+            kind="chat", prompt_version="v10", prompt_hash="h",
+            user_input="",
+        )
+        assert t.tool_calls == []
+
+    def test_tool_calls_round_trip_through_jsonl(self, tmp_path):
+        """Writing a Trace with non-empty tool_calls and reading the
+        JSONL line back yields the same list — the schema add is real,
+        not just in-memory."""
+        import json
+        from backend.trace_logger import Trace, TraceLogger
+        tl = TraceLogger(root=tmp_path)
+        with tl.turn(
+            kind="chat", thread_id="t1",
+            prompt_version="v10", prompt_hash="h",
+            user_input="hi",
+        ) as trace:
+            trace.tool_calls.append({
+                "name": "get_recent_checkins",
+                "args": '{"days":7}',
+                "result": "[{...}]",
+                "duration_ms": 12.3,
+            })
+            trace.final_answer = "ok"
+        files = list(tmp_path.glob("*.jsonl"))
+        assert len(files) == 1
+        row = json.loads(files[0].read_text().strip())
+        assert row["tool_calls"][0]["name"] == "get_recent_checkins"
+        assert row["tool_calls"][0]["duration_ms"] == 12.3
