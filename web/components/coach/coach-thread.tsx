@@ -347,13 +347,63 @@ export function CoachThread() {
     return () => clearTimeout(t);
   }, [archiveToast]);
 
-  // Scroll-to-bottom on message append OR on streaming progress.
-  // Watching `streamingTurn?.aiContent.length` keeps the view pinned
-  // to the latest tokens as they arrive — without this the user has
-  // to manually scroll while the agent is writing.
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Scroll the document to its true bottom. The thread is
+  // document-scrolled (no inner scroll container) and the chat input is
+  // a `sticky` element living at the END of the flow — so the document's
+  // real maximum scroll position is what puts the last message above the
+  // floating input + nav. We deliberately do NOT scroll a sentinel
+  // <div> placed before the input: that lands ~one-input-height short
+  // and leaves the tail of the last message hidden behind the input.
+  const scrollToBottom = (smooth: boolean) => {
+    const el = document.scrollingElement || document.documentElement;
+    window.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  // One-time landing at the bottom on first open of the Coach tab.
+  //
+  // The thread is document-scrolled and renders closed/archived
+  // sessions ABOVE the active one. Two things broke "open → see latest
+  // message" before this:
+  //   1. No active session (the common next-morning case: yesterday's
+  //      thread was archived, none reopened). currentId is null →
+  //      activeQuery disabled → activeMessages.length stays 0 forever,
+  //      so the smooth-follow effect below (keyed on that length) never
+  //      fired and the page sat at the top of the archive.
+  //   2. Active session present, but closedHistories resolve LATER than
+  //      the active thread and insert height above it — bumping a too-
+  //      early scroll off the bottom.
+  // So we wait until every query that contributes to scroll height has
+  // settled, then jump instantly (no smooth — we want to *start* at the
+  // bottom, not animate through the whole history on first paint).
+  // `isLoading` is false for a disabled query in react-query v5, so the
+  // active/closed guards pass immediately when those threads don't
+  // apply; the `closedHistories.data` backstop covers the single render
+  // where a freshly-enabled closed-histories query hasn't flipped
+  // isLoading→true yet.
+  const didInitialScroll = useRef(false);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (didInitialScroll.current || !hydrated) return;
+    if (sessionsQuery.isLoading) return;
+    if (activeQuery.isLoading || closedHistories.isLoading) return;
+    if (closedSessions.length > 0 && !closedHistories.data) return;
+    didInitialScroll.current = true;
+    scrollToBottom(false);
+  }, [
+    hydrated,
+    sessionsQuery.isLoading,
+    activeQuery.isLoading,
+    activeQuery.data,
+    closedHistories.isLoading,
+    closedHistories.data,
+    closedSessions.length,
+  ]);
+
+  // Smooth-follow on live activity: a new message appended, an action
+  // pending, or streaming tokens arriving. Gated on the initial landing
+  // so it doesn't fight (or smooth-animate) the first-open jump above.
+  useEffect(() => {
+    if (!didInitialScroll.current) return;
+    scrollToBottom(true);
   }, [activeMessages.length, pending, streamingTurn?.aiContent.length]);
 
   // Filter out tool/system messages from display — those are agent
@@ -504,8 +554,6 @@ export function CoachThread() {
             {errorMsg}
           </div>
         )}
-
-        <div ref={bottomRef} />
       </div>
 
       {/* Sticky input — bottom-anchored ABOVE the fixed BottomNav.
