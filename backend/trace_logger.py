@@ -244,7 +244,13 @@ def record_payload(
         # Content-addressed → idempotent. Same content across turns shares
         # one file (cheap dedup). Skip if already present.
         if not path.exists():
-            path.write_text(s, encoding="utf-8")
+            # Atomic via tempfile + rename: a partial write (disk fills
+            # mid-write, SIGKILL, OS crash) never leaves a corrupt file at
+            # the canonical sha path that the next pass would skip over
+            # via the existence check above. Cf. PR #98 review.
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(s, encoding="utf-8")
+            tmp.replace(path)
     except Exception:
         # Cache write failure is silent — same contract as TraceLogger.write.
         # The trace row is still useful (sha + len describe what was cut).
@@ -253,17 +259,23 @@ def record_payload(
 
 
 def load_payload(sha: str, *, root: str | Path | None = None) -> str | None:
-    """Read back a cached payload by sha. Returns None if the file is
-    missing (cache pruned, write originally failed, wrong sha) — callers
-    should treat absent payloads as "not recoverable" and fall back to the
-    truncated string in the trace row."""
+    """Read back a cached payload by sha and **sha-verify** the content
+    before returning it. Returns None if the file is missing OR if the
+    file's content hash doesn't match the requested sha (corruption,
+    pre-#98-atomic-write partial file, external tampering / accidental
+    edit, wrong sha). Without the verify step the cache could silently
+    serve wrong data — which would defeat the whole point of a
+    content-addressed store."""
     path = _payload_dir(root) / f"{sha}.txt"
     try:
-        return path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except Exception:
         return None
+    if payload_sha(content) != sha:
+        return None
+    return content
 
 
 class ToolCallCaptureHandler:

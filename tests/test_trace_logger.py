@@ -501,6 +501,61 @@ class TestLoadPayload:
         assert (tmp_path / "payloads" / f"{out['result_sha']}.txt").exists()
         assert load_payload(out["result_sha"]) == "k" * 1000
 
+    def test_corrupt_file_returns_none_via_sha_verify(self, tmp_path):
+        """PR #98 review: a content-addressed store MUST sha-verify on
+        read. Otherwise a corrupt file (partial write, accidental edit,
+        tampering) silently serves wrong content under the right name."""
+        from backend.trace_logger import load_payload, payload_sha
+        # write garbage to the file path for a sha that doesn't match
+        sha = payload_sha("real content")
+        payloads = tmp_path / "payloads"
+        payloads.mkdir()
+        (payloads / f"{sha}.txt").write_text("CORRUPTED garbage", encoding="utf-8")
+        # load_payload sees the content hash != sha → returns None, NOT
+        # the garbage string. The caller can fall back to the truncated
+        # preview in the trace row.
+        assert load_payload(sha, root=tmp_path) is None
+
+
+class TestAtomicCacheWrite:
+    """PR #98 review: a non-atomic write + the `if not path.exists()`
+    skip on the next pass means a partial file would become permanently
+    canonical for its sha. Using a tempfile + rename fixes that."""
+
+    def test_no_dangling_tmp_after_successful_write(self, tmp_path):
+        from backend.trace_logger import record_payload
+        out = record_payload("z" * 2000, 100, "result", root=tmp_path)
+        payloads = tmp_path / "payloads"
+        # canonical file present
+        assert (payloads / f"{out['result_sha']}.txt").exists()
+        # no leftover .tmp file
+        assert not list(payloads.glob("*.tmp"))
+
+    def test_idempotent_no_tmp_on_skip_path(self, tmp_path):
+        """Second call for the same content takes the `if not path.exists()`
+        skip — must NOT create a .tmp on the skip path."""
+        from backend.trace_logger import record_payload
+        record_payload("y" * 2000, 100, "result", root=tmp_path)
+        record_payload("y" * 2000, 100, "result", root=tmp_path)
+        assert not list((tmp_path / "payloads").glob("*.tmp"))
+
+    def test_rename_failure_keeps_canonical_path_unchanged(self, tmp_path, monkeypatch):
+        """If `replace()` fails after the tempfile is written, the
+        canonical sha file must NOT have been created — caller's idempotent
+        check will retry on the next pass. (Silent on the surface: the
+        trace row still gets sha + len.)"""
+        from backend.trace_logger import record_payload
+        # let the temp file write succeed, but make replace fail
+        original_replace = Path.replace
+        def boom(self, target):
+            raise OSError("rename failed")
+        monkeypatch.setattr(Path, "replace", boom)
+        out = record_payload("a" * 2000, 100, "result", root=tmp_path)
+        # caller still got sha + len
+        assert "result_sha" in out and out["result_len"] == 2000
+        # but the canonical path was never published
+        assert not (tmp_path / "payloads" / f"{out['result_sha']}.txt").exists()
+
 
 class TestPayloadShaStable:
     def test_same_input_same_sha(self):
