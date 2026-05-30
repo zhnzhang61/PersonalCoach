@@ -320,12 +320,26 @@ class TestToolCallCaptureHandler:
         h.on_tool_end("y", run_id=rid)
         assert sink[0]["name"] == "unknown"
 
-    def test_args_and_result_get_truncated(self):
-        sink, h, rid = self._make(args_trunc=5, result_trunc=5)
+    def test_args_and_result_get_truncated(self, tmp_path):
+        # truncated payload now also writes to the cache, so use a tmp
+        # root to keep the real data/traces/ pristine in tests.
+        sink, h, rid = self._make(
+            args_trunc=5, result_trunc=5, payload_root=tmp_path,
+        )
         h.on_tool_start({"name": "telemetry"}, "x" * 20, run_id=rid)
         h.on_tool_end("y" * 20, run_id=rid)
-        assert "+15 more" in sink[0]["args"]
-        assert "+15 more" in sink[0]["result"]
+        e = sink[0]
+        # truncated string still surfaces with the overflow suffix
+        assert "+15 more" in e["args"]
+        assert "+15 more" in e["result"]
+        # the new sha + len siblings appear so the full payload is
+        # recoverable from the cache without bloating the JSONL line
+        assert "args_sha" in e and "args_len" in e and e["args_len"] == 20
+        assert "result_sha" in e and "result_len" in e and e["result_len"] == 20
+        # and the cache files actually exist + round-trip
+        from backend.trace_logger import load_payload
+        assert load_payload(e["args_sha"], root=tmp_path) == "x" * 20
+        assert load_payload(e["result_sha"], root=tmp_path) == "y" * 20
 
     def test_concurrent_runs_correlated_by_run_id(self):
         """Two tools in flight at the same time — common when prefetch
@@ -383,3 +397,179 @@ class TestTraceToolCallsRoundTrip:
         row = json.loads(files[0].read_text().strip())
         assert row["tool_calls"][0]["name"] == "get_recent_checkins"
         assert row["tool_calls"][0]["duration_ms"] == 12.3
+
+
+# ---------------------------------------------------------------------------
+# record_payload / load_payload — sha-keyed overflow cache
+# ---------------------------------------------------------------------------
+
+
+class TestRecordPayload:
+    def test_small_returns_field_only(self, tmp_path):
+        from backend.trace_logger import record_payload
+        out = record_payload("hi", 10, "result", root=tmp_path)
+        assert out == {"result": "hi"}
+        # no cache file written (and the dir may or may not exist — both ok)
+        assert not any((tmp_path / "payloads").glob("*.txt")) if (tmp_path / "payloads").exists() else True
+
+    def test_at_limit_returns_field_only(self, tmp_path):
+        from backend.trace_logger import record_payload
+        out = record_payload("x" * 10, 10, "result", root=tmp_path)
+        assert out == {"result": "x" * 10}
+
+    def test_large_writes_cache_and_returns_sha(self, tmp_path):
+        from backend.trace_logger import record_payload
+        big = "abc" * 500   # 1500 chars
+        out = record_payload(big, 100, "result", root=tmp_path)
+        assert out["result"].startswith("abc")
+        assert "+1400 more" in out["result"]
+        assert out["result_len"] == 1500
+        # cache file exists at the expected path
+        cache = tmp_path / "payloads" / f"{out['result_sha']}.txt"
+        assert cache.exists()
+        assert cache.read_text() == big
+
+    def test_field_prefix_used_for_sha_and_len_keys(self, tmp_path):
+        """The field name determines the sibling keys — handler emits
+        `args` / `args_sha` / `args_len` for tool inputs, `result` /
+        `result_sha` / `result_len` for outputs. Without this routing,
+        a single trace row couldn't carry both overflow fields."""
+        from backend.trace_logger import record_payload
+        out = record_payload("x" * 50, 10, "args", root=tmp_path)
+        assert "args" in out and "args_sha" in out and "args_len" in out
+        assert "result" not in out
+
+    def test_idempotent_same_content_same_sha_one_file(self, tmp_path):
+        """Content-addressed → calling twice with the same payload
+        produces the same sha and only one cache file."""
+        from backend.trace_logger import record_payload
+        big = "y" * 1000
+        a = record_payload(big, 100, "result", root=tmp_path)
+        b = record_payload(big, 100, "result", root=tmp_path)
+        assert a["result_sha"] == b["result_sha"]
+        files = list((tmp_path / "payloads").glob("*.txt"))
+        assert len(files) == 1
+
+    def test_non_string_is_stringified_before_caching(self, tmp_path):
+        from backend.trace_logger import record_payload, load_payload
+        d = {"key": "value", "items": list(range(200))}
+        out = record_payload(d, 50, "result", root=tmp_path)
+        # truncated entry was based on str(dict)
+        loaded = load_payload(out["result_sha"], root=tmp_path)
+        assert loaded == str(d)
+
+    def test_none_yields_empty_string_no_cache(self, tmp_path):
+        from backend.trace_logger import record_payload
+        out = record_payload(None, 10, "result", root=tmp_path)
+        assert out == {"result": ""}
+
+    def test_cache_write_failure_is_silent(self, tmp_path, monkeypatch):
+        """If the cache write fails (disk full, permission, etc.) the
+        trace row still gets the sha + len — tracing must NEVER break a
+        turn."""
+        from backend.trace_logger import record_payload
+
+        def boom(self, *a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr("pathlib.Path.write_text", boom)
+        out = record_payload("z" * 1000, 100, "result", root=tmp_path)
+        # entry still has the metadata
+        assert "result_sha" in out and out["result_len"] == 1000
+        # but the file doesn't exist
+        assert not (tmp_path / "payloads" / f"{out['result_sha']}.txt").exists()
+
+
+class TestLoadPayload:
+    def test_round_trip(self, tmp_path):
+        from backend.trace_logger import record_payload, load_payload
+        out = record_payload("hello" * 200, 50, "result", root=tmp_path)
+        assert load_payload(out["result_sha"], root=tmp_path) == "hello" * 200
+
+    def test_missing_sha_returns_none(self, tmp_path):
+        from backend.trace_logger import load_payload
+        assert load_payload("nonexistent_sha", root=tmp_path) is None
+
+    def test_default_root_uses_traceloggerdefault(self, monkeypatch, tmp_path):
+        """When `root=None`, payload paths go to TraceLogger.DEFAULT_ROOT.
+        We can't easily test the default in prod (would pollute), but we
+        verify the lookup path uses it by patching DEFAULT_ROOT and round-
+        tripping a payload."""
+        from backend.trace_logger import TraceLogger, record_payload, load_payload
+        monkeypatch.setattr(TraceLogger, "DEFAULT_ROOT", tmp_path)
+        out = record_payload("k" * 1000, 100, "result")
+        # written under tmp_path/payloads
+        assert (tmp_path / "payloads" / f"{out['result_sha']}.txt").exists()
+        assert load_payload(out["result_sha"]) == "k" * 1000
+
+    def test_corrupt_file_returns_none_via_sha_verify(self, tmp_path):
+        """PR #98 review: a content-addressed store MUST sha-verify on
+        read. Otherwise a corrupt file (partial write, accidental edit,
+        tampering) silently serves wrong content under the right name."""
+        from backend.trace_logger import load_payload, payload_sha
+        # write garbage to the file path for a sha that doesn't match
+        sha = payload_sha("real content")
+        payloads = tmp_path / "payloads"
+        payloads.mkdir()
+        (payloads / f"{sha}.txt").write_text("CORRUPTED garbage", encoding="utf-8")
+        # load_payload sees the content hash != sha → returns None, NOT
+        # the garbage string. The caller can fall back to the truncated
+        # preview in the trace row.
+        assert load_payload(sha, root=tmp_path) is None
+
+
+class TestAtomicCacheWrite:
+    """PR #98 review: a non-atomic write + the `if not path.exists()`
+    skip on the next pass means a partial file would become permanently
+    canonical for its sha. Using a tempfile + rename fixes that."""
+
+    def test_no_dangling_tmp_after_successful_write(self, tmp_path):
+        from backend.trace_logger import record_payload
+        out = record_payload("z" * 2000, 100, "result", root=tmp_path)
+        payloads = tmp_path / "payloads"
+        # canonical file present
+        assert (payloads / f"{out['result_sha']}.txt").exists()
+        # no leftover .tmp file
+        assert not list(payloads.glob("*.tmp"))
+
+    def test_idempotent_no_tmp_on_skip_path(self, tmp_path):
+        """Second call for the same content takes the `if not path.exists()`
+        skip — must NOT create a .tmp on the skip path."""
+        from backend.trace_logger import record_payload
+        record_payload("y" * 2000, 100, "result", root=tmp_path)
+        record_payload("y" * 2000, 100, "result", root=tmp_path)
+        assert not list((tmp_path / "payloads").glob("*.tmp"))
+
+    def test_rename_failure_keeps_canonical_path_unchanged(self, tmp_path, monkeypatch):
+        """If `replace()` fails after the tempfile is written, the
+        canonical sha file must NOT have been created — caller's idempotent
+        check will retry on the next pass. (Silent on the surface: the
+        trace row still gets sha + len.)"""
+        from backend.trace_logger import record_payload
+        # let the temp file write succeed, but make replace fail
+        original_replace = Path.replace
+        def boom(self, target):
+            raise OSError("rename failed")
+        monkeypatch.setattr(Path, "replace", boom)
+        out = record_payload("a" * 2000, 100, "result", root=tmp_path)
+        # caller still got sha + len
+        assert "result_sha" in out and out["result_len"] == 2000
+        # but the canonical path was never published
+        assert not (tmp_path / "payloads" / f"{out['result_sha']}.txt").exists()
+
+
+class TestPayloadShaStable:
+    def test_same_input_same_sha(self):
+        from backend.trace_logger import payload_sha
+        assert payload_sha("hello") == payload_sha("hello")
+
+    def test_different_inputs_different_sha(self):
+        from backend.trace_logger import payload_sha
+        assert payload_sha("hello") != payload_sha("world")
+
+    def test_sha_format_short_hex(self):
+        """16 chars of hex — short enough to grep, wide enough to avoid
+        collisions across the lifetime of one user's trace cache."""
+        from backend.trace_logger import payload_sha
+        s = payload_sha("x")
+        assert len(s) == 16
+        assert all(c in "0123456789abcdef" for c in s)

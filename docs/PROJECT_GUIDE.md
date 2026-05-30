@@ -102,7 +102,7 @@ graph TB
 
 **Status:** Phase 0 → Phase 3 of the coach-brain roadmap complete. All
 four agent input streams live; 5 stat-derived models in the store;
-781 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
+799 backend tests passing. See [§3.4.1](#341-coach-brain--memory-models-input-streams)
 for the roadmap detail and [§4](#4-engineering-debt) for what's left.
 
 ---
@@ -434,7 +434,18 @@ Two layers:
   `data/traces/YYYY-MM-DD.jsonl`: turn_id, prompt_version, prompt_hash,
   user_input, final_answer, duration_ms, error, **`tool_calls`**. Per
   entry: `{name, args, result|error, duration_ms?, prefetched?}` — args
-  + result truncated to 500 chars each via `truncate_for_trace`.
+  + result truncated to 500 chars each by `record_payload`. **Overflow
+  cache:** when truncation happens, the full stringified payload is
+  written to `data/traces/payloads/<sha>.txt` (content-addressed, 16-hex
+  sha, idempotent — same content across turns shares one file) and the
+  entry gains `<field>_sha` + `<field>_len` siblings so a debugger can
+  recover the full value: `cat data/traces/payloads/<sha>.txt` or
+  `trace_logger.load_payload(sha)`. The 500-char inline preview keeps
+  trace lines greppable; the cache means truncation is no longer the
+  evidence-killer it was (see #98 — a "did the agent fabricate?" check
+  failed against a 2KB note that had been clipped to 500). Cache writes
+  are silent on failure; sha + len still surface so the reader knows
+  what was there even if the file is missing.
   `duration_ms` is a **single-call** invariant: present on ReAct-loop
   entries (captured by `ToolCallCaptureHandler`, a LangChain callback
   attached to every `ainvoke` / `astream_events` call); **absent** on
