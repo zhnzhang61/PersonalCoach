@@ -80,12 +80,16 @@ class TraceLogger:
     """
 
     DEFAULT_ROOT = Path("data/traces")
+    PAYLOAD_SUBDIR = "payloads"
     USER_INPUT_TRUNC = 500
     FINAL_ANSWER_TRUNC = 1000
     ERROR_TRUNC = 500
     # Per-tool-call truncation. Some tools return many KB (run telemetry,
     # route profile, big topic lists); keep the JSONL line lean so daily
-    # files stay greppable. Bump if a debug session needs more.
+    # files stay greppable. When a payload exceeds the limit, the full
+    # bytes go to a content-addressed file under
+    # `data/traces/<PAYLOAD_SUBDIR>/<sha>.txt` and the trace entry gains
+    # `<field>_sha` + `<field>_len` for lookup. See `record_payload`.
     TOOL_ARGS_TRUNC = 500
     TOOL_RESULT_TRUNC = 500
 
@@ -182,13 +186,84 @@ class TraceLogger:
 def truncate_for_trace(value: object, limit: int) -> str:
     """Stringify + truncate to fit a trace field. Suffix with `…(+N more)`
     when cut so a debugger can tell at a glance whether they're looking at
-    the full payload. Public — agentic_coach imports this to format
-    prefetched tool args/results consistently with what the callback
-    handler captures for ReAct-loop tools."""
+    the full payload. Primitive — most callers want `record_payload` instead,
+    which also caches the full payload to disk and emits a sha for lookup."""
     s = "" if value is None else str(value)
     if len(s) <= limit:
         return s
     return s[:limit] + f"…(+{len(s) - limit} more)"
+
+
+def payload_sha(s: str) -> str:
+    """16 hex chars of sha1 — the lookup key into the payload cache. 64-bit
+    collision space is comfortably more than the number of distinct tool
+    responses we'll ever store; short enough to grep / paste."""
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def _payload_dir(root: str | Path | None) -> Path:
+    base = Path(root) if root is not None else TraceLogger.DEFAULT_ROOT
+    return base / TraceLogger.PAYLOAD_SUBDIR
+
+
+def record_payload(
+    value: object,
+    limit: int,
+    field: str,
+    *,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Stringify + truncate `value` to `limit` chars and return a dict ready
+    to splat into a trace entry under `field` (e.g. `"result"`, `"args"`,
+    `"error"`):
+
+    * Under the limit → `{field: short_str}`. Single key, same shape as
+      before — readers that don't care about overflow are unaffected.
+    * Over the limit → `{field: <truncated>, f"{field}_sha": ..., f"{field}_len": ...}`,
+      and the FULL stringified payload is written to
+      `<root>/<PAYLOAD_SUBDIR>/<sha>.txt` (idempotent, silent on failure).
+
+    Recover the full payload with `load_payload(sha, root=...)` or, equivalently,
+    `cat data/traces/payloads/<sha>.txt`. The sha + len fields are useful even if
+    the cache file is missing — the reader still knows "this was truncated to N
+    chars, look it up if you cared."
+
+    Why splat-able dict instead of returning a tuple: callers (handler + agent)
+    use `entry.update(record_payload(...))`, which keeps construction flat and
+    makes the no-overflow case a single key.
+    """
+    s = "" if value is None else str(value)
+    if len(s) <= limit:
+        return {field: s}
+    short = s[:limit] + f"…(+{len(s) - limit} more)"
+    sha = payload_sha(s)
+    cache_dir = _payload_dir(root)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"{sha}.txt"
+        # Content-addressed → idempotent. Same content across turns shares
+        # one file (cheap dedup). Skip if already present.
+        if not path.exists():
+            path.write_text(s, encoding="utf-8")
+    except Exception:
+        # Cache write failure is silent — same contract as TraceLogger.write.
+        # The trace row is still useful (sha + len describe what was cut).
+        pass
+    return {field: short, f"{field}_sha": sha, f"{field}_len": len(s)}
+
+
+def load_payload(sha: str, *, root: str | Path | None = None) -> str | None:
+    """Read back a cached payload by sha. Returns None if the file is
+    missing (cache pruned, write originally failed, wrong sha) — callers
+    should treat absent payloads as "not recoverable" and fall back to the
+    truncated string in the trace row."""
+    path = _payload_dir(root) / f"{sha}.txt"
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
 
 
 class ToolCallCaptureHandler:
@@ -226,11 +301,16 @@ class ToolCallCaptureHandler:
         *,
         args_trunc: int = TraceLogger.TOOL_ARGS_TRUNC,
         result_trunc: int = TraceLogger.TOOL_RESULT_TRUNC,
+        payload_root: str | Path | None = None,
     ):
         self.sink = sink
         self._inflight: dict[Any, dict] = {}
         self._args_trunc = args_trunc
         self._result_trunc = result_trunc
+        # Where the overflow cache lives. None → TraceLogger.DEFAULT_ROOT
+        # (the production path). Tests pass a tmp_path to keep the
+        # filesystem clean.
+        self._payload_root = payload_root
 
     # NOTE: LangChain passes serialized as dict OR None depending on the
     # tool source (a langgraph MCP-wrapped tool sometimes hands None).
@@ -247,18 +327,26 @@ class ToolCallCaptureHandler:
         name = (serialized or {}).get("name") if serialized else None
         if not name:
             name = "unknown"
-        self._inflight[run_id] = {
+        entry = {
             "name": name,
-            "args": truncate_for_trace(input_str, self._args_trunc),
+            **record_payload(
+                input_str, self._args_trunc, "args", root=self._payload_root,
+            ),
             "_start": time.perf_counter(),
         }
+        self._inflight[run_id] = entry
 
     def on_tool_end(self, output: Any, *, run_id: Any, **_: Any) -> None:
         entry = self._inflight.pop(run_id, None)
         if entry is None:
             return
         t0 = entry.pop("_start", None)
-        entry["result"] = truncate_for_trace(output, self._result_trunc)
+        entry.update(
+            record_payload(
+                output, self._result_trunc, "result",
+                root=self._payload_root,
+            )
+        )
         if t0 is not None:
             entry["duration_ms"] = round(
                 (time.perf_counter() - t0) * 1000, 2
@@ -276,7 +364,12 @@ class ToolCallCaptureHandler:
         if entry is None:
             return
         t0 = entry.pop("_start", None)
-        entry["error"] = truncate_for_trace(repr(error), self._result_trunc)
+        entry.update(
+            record_payload(
+                repr(error), self._result_trunc, "error",
+                root=self._payload_root,
+            )
+        )
         if t0 is not None:
             entry["duration_ms"] = round(
                 (time.perf_counter() - t0) * 1000, 2

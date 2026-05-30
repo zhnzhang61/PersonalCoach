@@ -68,7 +68,7 @@ from backend.trace_logger import (
     ToolCallCaptureHandler,
     TraceLogger,
     prompt_hash as _prompt_hash,
-    truncate_for_trace,
+    record_payload,
 )
 
 
@@ -1185,7 +1185,7 @@ class AgenticCoach:
                 result_payload = prefetched.get(name)
                 entry: dict[str, Any] = {
                     "name": name,
-                    "args": truncate_for_trace(args, TraceLogger.TOOL_ARGS_TRUNC),
+                    **record_payload(args, TraceLogger.TOOL_ARGS_TRUNC, "args"),
                     "prefetched": True,
                 }
                 if (
@@ -1193,12 +1193,20 @@ class AgenticCoach:
                     and "error" in result_payload
                     and len(result_payload) == 1
                 ):
-                    entry["error"] = truncate_for_trace(
-                        result_payload["error"], TraceLogger.TOOL_RESULT_TRUNC
+                    entry.update(
+                        record_payload(
+                            result_payload["error"],
+                            TraceLogger.TOOL_RESULT_TRUNC,
+                            "error",
+                        )
                     )
                 else:
-                    entry["result"] = truncate_for_trace(
-                        result_payload, TraceLogger.TOOL_RESULT_TRUNC
+                    entry.update(
+                        record_payload(
+                            result_payload,
+                            TraceLogger.TOOL_RESULT_TRUNC,
+                            "result",
+                        )
                     )
                 trace.tool_calls.append(entry)
             # One batch-summary row carrying the gather wall-clock. Name

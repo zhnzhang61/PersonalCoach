@@ -97,7 +97,7 @@ graph TB
 ```
 
 **状态：** coach-brain 路线图 Phase 0 → Phase 3 全部完成。四个输入流全部
-就绪；模型库里有 5 个统计模型；后端 781 个测试通过。路线图细节见
+就绪；模型库里有 5 个统计模型；后端 795 个测试通过。路线图细节见
 [§3.4.1](#341-coach-brain--记忆模型四个输入流)，剩余工作见 [§4](#4-工程债)。
 
 ---
@@ -394,7 +394,16 @@ jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
   `data/traces/YYYY-MM-DD.jsonl`：turn_id、prompt_version、prompt_hash、
   user_input、final_answer、duration_ms、error，**`tool_calls`**。每条：
   `{name, args, result|error, duration_ms?, prefetched?}`，args + result
-  默认截断到 500 字符（过 `truncate_for_trace`）。`duration_ms` 是**单次**
+  默认截断到 500 字符（过 `record_payload`）。**Overflow 缓存：** 一旦被
+  截，完整 stringified 原文会写到 `data/traces/payloads/<sha>.txt`
+  （content-addressed，16 hex 的 sha，相同内容跨多轮只占一份文件）；entry
+  里额外加 `<field>_sha` + `<field>_len` 两个兄弟字段，debug 时直接
+  `cat data/traces/payloads/<sha>.txt` 或 `trace_logger.load_payload(sha)`
+  就能捞回原文。500 字符的内联预览让 trace 行依然好 grep，缓存把"截断
+  本身就毁掉证据"那个坑给堵了——见 #98，一次"agent 是不是脑补"的核账，
+  就是因为一份 2KB 的 note 被剪到 500 字符而误判过。缓存写盘失败静默
+  吞掉（sha + len 依然在 trace 行里，至少能告诉 reader 原文有多大）。
+  `duration_ms` 是**单次**
   调用语义：ReAct 循环里的工具由 `ToolCallCaptureHandler`（挂在所有
   `ainvoke` / `astream_events` 上的 LangChain callback）逐个 perf_counter
   实测；prefetch 的工具（`_action_turn` 并行 fan-out）**没有** `duration_ms`
