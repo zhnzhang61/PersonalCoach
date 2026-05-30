@@ -341,9 +341,17 @@ export function CoachThread() {
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-180px)] flex-col">
-      {/* Header row: action pills + End & Save */}
-      <div className="sticky top-0 z-10 -mx-5 mb-3 border-b border-border bg-background/95 px-5 py-2 backdrop-blur-md sm:-mx-8 sm:px-8">
+    // Plain block (NOT flex flex-col). The earlier `flex min-h-... flex-col`
+    // broke `position: sticky` on the action-bar child — mobile Safari (and
+    // some Chrome cases) silently drops sticky behavior when the sticky
+    // element is a child of a flex column container, leaving the bar to
+    // scroll away with the rest of the page. The flex layout wasn't load-
+    // bearing here (sticky bottom doesn't require it; the only effect was
+    // stretching the empty-state spacer), so dropping it is the smallest
+    // robust fix. Keep min-h so short sessions still anchor the input row.
+    <div className="min-h-[calc(100vh-180px)]">
+      {/* Header row: action pills + End & Save — pinned to viewport top */}
+      <div className="sticky top-0 z-30 -mx-5 mb-3 border-b border-border bg-background/95 px-5 py-2 backdrop-blur-md sm:-mx-8 sm:px-8">
         <div className="flex items-start justify-between gap-2">
           <ActionPills
             onAction={runAction}
@@ -366,8 +374,10 @@ export function CoachThread() {
         </div>
       </div>
 
-      {/* Scroll area */}
-      <div className="flex-1">
+      {/* Scroll area — was flex-1 inside the dropped flex column; the
+        * empty state's natural placement (`mt-12 text-center`) handles
+        * its own vertical positioning without the stretch. */}
+      <div>
         {/* Closed sessions, oldest first */}
         {closedHistories.data
           ?.slice()
