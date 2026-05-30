@@ -41,7 +41,14 @@ from typing import Any
 class Trace:
     """One agent turn. Field set is deliberately small for MVP — the
     `extras` dict catches forward-compat additions without schema
-    migration."""
+    migration.
+
+    `tool_calls` carries one row per tool invocation observed during the
+    turn (via LangChain callbacks for the ReAct loop, or appended
+    manually for prefetched tools). Each row: `{name, args, result|error,
+    duration_ms, prefetched?}`. args + result are truncated by
+    TraceLogger constants. Empty when the turn made no tool calls.
+    """
 
     turn_id: str
     thread_id: str
@@ -53,6 +60,7 @@ class Trace:
     final_answer: str = ""  # truncated to 1000 chars
     duration_ms: float = 0.0
     error: str | None = None
+    tool_calls: list[dict] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -75,6 +83,11 @@ class TraceLogger:
     USER_INPUT_TRUNC = 500
     FINAL_ANSWER_TRUNC = 1000
     ERROR_TRUNC = 500
+    # Per-tool-call truncation. Some tools return many KB (run telemetry,
+    # route profile, big topic lists); keep the JSONL line lean so daily
+    # files stay greppable. Bump if a debug session needs more.
+    TOOL_ARGS_TRUNC = 500
+    TOOL_RESULT_TRUNC = 500
 
     def __init__(self, root: str | Path | None = None):
         self.root = Path(root) if root is not None else self.DEFAULT_ROOT
@@ -145,3 +158,127 @@ class TraceLogger:
                 : self.FINAL_ANSWER_TRUNC
             ]
             self.write(trace)
+
+
+# ---------------------------------------------------------------------------
+# Tool-call capture — LangChain callback handler
+# ---------------------------------------------------------------------------
+#
+# Captures `on_tool_start` / `on_tool_end` / `on_tool_error` from LangGraph's
+# ReAct loop into a list (typically `trace.tool_calls`). Works for both
+# `ainvoke()` and `astream_events()` paths — just pass the handler via
+# `config={"callbacks": [handler]}`.
+#
+# Prefetched MCP calls (parallel asyncio.gather in _action_turn) bypass the
+# LangChain loop and don't fire callbacks; the agent appends those to the
+# same list manually with `prefetched=True`, so one trace row tells the full
+# story regardless of where a tool was invoked.
+#
+# Why a class lives in this module: the capture format is part of the trace
+# schema. Keeping it co-located with `Trace` means a schema change has one
+# home — no dance between trace_logger + a separate handlers module.
+
+
+def truncate_for_trace(value: object, limit: int) -> str:
+    """Stringify + truncate to fit a trace field. Suffix with `…(+N more)`
+    when cut so a debugger can tell at a glance whether they're looking at
+    the full payload. Public — agentic_coach imports this to format
+    prefetched tool args/results consistently with what the callback
+    handler captures for ReAct-loop tools."""
+    s = "" if value is None else str(value)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"…(+{len(s) - limit} more)"
+
+
+class ToolCallCaptureHandler:
+    """LangChain-compatible callback handler. Appends one dict per
+    completed tool invocation to `sink`.
+
+    Designed for the single-user single-coach case — `_inflight` is an
+    in-process dict keyed by run_id, no locking. Multiple tools can be in
+    flight concurrently (prefetch fan-out, or the rare case where the ReAct
+    model emits parallel tool calls) and they're correlated by `run_id` per
+    LangChain's contract.
+
+    Override `on_tool_start` / `on_tool_end` / `on_tool_error` only —
+    LangChain dispatches by method name; absent methods are silently
+    no-ops. We deliberately do NOT subclass `BaseCallbackHandler` so this
+    module stays pure-stdlib + langchain-version-agnostic; LangChain's
+    callback dispatcher duck-types on method names.
+    """
+
+    # LangChain's callback dispatcher reads these two attributes (set
+    # on BaseCallbackHandler) to decide whether the handler should be
+    # called from sync vs async paths. We say yes to both so the same
+    # handler works under ainvoke (sync-from-async) and astream_events.
+    ignore_agent = False
+    ignore_chain = True   # we only care about tool starts/ends
+    ignore_llm = True
+    ignore_retriever = True
+    ignore_chat_model = True
+    raise_error = False
+    run_inline = False
+
+    def __init__(
+        self,
+        sink: list[dict],
+        *,
+        args_trunc: int = TraceLogger.TOOL_ARGS_TRUNC,
+        result_trunc: int = TraceLogger.TOOL_RESULT_TRUNC,
+    ):
+        self.sink = sink
+        self._inflight: dict[Any, dict] = {}
+        self._args_trunc = args_trunc
+        self._result_trunc = result_trunc
+
+    # NOTE: LangChain passes serialized as dict OR None depending on the
+    # tool source (a langgraph MCP-wrapped tool sometimes hands None).
+    # Defensive .get() chains throughout.
+
+    def on_tool_start(
+        self,
+        serialized: dict | None,
+        input_str: str,
+        *,
+        run_id: Any,
+        **_: Any,
+    ) -> None:
+        name = (serialized or {}).get("name") if serialized else None
+        if not name:
+            name = "unknown"
+        self._inflight[run_id] = {
+            "name": name,
+            "args": truncate_for_trace(input_str, self._args_trunc),
+            "_start": time.perf_counter(),
+        }
+
+    def on_tool_end(self, output: Any, *, run_id: Any, **_: Any) -> None:
+        entry = self._inflight.pop(run_id, None)
+        if entry is None:
+            return
+        t0 = entry.pop("_start", None)
+        entry["result"] = truncate_for_trace(output, self._result_trunc)
+        if t0 is not None:
+            entry["duration_ms"] = round(
+                (time.perf_counter() - t0) * 1000, 2
+            )
+        self.sink.append(entry)
+
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: Any,
+        **_: Any,
+    ) -> None:
+        entry = self._inflight.pop(run_id, None)
+        if entry is None:
+            return
+        t0 = entry.pop("_start", None)
+        entry["error"] = truncate_for_trace(repr(error), self._result_trunc)
+        if t0 is not None:
+            entry["duration_ms"] = round(
+                (time.perf_counter() - t0) * 1000, 2
+            )
+        self.sink.append(entry)

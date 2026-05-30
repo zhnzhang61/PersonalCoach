@@ -97,7 +97,7 @@ graph TB
 ```
 
 **状态：** coach-brain 路线图 Phase 0 → Phase 3 全部完成。四个输入流全部
-就绪；模型库里有 5 个统计模型；后端 768 个测试通过。路线图细节见
+就绪；模型库里有 5 个统计模型；后端 781 个测试通过。路线图细节见
 [§3.4.1](#341-coach-brain--记忆模型四个输入流)，剩余工作见 [§4](#4-工程债)。
 
 ---
@@ -392,9 +392,15 @@ jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
 
 - **本地 JSONL**（`trace_logger.py`）— 每轮一行写到
   `data/traces/YYYY-MM-DD.jsonl`：turn_id、prompt_version、prompt_hash、
-  user_input、final_answer、duration_ms、error。权威审计日志，不离开本机。
-  tracing 永不向调用方抛异常。**抓不到 per-tool 调用和 token 数**——这是
-  LangSmith 补的缺口。
+  user_input、final_answer、duration_ms、error，**`tool_calls`**（每个工具
+  一条：`{name, args, result|error, duration_ms, prefetched?}`；args + result
+  默认截断到 500 字符，过 `truncate_for_trace`）。ReAct 循环里的工具由
+  `ToolCallCaptureHandler`（一个挂在所有 `ainvoke` / `astream_events` 上的
+  LangChain callback）捕获；prefetch 的工具（`_action_turn` 并行 fan-out）
+  绕过 ReAct 循环，由 agent 手动 append 进同一 list 并标 `prefetched=True`，
+  这样一条 trace 行就能完整看清「prefetch + 模型自己挑的工具」全过程。权威
+  审计日志，不离开本机；tracing 永不向调用方抛异常。**抓不到** per-token
+  流式细节和完整 LLM 中间消息——那是 LangSmith 那层的活。
 - **LangSmith**（`langsmith_setup.py`，可选）— 设了 env var 后，langchain
   自动 instrument 完整的 tool-call + LLM 树（per-tool 输入输出、token 数、
   延迟、跨 prompt 版本 diff）。`GET /api/admin/observability` 报告状态

@@ -42,6 +42,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from datetime import date, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -63,7 +64,12 @@ from backend.llm_provider import (
     call_llm,
     get_provider_model_name,
 )
-from backend.trace_logger import TraceLogger, prompt_hash as _prompt_hash
+from backend.trace_logger import (
+    ToolCallCaptureHandler,
+    TraceLogger,
+    prompt_hash as _prompt_hash,
+    truncate_for_trace,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +929,15 @@ class AgenticCoach:
             ) as trace:
                 try:
                     await self._ensure_agent()
-                    config = {"configurable": {"thread_id": thread_id}}
+                    # Capture tool calls into trace.tool_calls via the same
+                    # LangChain callback used on the non-streaming path —
+                    # one handler, both invocation modes. The SSE
+                    # `on_tool_start` emit below stays (it drives the UI's
+                    # "tool" badge); this just adds the trace capture.
+                    config: dict[str, Any] = {
+                        "configurable": {"thread_id": thread_id},
+                        "callbacks": [ToolCallCaptureHandler(trace.tool_calls)],
+                    }
                     messages: list[BaseMessage] = []
                     if system_context:
                         messages.append(SystemMessage(content=system_context))
@@ -1153,7 +1167,41 @@ class AgenticCoach:
             user_input=user_input,
         ) as trace:
             await self._ensure_agent()
+            # Time the whole prefetch fan-out, then attribute that time
+            # across the entries (they ran in parallel via gather; the
+            # individual MCP calls don't fire LangChain callbacks so
+            # there's no per-call duration available cheaply).
+            prefetch_t0 = time.perf_counter()
             prefetched = await self._prefetch(plan)
+            prefetch_total_ms = round(
+                (time.perf_counter() - prefetch_t0) * 1000, 2
+            )
+            # Capture prefetched tools into the same tool_calls trail —
+            # marked prefetched=True so a debugger can tell them apart
+            # from ReAct-loop tools. Without this, the trace would only
+            # show the LLM's chosen tools and silently hide the
+            # ~7-tool fan-out that fed it.
+            for name, args in plan:
+                result_payload = prefetched.get(name)
+                entry: dict[str, Any] = {
+                    "name": name,
+                    "args": truncate_for_trace(args, TraceLogger.TOOL_ARGS_TRUNC),
+                    "prefetched": True,
+                    "duration_ms": prefetch_total_ms,
+                }
+                if (
+                    isinstance(result_payload, dict)
+                    and "error" in result_payload
+                    and len(result_payload) == 1
+                ):
+                    entry["error"] = truncate_for_trace(
+                        result_payload["error"], TraceLogger.TOOL_RESULT_TRUNC
+                    )
+                else:
+                    entry["result"] = truncate_for_trace(
+                        result_payload, TraceLogger.TOOL_RESULT_TRUNC
+                    )
+                trace.tool_calls.append(entry)
             prefetched_block = (
                 "### PRE-FETCHED TOOL RESULTS (already gathered, don't re-call):\n"
                 f"```json\n{json.dumps(prefetched, ensure_ascii=False, indent=2)}\n```\n"
@@ -1163,6 +1211,7 @@ class AgenticCoach:
                 thread_id=thread_id,
                 extra_system_context=prefetched_block + "\n" + instructions,
                 _skip_trace=True,
+                tool_calls_sink=trace.tool_calls,
             )
             trace.final_answer = result
             return result
@@ -1174,6 +1223,7 @@ class AgenticCoach:
         extra_system_context: str | None = None,
         *,
         _skip_trace: bool = False,
+        tool_calls_sink: list[dict] | None = None,
     ) -> str:
         """One conversation turn through the LangGraph agent. The
         prebuilt agent handles its own tool-call loop natively — we
@@ -1181,10 +1231,15 @@ class AgenticCoach:
 
         Emits a trace row unless `_skip_trace` is True (used when
         _action_turn already wraps the outer call — we don't want two
-        rows per action turn)."""
+        rows per action turn). When `_skip_trace=True`, the caller must
+        pass `tool_calls_sink=trace.tool_calls` for tool capture to land
+        in the outer trace."""
         if _skip_trace:
             return await self._run_turn_inner(
-                user_input, thread_id, extra_system_context
+                user_input,
+                thread_id,
+                extra_system_context,
+                tool_calls_sink=tool_calls_sink,
             )
         with self.tracer.turn(
             kind="chat",
@@ -1194,7 +1249,10 @@ class AgenticCoach:
             user_input=user_input,
         ) as trace:
             result = await self._run_turn_inner(
-                user_input, thread_id, extra_system_context
+                user_input,
+                thread_id,
+                extra_system_context,
+                tool_calls_sink=trace.tool_calls,
             )
             trace.final_answer = result
             return result
@@ -1204,11 +1262,18 @@ class AgenticCoach:
         user_input: str,
         thread_id: str,
         extra_system_context: str | None,
+        tool_calls_sink: list[dict] | None = None,
     ) -> str:
         """Untraced LangGraph drive. Don't call directly — go through
-        _run_turn (or _action_turn) so tracing is consistent."""
+        _run_turn (or _action_turn) so tracing is consistent.
+
+        `tool_calls_sink`, when provided, receives one entry per ReAct
+        tool invocation via a LangChain callback. Callers pass
+        `trace.tool_calls` so the trace row captures the tool trail."""
         await self._ensure_agent()
-        config = {"configurable": {"thread_id": thread_id}}
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        if tool_calls_sink is not None:
+            config["callbacks"] = [ToolCallCaptureHandler(tool_calls_sink)]
 
         messages: list[BaseMessage] = []
         if extra_system_context:
