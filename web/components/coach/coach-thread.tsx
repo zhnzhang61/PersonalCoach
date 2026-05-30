@@ -16,6 +16,7 @@ import type {
   CoachSessionsResponse,
 } from "@/lib/types";
 import {
+  clearTodaysRead,
   extractFirstSentence,
   setTodaysRead,
 } from "@/lib/todays-read";
@@ -312,14 +313,22 @@ export function CoachThread() {
         }),
       (r) => r.error,
     );
-    if (name === "review_health" && result?.answer) {
-      const sentence = extractFirstSentence(result.answer);
-      if (sentence) {
-        setTodaysRead({
-          status: "ready",
-          text: sentence,
-          thread_id: tid,
-        });
+    if (name === "review_health") {
+      if (result?.answer) {
+        const sentence = extractFirstSentence(result.answer);
+        if (sentence) {
+          setTodaysRead({
+            status: "ready",
+            text: sentence,
+            thread_id: tid,
+          });
+        }
+      } else {
+        // Call errored or retry exhausted. Drop the pending marker we
+        // wrote on click so the Health-tab Today's Read doesn't spin
+        // forever — the user already sees the failure in the Coach pill
+        // toast and can re-trigger from either tab.
+        clearTodaysRead();
       }
     }
     refreshAll();
