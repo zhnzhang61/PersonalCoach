@@ -1,16 +1,27 @@
+import type { ReactNode } from "react";
+
 // `sticky` (default true) wraps the header in a `sticky top-0` container
 // with a bottom border + blurred background, so the title region stays
-// pinned at viewport top as the page content scrolls beneath it. Pass
-// `sticky={false}` when an ancestor already provides the sticky wrapper
-// (e.g. CoachThread, which pins the title together with its action-pill
-// row in a single sticky block).
+// pinned at viewport top as the page content scrolls beneath it. The
+// `mb-5` on the sticky wrapper gives the page content ~one line-height of
+// breathing room below the border line — without it the first card
+// (e.g. "Today's Check-in") visually crashes into the underline.
+//
+// Pass `sticky={false}` when an ancestor already provides the sticky
+// wrapper (e.g. CoachThread, which pins the title together with its
+// action-pill row in a single sticky block).
+//
+// `eyebrow` is `ReactNode` (not just `string`) so callers can pass a
+// client component like <TodayEyebrow /> — that's how Server Component
+// pages get a dynamic date without baking the build-time date into the
+// SSG HTML (see PR #99 review).
 export function PageHeader({
   eyebrow,
   title,
   subtitle,
   sticky = true,
 }: {
-  eyebrow?: string;
+  eyebrow?: ReactNode;
   title: string;
   subtitle?: string;
   sticky?: boolean;
@@ -30,7 +41,7 @@ export function PageHeader({
   );
   if (!sticky) return headerEl;
   return (
-    <div className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-md">
+    <div className="sticky top-0 z-30 mb-5 border-b border-border bg-background/95 backdrop-blur-md">
       {headerEl}
     </div>
   );

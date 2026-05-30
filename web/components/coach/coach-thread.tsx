@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { format } from "date-fns";
 import { Archive, Loader2 } from "lucide-react";
 import { apiDelete, apiGet, apiPost, streamSSE } from "@/lib/api";
 import { classifyCoachError } from "@/lib/coach-errors";
@@ -17,6 +16,7 @@ import type {
   CoachSessionsResponse,
 } from "@/lib/types";
 import { PageHeader } from "@/components/page-header";
+import { TodayEyebrow } from "@/components/today-eyebrow";
 import { MessageBubble } from "./message-bubble";
 import { SessionDivider } from "./session-divider";
 import { DayDivider } from "./day-divider";
@@ -355,9 +355,9 @@ export function CoachThread() {
         * was removed from coach/page.tsx and pulled in here for exactly
         * this — without it, the title would sit ABOVE the sticky context
         * and scroll out separately.) */}
-      <div className="sticky top-0 z-30 -mx-5 mb-3 border-b border-border bg-background/95 backdrop-blur-md sm:-mx-8">
+      <div className="sticky top-0 z-30 -mx-5 mb-5 border-b border-border bg-background/95 backdrop-blur-md sm:-mx-8">
         <PageHeader
-          eyebrow={format(new Date(), "EEEE, MMMM d")}
+          eyebrow={<TodayEyebrow />}
           title="Coach"
           subtitle="Talk through training, health, and your week. The coach remembers what matters."
           /* This PageHeader is inside CoachThread's own sticky wrapper
