@@ -1167,27 +1167,26 @@ class AgenticCoach:
             user_input=user_input,
         ) as trace:
             await self._ensure_agent()
-            # Time the whole prefetch fan-out, then attribute that time
-            # across the entries (they ran in parallel via gather; the
-            # individual MCP calls don't fire LangChain callbacks so
-            # there's no per-call duration available cheaply).
+            # Time the whole prefetch fan-out. We deliberately do NOT
+            # attribute this across the per-tool entries below —
+            # `duration_ms` is a single-call invariant (see review on #97):
+            # spreading the gather wall-clock across N entries would make
+            # `jq 'map(.duration_ms) | add'` overcount by N× and would
+            # imply per-call timing that we don't actually measure.
             prefetch_t0 = time.perf_counter()
             prefetched = await self._prefetch(plan)
             prefetch_total_ms = round(
                 (time.perf_counter() - prefetch_t0) * 1000, 2
             )
-            # Capture prefetched tools into the same tool_calls trail —
-            # marked prefetched=True so a debugger can tell them apart
-            # from ReAct-loop tools. Without this, the trace would only
-            # show the LLM's chosen tools and silently hide the
-            # ~7-tool fan-out that fed it.
+            # Per-tool entries — name + args + result, NO duration_ms.
+            # Marked prefetched=True so a debugger can tell them apart
+            # from ReAct-loop tools.
             for name, args in plan:
                 result_payload = prefetched.get(name)
                 entry: dict[str, Any] = {
                     "name": name,
                     "args": truncate_for_trace(args, TraceLogger.TOOL_ARGS_TRUNC),
                     "prefetched": True,
-                    "duration_ms": prefetch_total_ms,
                 }
                 if (
                     isinstance(result_payload, dict)
@@ -1202,6 +1201,16 @@ class AgenticCoach:
                         result_payload, TraceLogger.TOOL_RESULT_TRUNC
                     )
                 trace.tool_calls.append(entry)
+            # One batch-summary row carrying the gather wall-clock. Name
+            # is reserved (leading underscore — no MCP tool can collide).
+            trace.tool_calls.append(
+                {
+                    "name": "_prefetch_batch",
+                    "prefetched": True,
+                    "tool_count": len(plan),
+                    "duration_ms": prefetch_total_ms,
+                }
+            )
             prefetched_block = (
                 "### PRE-FETCHED TOOL RESULTS (already gathered, don't re-call):\n"
                 f"```json\n{json.dumps(prefetched, ensure_ascii=False, indent=2)}\n```\n"

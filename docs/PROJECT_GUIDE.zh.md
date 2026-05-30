@@ -392,15 +392,19 @@ jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
 
 - **本地 JSONL**（`trace_logger.py`）— 每轮一行写到
   `data/traces/YYYY-MM-DD.jsonl`：turn_id、prompt_version、prompt_hash、
-  user_input、final_answer、duration_ms、error，**`tool_calls`**（每个工具
-  一条：`{name, args, result|error, duration_ms, prefetched?}`；args + result
-  默认截断到 500 字符，过 `truncate_for_trace`）。ReAct 循环里的工具由
-  `ToolCallCaptureHandler`（一个挂在所有 `ainvoke` / `astream_events` 上的
-  LangChain callback）捕获；prefetch 的工具（`_action_turn` 并行 fan-out）
-  绕过 ReAct 循环，由 agent 手动 append 进同一 list 并标 `prefetched=True`，
-  这样一条 trace 行就能完整看清「prefetch + 模型自己挑的工具」全过程。权威
-  审计日志，不离开本机；tracing 永不向调用方抛异常。**抓不到** per-token
-  流式细节和完整 LLM 中间消息——那是 LangSmith 那层的活。
+  user_input、final_answer、duration_ms、error，**`tool_calls`**。每条：
+  `{name, args, result|error, duration_ms?, prefetched?}`，args + result
+  默认截断到 500 字符（过 `truncate_for_trace`）。`duration_ms` 是**单次**
+  调用语义：ReAct 循环里的工具由 `ToolCallCaptureHandler`（挂在所有
+  `ainvoke` / `astream_events` 上的 LangChain callback）逐个 perf_counter
+  实测；prefetch 的工具（`_action_turn` 并行 fan-out）**没有** `duration_ms`
+  ——单个 MCP 调用不发 LangChain callback，per-call 时间没测。批次总耗时
+  另外用一条保留名汇总行 append 在后面：
+  `{name: "_prefetch_batch", prefetched: true, tool_count, duration_ms}`。
+  这样 `jq 'map(.duration_ms // empty) | add'` 给出的就是诚实的「这一轮在
+  工具上花了多久」，不会因为 prefetch 摊到每条而 N 倍重算。权威审计日志，
+  不离开本机；tracing 永不向调用方抛异常。**抓不到** per-token 流式细节
+  和完整 LLM 中间消息——那是 LangSmith 那层的活。
 - **LangSmith**（`langsmith_setup.py`，可选）— 设了 env var 后，langchain
   自动 instrument 完整的 tool-call + LLM 树（per-tool 输入输出、token 数、
   延迟、跨 prompt 版本 diff）。`GET /api/admin/observability` 报告状态
