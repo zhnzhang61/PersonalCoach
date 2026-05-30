@@ -15,6 +15,7 @@ import type {
   CoachSession,
   CoachSessionsResponse,
 } from "@/lib/types";
+import { PageHeader } from "@/components/page-header";
 import { MessageBubble } from "./message-bubble";
 import { SessionDivider } from "./session-divider";
 import { DayDivider } from "./day-divider";
@@ -341,18 +342,24 @@ export function CoachThread() {
   };
 
   return (
-    // Plain block (NOT flex flex-col). The earlier `flex min-h-... flex-col`
-    // broke `position: sticky` on the action-bar child — mobile Safari (and
-    // some Chrome cases) silently drops sticky behavior when the sticky
-    // element is a child of a flex column container, leaving the bar to
-    // scroll away with the rest of the page. The flex layout wasn't load-
-    // bearing here (sticky bottom doesn't require it; the only effect was
-    // stretching the empty-state spacer), so dropping it is the smallest
-    // robust fix. Keep min-h so short sessions still anchor the input row.
+    // Plain block (NOT flex flex-col). A `flex flex-col` parent silently
+    // breaks `position: sticky` on its first child in mobile Safari (and
+    // some Chrome cases) — that was the first cause of the "bar scrolls
+    // away" report. The flex layout wasn't load-bearing here. Keep min-h
+    // so short sessions still anchor the input row.
     <div className="min-h-[calc(100vh-180px)]">
-      {/* Header row: action pills + End & Save — pinned to viewport top */}
-      <div className="sticky top-0 z-30 -mx-5 mb-3 border-b border-border bg-background/95 px-5 py-2 backdrop-blur-md sm:-mx-8 sm:px-8">
-        <div className="flex items-start justify-between gap-2">
+      {/* Pinned top region: page title + subtitle + action pills + End &
+        * Save. Rendered as ONE sticky wrapper so they all stay together
+        * as the conversation scrolls underneath. (Page-level PageHeader
+        * was removed from coach/page.tsx and pulled in here for exactly
+        * this — without it, the title would sit ABOVE the sticky context
+        * and scroll out separately.) */}
+      <div className="sticky top-0 z-30 -mx-5 mb-3 border-b border-border bg-background/95 backdrop-blur-md sm:-mx-8">
+        <PageHeader
+          title="Coach"
+          subtitle="Talk through training, health, and your week. The coach remembers what matters."
+        />
+        <div className="flex items-start justify-between gap-2 px-5 pb-2 sm:px-8">
           <ActionPills
             onAction={runAction}
             disabled={pending !== null}
