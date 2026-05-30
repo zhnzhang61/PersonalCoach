@@ -15,6 +15,10 @@ import type {
   CoachSession,
   CoachSessionsResponse,
 } from "@/lib/types";
+import {
+  extractFirstSentence,
+  setTodaysRead,
+} from "@/lib/todays-read";
 import { PageHeader } from "@/components/page-header";
 import { TodayEyebrow } from "@/components/today-eyebrow";
 import { MessageBubble } from "./message-bubble";
@@ -290,13 +294,34 @@ export function CoachThread() {
     const tid = ensureCurrent();
     setPending(name);
     setErrorMsg(null);
-    await callWithRetry(
+    // Mirror the Health-tab readiness card: when review_health is the
+    // ACTION the user just triggered, write a `pending` marker into the
+    // todays-read cache so a quick hop to /health shows the spinner
+    // instead of the rule-based default. The Health-tab card was the
+    // only existing writer of this cache — without this mirror, clicking
+    // Review Health from the Coach pill bar leaves the Health card
+    // showing yesterday's headline (or worse, nothing) until the user
+    // manually re-taps the card.
+    if (name === "review_health") {
+      setTodaysRead({ status: "pending", thread_id: tid });
+    }
+    const result = await callWithRetry(
       () =>
         apiPost<CoachActionResponse>(`/api/ai/action/${name}`, {
           thread_id: tid,
         }),
       (r) => r.error,
     );
+    if (name === "review_health" && result?.answer) {
+      const sentence = extractFirstSentence(result.answer);
+      if (sentence) {
+        setTodaysRead({
+          status: "ready",
+          text: sentence,
+          thread_id: tid,
+        });
+      }
+    }
     refreshAll();
     setPending(null);
   };
