@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { format } from "date-fns";
 import { Archive, Loader2 } from "lucide-react";
 import { apiDelete, apiGet, apiPost, streamSSE } from "@/lib/api";
 import { classifyCoachError } from "@/lib/coach-errors";
@@ -356,8 +357,14 @@ export function CoachThread() {
         * and scroll out separately.) */}
       <div className="sticky top-0 z-30 -mx-5 mb-3 border-b border-border bg-background/95 backdrop-blur-md sm:-mx-8">
         <PageHeader
+          eyebrow={format(new Date(), "EEEE, MMMM d")}
           title="Coach"
           subtitle="Talk through training, health, and your week. The coach remembers what matters."
+          /* This PageHeader is inside CoachThread's own sticky wrapper
+           * (above) so the title pins together with the action pills;
+           * opt OUT of PageHeader's built-in sticky to avoid double-
+           * wrapping. */
+          sticky={false}
         />
         <div className="flex items-start justify-between gap-2 px-5 pb-2 sm:px-8">
           <ActionPills
