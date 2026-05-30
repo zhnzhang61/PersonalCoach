@@ -508,10 +508,27 @@ export function CoachThread() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Sticky input — bottom-anchored above the nav */}
+      {/* Sticky input — bottom-anchored ABOVE the fixed BottomNav.
+       *
+       * Previously this was `sticky bottom-0`, which put it at viewport
+       * bottom — but the BottomNav is `fixed bottom-0 z-40` and sits on
+       * top, so the bottom half of the input was hidden behind the nav.
+       * (The textarea grew from 40px to 88px in this PR and made the
+       * existing layout bug obviously visible — with a 1-line input
+       * only the placeholder was eaten, with 3 lines half the field is.)
+       *
+       * The `bottom` offset matches the BottomNav's own height formula
+       * (`54px` content + safe-area-inset-bottom with a 4px floor) so
+       * they stay aligned across devices without home-indicator hardware
+       * (where env() is 0) and devices with it (env() ≈ 34px).
+       * The input's own padding-bottom can stay small now — the
+       * BottomNav already absorbs the safe-area.
+       */}
       <div
-        className="sticky bottom-0 -mx-5 mt-4 border-t border-border bg-background/95 px-5 pb-1.5 pt-2 backdrop-blur-md sm:-mx-8 sm:px-8"
-        style={{ paddingBottom: "max(env(safe-area-inset-bottom), 6px)" }}
+        className="sticky -mx-5 mt-4 border-t border-border bg-background/95 px-5 pb-2 pt-2 backdrop-blur-md sm:-mx-8 sm:px-8"
+        style={{
+          bottom: "calc(54px + max(env(safe-area-inset-bottom), 4px))",
+        }}
       >
         <ChatInput onSubmit={sendChat} disabled={pending !== null} />
       </div>
