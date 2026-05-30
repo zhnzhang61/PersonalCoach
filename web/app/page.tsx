@@ -1,5 +1,5 @@
-import { format } from "date-fns";
 import { PageHeader } from "@/components/page-header";
+import { TodayEyebrow } from "@/components/today-eyebrow";
 import { ExternalEvents } from "@/components/health/external-events";
 import { ReadinessCard } from "@/components/health/readiness-card";
 import { RecoveryChart } from "@/components/health/recovery-chart";
@@ -8,10 +8,9 @@ import { SnapshotCards } from "@/components/health/snapshot-cards";
 import { TodaysCheckin } from "@/components/health/todays-checkin";
 
 export default function HealthPage() {
-  const today = format(new Date(), "EEEE, MMMM d");
   return (
     <div className="mx-auto w-full max-w-4xl">
-      <PageHeader eyebrow={today} title="Health" />
+      <PageHeader eyebrow={<TodayEyebrow />} title="Health" />
       <div className="space-y-6 px-5 pb-8 sm:px-8">
         {/* Today's check-in goes ABOVE the objective Garmin cards —
           * subjective state is the first thing the user reflects on,

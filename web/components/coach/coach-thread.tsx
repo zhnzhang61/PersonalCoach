@@ -15,6 +15,8 @@ import type {
   CoachSession,
   CoachSessionsResponse,
 } from "@/lib/types";
+import { PageHeader } from "@/components/page-header";
+import { TodayEyebrow } from "@/components/today-eyebrow";
 import { MessageBubble } from "./message-bubble";
 import { SessionDivider } from "./session-divider";
 import { DayDivider } from "./day-divider";
@@ -341,10 +343,30 @@ export function CoachThread() {
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-180px)] flex-col">
-      {/* Header row: action pills + End & Save */}
-      <div className="sticky top-0 z-10 -mx-5 mb-3 border-b border-border bg-background/95 px-5 py-2 backdrop-blur-md sm:-mx-8 sm:px-8">
-        <div className="flex items-start justify-between gap-2">
+    // Plain block (NOT flex flex-col). A `flex flex-col` parent silently
+    // breaks `position: sticky` on its first child in mobile Safari (and
+    // some Chrome cases) — that was the first cause of the "bar scrolls
+    // away" report. The flex layout wasn't load-bearing here. Keep min-h
+    // so short sessions still anchor the input row.
+    <div className="min-h-[calc(100vh-180px)]">
+      {/* Pinned top region: page title + subtitle + action pills + End &
+        * Save. Rendered as ONE sticky wrapper so they all stay together
+        * as the conversation scrolls underneath. (Page-level PageHeader
+        * was removed from coach/page.tsx and pulled in here for exactly
+        * this — without it, the title would sit ABOVE the sticky context
+        * and scroll out separately.) */}
+      <div className="sticky top-0 z-30 -mx-5 mb-5 border-b border-border bg-background/95 backdrop-blur-md sm:-mx-8">
+        <PageHeader
+          eyebrow={<TodayEyebrow />}
+          title="Coach"
+          subtitle="Talk through training, health, and your week. The coach remembers what matters."
+          /* This PageHeader is inside CoachThread's own sticky wrapper
+           * (above) so the title pins together with the action pills;
+           * opt OUT of PageHeader's built-in sticky to avoid double-
+           * wrapping. */
+          sticky={false}
+        />
+        <div className="flex items-start justify-between gap-2 px-5 pb-2 sm:px-8">
           <ActionPills
             onAction={runAction}
             disabled={pending !== null}
@@ -366,8 +388,10 @@ export function CoachThread() {
         </div>
       </div>
 
-      {/* Scroll area */}
-      <div className="flex-1">
+      {/* Scroll area — was flex-1 inside the dropped flex column; the
+        * empty state's natural placement (`mt-12 text-center`) handles
+        * its own vertical positioning without the stretch. */}
+      <div>
         {/* Closed sessions, oldest first */}
         {closedHistories.data
           ?.slice()
