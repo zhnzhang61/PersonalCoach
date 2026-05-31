@@ -9,7 +9,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet, apiPost } from "@/lib/api";
-import { GARMIN_SSO_URL } from "@/lib/sso";
+import { GARMIN_SSO_URL, chromeDeepLink } from "@/lib/sso";
 import { cn } from "@/lib/utils";
 import type {
   RefreshTokenResult,
@@ -141,14 +141,21 @@ function RefreshTokenCard() {
               1.
             </span>
             <div className="flex-1 space-y-2">
-              <p>Open the Garmin sign-in page in Safari.</p>
+              <p>Open the Garmin sign-in page in Chrome.</p>
               {/* base-ui Button doesn't support asChild — style an anchor
                   directly with buttonVariants so it looks identical
-                  while still being a real <a> with target=_blank. */}
+                  while still being a real <a>.
+
+                  href uses Chrome's iOS deep-link scheme (chromeDeepLink)
+                  instead of the plain https URL: this app is a standalone
+                  PWA, and iOS opens external links from a standalone PWA
+                  in an in-app Safari sheet regardless of the user's
+                  default browser. The googlechromes:// scheme forces the
+                  real Chrome app, whose address bar the next step needs.
+                  No target=_blank — the link launches another app, so a
+                  new tab would just be left blank. */}
               <a
-                href={GARMIN_SSO_URL}
-                target="_blank"
-                rel="noopener noreferrer"
+                href={chromeDeepLink(GARMIN_SSO_URL)}
                 className={cn(
                   buttonVariants({ variant: "secondary" }),
                   "w-full sm:w-auto",
