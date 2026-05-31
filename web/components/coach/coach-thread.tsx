@@ -565,17 +565,22 @@ export function CoachThread() {
        * existing layout bug obviously visible — with a 1-line input
        * only the placeholder was eaten, with 3 lines half the field is.)
        *
-       * The `bottom` offset matches the BottomNav's own height formula
-       * (`54px` content + safe-area-inset-bottom with a 4px floor) so
-       * they stay aligned across devices without home-indicator hardware
-       * (where env() is 0) and devices with it (env() ≈ 34px).
-       * The input's own padding-bottom can stay small now — the
-       * BottomNav already absorbs the safe-area.
+       * The `bottom` offset is the BottomNav's own height formula —
+       * `var(--bottom-nav-h)` (the nav's height excluding the safe-area
+       * inset, defined once in globals.css and pinned in bottom-nav.tsx)
+       * plus the same `max(env(safe-area-inset-bottom), 4px)` inset the
+       * nav adds. Referencing the shared var (not a re-typed `54px`)
+       * keeps the two in lockstep across devices without home-indicator
+       * hardware (env() = 0) and with it (env() ≈ 34px), and means a
+       * future change to the nav's height moves the input automatically.
+       * The input's own padding-bottom stays small — the BottomNav
+       * already absorbs the safe-area.
        */}
       <div
         className="sticky -mx-5 mt-4 border-t border-border bg-background/95 px-5 pb-2 pt-2 backdrop-blur-md sm:-mx-8 sm:px-8"
         style={{
-          bottom: "calc(54px + max(env(safe-area-inset-bottom), 4px))",
+          bottom:
+            "calc(var(--bottom-nav-h) + max(env(safe-area-inset-bottom), 4px))",
         }}
       >
         <ChatInput onSubmit={sendChat} disabled={pending !== null} />

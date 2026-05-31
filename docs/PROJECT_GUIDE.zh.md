@@ -131,6 +131,33 @@ Tailwind。iPhone 优先布局。
 mutation 的 modal 要有 `isMounted` 守卫。见 memory 里的
 `feedback_no_silent_mutation_errors.md`。
 
+**前端布局的坑（踩了才会的——每条都是在 iPhone 上测出来、又在 review 里被
+拦下来的）。** 下面四条都在搞懂之前多走了一个来回；改布局/样式时如果"在真机
+上看着差不多对"，先排查这几条：
+
+1. **别把 `sticky` 放进 `flex flex-col` 的父容器里。** 当 sticky 的包含块是
+   一个 flex 列时，`position: sticky` 会悄悄失效——元素照样滚走，不会钉住。
+   Coach 的标题 + action pills 必须提到一个专门的 `sticky` 外层里（不能放在
+   flex 的对话容器里）才能在移动端 Safari 正确钉住。（#99）
+2. **Server Component 里的 `new Date()` 会被冻结在构建时。** 静态生成只算
+   一次、把日期烤进 HTML；就算是按请求动态渲染，也是用*服务器*时区而不是用户
+   时区。要反映访客本地时间的日期/时间，放进一个极小的 client component
+   （`TodayEyebrow`）里，用首渲染为空 + `useEffect` 延迟求值——见
+   `today-eyebrow.tsx` 顶部的注释块。这跟 #84 给 agent prompt 修的时区坑
+   是同一个。（#99）
+3. **绝不要独立地硬编码另一个组件的固有高度——共享一个 CSS 变量。** Coach
+   的输入框靠把自己 sticky 的 `bottom` 偏移到正好贴在 `fixed` 的 `BottomNav`
+   上方。在输入框的 CSS 里重新敲一遍 nav 的像素高度，会把两个文件耦在一起却
+   没有任何关联：以后改 nav（图标变大、padding 微调、标签字体）就会悄悄让输入
+   框错位。现在 nav 的高度只活在 `globals.css` 里一处 `--bottom-nav-h`（放在
+   `:root`，因为 nav 和输入框是兄弟子树、否则共享不到继承的变量）；nav 自身的
+   高度和输入框的偏移都读
+   `calc(var(--bottom-nav-h) + max(env(safe-area-inset-bottom), 4px))`。（#101）
+4. **`fixed`/`sticky bottom-0` 的元素会和 `fixed` 的 `BottomNav` 抢同一个
+   位置。** nav 是 `z-40`、会赢，把其它声明 `bottom-0` 的东西的底部挡住。要
+   偏移到 nav 上方（见第 3 条）而不是共用这个槽位。这个 bug 藏了一阵子，是因为
+   矮输入框只丢了底部几像素；等输入框长到三行就一眼看出来了。（#101）
+
 ---
 
 ## 3. 后端
