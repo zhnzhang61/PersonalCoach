@@ -138,6 +138,42 @@ must branch `isError` distinctly from the empty state; modals owning a
 mutation need an `isMounted` guard. See
 `feedback_no_silent_mutation_errors.md` in memory.
 
+**Frontend layout gotchas (hard-won — each re-discovered during iPhone
+testing, then re-caught in review).** All four below cost a round-trip
+before they were understood; check them first when a layout/styling
+change "looks almost right" on device:
+
+1. **Don't put `sticky` inside a `flex flex-col` parent.** `position:
+   sticky` silently does nothing when its containing block is a flex
+   column — the element scrolls away instead of pinning. The Coach
+   header + action pills had to be lifted into a single dedicated
+   `sticky` wrapper (not the flex thread container) to pin correctly on
+   mobile Safari. (#99)
+2. **`new Date()` in a Server Component freezes at build time.** Static
+   generation evaluates it once and bakes the date into the HTML; even
+   dynamic-per-request renders it in the *server's* timezone, not the
+   user's. Date/time that must reflect the viewer goes in a tiny client
+   component (`TodayEyebrow`) with an empty-first-render + `useEffect`
+   deferral — see the comment block at the top of `today-eyebrow.tsx`.
+   This is the same tz pitfall #84 fixed for the agent prompt. (#99)
+3. **Never independently hard-code another component's intrinsic
+   height — share a CSS variable.** The Coach chat input offsets its
+   sticky `bottom` to sit flush on the `fixed` `BottomNav`. Re-typing
+   the nav's pixel height in the input's CSS couples two files with no
+   link between them: a later nav edit (bigger icon, padding tweak,
+   label font) silently misaligns the input. The nav's height now lives
+   once as `--bottom-nav-h` in `globals.css` (at `:root`, because the
+   nav and the input are sibling subtrees that wouldn't share an
+   inherited var otherwise); both the nav's own height and the input's
+   offset read `calc(var(--bottom-nav-h) + max(env(safe-area-inset-bottom),
+   4px))`. (#101)
+4. **A `fixed`/`sticky bottom-0` element + the `fixed` `BottomNav`
+   fight for the same slot.** The nav is `z-40` and wins, hiding the
+   bottom of whatever else claims `bottom-0`. Offset above the nav (see
+   #3) rather than sharing the slot. The bug hid for a while because a
+   short input only lost its bottom few px; it became obvious once the
+   input grew to three lines. (#101)
+
 ---
 
 ## 3. Backend

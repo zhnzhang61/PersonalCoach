@@ -347,13 +347,63 @@ export function CoachThread() {
     return () => clearTimeout(t);
   }, [archiveToast]);
 
-  // Scroll-to-bottom on message append OR on streaming progress.
-  // Watching `streamingTurn?.aiContent.length` keeps the view pinned
-  // to the latest tokens as they arrive — without this the user has
-  // to manually scroll while the agent is writing.
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Scroll the document to its true bottom. The thread is
+  // document-scrolled (no inner scroll container) and the chat input is
+  // a `sticky` element living at the END of the flow — so the document's
+  // real maximum scroll position is what puts the last message above the
+  // floating input + nav. We deliberately do NOT scroll a sentinel
+  // <div> placed before the input: that lands ~one-input-height short
+  // and leaves the tail of the last message hidden behind the input.
+  const scrollToBottom = (smooth: boolean) => {
+    const el = document.scrollingElement || document.documentElement;
+    window.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  // One-time landing at the bottom on first open of the Coach tab.
+  //
+  // The thread is document-scrolled and renders closed/archived
+  // sessions ABOVE the active one. Two things broke "open → see latest
+  // message" before this:
+  //   1. No active session (the common next-morning case: yesterday's
+  //      thread was archived, none reopened). currentId is null →
+  //      activeQuery disabled → activeMessages.length stays 0 forever,
+  //      so the smooth-follow effect below (keyed on that length) never
+  //      fired and the page sat at the top of the archive.
+  //   2. Active session present, but closedHistories resolve LATER than
+  //      the active thread and insert height above it — bumping a too-
+  //      early scroll off the bottom.
+  // So we wait until every query that contributes to scroll height has
+  // settled, then jump instantly (no smooth — we want to *start* at the
+  // bottom, not animate through the whole history on first paint).
+  // `isLoading` is false for a disabled query in react-query v5, so the
+  // active/closed guards pass immediately when those threads don't
+  // apply; the `closedHistories.data` backstop covers the single render
+  // where a freshly-enabled closed-histories query hasn't flipped
+  // isLoading→true yet.
+  const didInitialScroll = useRef(false);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (didInitialScroll.current || !hydrated) return;
+    if (sessionsQuery.isLoading) return;
+    if (activeQuery.isLoading || closedHistories.isLoading) return;
+    if (closedSessions.length > 0 && !closedHistories.data) return;
+    didInitialScroll.current = true;
+    scrollToBottom(false);
+  }, [
+    hydrated,
+    sessionsQuery.isLoading,
+    activeQuery.isLoading,
+    activeQuery.data,
+    closedHistories.isLoading,
+    closedHistories.data,
+    closedSessions.length,
+  ]);
+
+  // Smooth-follow on live activity: a new message appended, an action
+  // pending, or streaming tokens arriving. Gated on the initial landing
+  // so it doesn't fight (or smooth-animate) the first-open jump above.
+  useEffect(() => {
+    if (!didInitialScroll.current) return;
+    scrollToBottom(true);
   }, [activeMessages.length, pending, streamingTurn?.aiContent.length]);
 
   // Filter out tool/system messages from display — those are agent
@@ -504,14 +554,34 @@ export function CoachThread() {
             {errorMsg}
           </div>
         )}
-
-        <div ref={bottomRef} />
       </div>
 
-      {/* Sticky input — bottom-anchored above the nav */}
+      {/* Sticky input — bottom-anchored ABOVE the fixed BottomNav.
+       *
+       * Previously this was `sticky bottom-0`, which put it at viewport
+       * bottom — but the BottomNav is `fixed bottom-0 z-40` and sits on
+       * top, so the bottom half of the input was hidden behind the nav.
+       * (The textarea grew from 40px to 88px in this PR and made the
+       * existing layout bug obviously visible — with a 1-line input
+       * only the placeholder was eaten, with 3 lines half the field is.)
+       *
+       * The `bottom` offset is the BottomNav's own height formula —
+       * `var(--bottom-nav-h)` (the nav's height excluding the safe-area
+       * inset, defined once in globals.css and pinned in bottom-nav.tsx)
+       * plus the same `max(env(safe-area-inset-bottom), 4px)` inset the
+       * nav adds. Referencing the shared var (not a re-typed `54px`)
+       * keeps the two in lockstep across devices without home-indicator
+       * hardware (env() = 0) and with it (env() ≈ 34px), and means a
+       * future change to the nav's height moves the input automatically.
+       * The input's own padding-bottom stays small — the BottomNav
+       * already absorbs the safe-area.
+       */}
       <div
-        className="sticky bottom-0 -mx-5 mt-4 border-t border-border bg-background/95 px-5 pb-1.5 pt-2 backdrop-blur-md sm:-mx-8 sm:px-8"
-        style={{ paddingBottom: "max(env(safe-area-inset-bottom), 6px)" }}
+        className="sticky -mx-5 mt-4 border-t border-border bg-background/95 px-5 pb-2 pt-2 backdrop-blur-md sm:-mx-8 sm:px-8"
+        style={{
+          bottom:
+            "calc(var(--bottom-nav-h) + max(env(safe-area-inset-bottom), 4px))",
+        }}
       >
         <ChatInput onSubmit={sendChat} disabled={pending !== null} />
       </div>

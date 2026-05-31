@@ -89,6 +89,16 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* Layout token: BottomNav height EXCLUDING the safe-area inset (the
+   * inset is added separately as `max(env(safe-area-inset-bottom),
+   * 4px)`). Single source of truth — `bottom-nav.tsx` pins its own
+   * height to this, and `coach-thread.tsx` offsets its sticky chat
+   * input by `calc(var(--bottom-nav-h) + <same inset>)` so the input
+   * sits flush on top of the nav. Lives at :root because the nav and
+   * the Coach input are sibling subtrees under <body> and a var on
+   * either one wouldn't inherit across to the other. */
+  --bottom-nav-h: 54px;
 }
 
 .dark {
