@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow, parseISO } from "date-fns";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ClipboardPaste, ExternalLink, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -106,6 +106,7 @@ export function SyncSection() {
 function RefreshTokenCard() {
   const qc = useQueryClient();
   const [ticket, setTicket] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
 
   const refresh = useMutation({
     mutationFn: (t: string) =>
@@ -119,6 +120,40 @@ function RefreshTokenCard() {
       }
     },
   });
+
+  // One-tap path: read whatever was copied from Chrome's address bar
+  // (the full redirect URL, or a bare ST-…-sso) straight off the
+  // clipboard and submit it. The backend's parse_service_ticket accepts
+  // either form, so we don't validate the shape here — we only guard the
+  // two cases the user can actually hit: clipboard unreadable, or empty.
+  // Everything else (wrong/expired ticket) surfaces through the existing
+  // refresh error UI below, same as the manual path.
+  //
+  // navigator.clipboard.readText() needs the tap as its user gesture
+  // (it has it) and, on iOS, pops the system "Allow Paste" confirmation
+  // the first time per copy — that extra tap is unavoidable (privacy)
+  // but still far less fiddly than select-in-field + paste + submit.
+  const pasteAndRefresh = async () => {
+    setPasteError(null);
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      setPasteError(
+        "读不到剪贴板（可能没授权）。请在下面的输入框手动粘贴。",
+      );
+      return;
+    }
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setPasteError(
+        "剪贴板是空的——先在 Chrome 地址栏整条 URL 上 Copy，再回来点这里。",
+      );
+      return;
+    }
+    setTicket(trimmed); // show what we're submitting; stays for retry/edit
+    refresh.mutate(trimmed);
+  };
 
   return (
     <Card className="border-warm-accent/40 bg-warm-bg/40">
@@ -186,7 +221,26 @@ function RefreshTokenCard() {
             </span>
             <div className="flex-1 space-y-2">
               <p>
-                Paste it below within ~1 minute (the ticket expires fast).
+                Back here within ~1 minute (the ticket expires fast), tap{" "}
+                <strong>Paste &amp; refresh</strong> — it reads the URL you
+                just copied straight from the clipboard.
+              </p>
+              <Button
+                type="button"
+                onClick={pasteAndRefresh}
+                disabled={refresh.isPending}
+                className="w-full sm:w-auto"
+              >
+                <ClipboardPaste className="size-4" aria-hidden />
+                {refresh.isPending ? "Exchanging…" : "Paste & refresh"}
+              </Button>
+              {pasteError && (
+                <p className="text-sm text-rose-700 dark:text-rose-400">
+                  {pasteError}
+                </p>
+              )}
+              <p className="pt-1 text-xs text-muted-foreground">
+                Or paste it manually:
               </p>
               <Input
                 value={ticket}
@@ -199,6 +253,7 @@ function RefreshTokenCard() {
               />
               <Button
                 type="button"
+                variant="secondary"
                 onClick={() => refresh.mutate(ticket.trim())}
                 disabled={!ticket.trim() || refresh.isPending}
               >
