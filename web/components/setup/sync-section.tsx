@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow, parseISO } from "date-fns";
 import { ClipboardPaste, ExternalLink, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -108,6 +108,20 @@ function RefreshTokenCard() {
   const [ticket, setTicket] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
 
+  // Synchronous re-entrancy guard for pasteAndRefresh. A useState/`isPending`
+  // check is NOT enough: pasteAndRefresh awaits the clipboard read BEFORE
+  // refresh.mutate fires, and during that gap refresh.isPending is still
+  // false — so a second tap in the read window would pass an isPending
+  // check and fire a second mutate with the SAME single-use ST-…-sso
+  // ticket. The first submit spends the ticket; the second then fails on
+  // the spent ticket, and whichever settles last owns refresh.data — so a
+  // real success can flip to a red "Exchange failed". A ref flips
+  // synchronously (no render needed) the instant the first tap enters, so
+  // the second tap returns early. Released in the mutation's onSettled (so
+  // it covers the whole read→mutate→response span) and on the early-exit
+  // error paths (so the user can retry after a failed clipboard read).
+  const pasting = useRef(false);
+
   const refresh = useMutation({
     mutationFn: (t: string) =>
       apiPost<RefreshTokenResult>("/api/sync/garmin/refresh-token", {
@@ -118,6 +132,9 @@ function RefreshTokenCard() {
         setTicket("");
         qc.invalidateQueries({ queryKey: ["sync", "garmin", "status"] });
       }
+    },
+    onSettled: () => {
+      pasting.current = false;
     },
   });
 
@@ -134,11 +151,14 @@ function RefreshTokenCard() {
   // the first time per copy — that extra tap is unavoidable (privacy)
   // but still far less fiddly than select-in-field + paste + submit.
   const pasteAndRefresh = async () => {
+    if (pasting.current) return; // re-entrancy guard (see `pasting` above)
+    pasting.current = true;
     setPasteError(null);
     let text = "";
     try {
       text = await navigator.clipboard.readText();
     } catch {
+      pasting.current = false;
       setPasteError(
         "读不到剪贴板（可能没授权）。请在下面的输入框手动粘贴。",
       );
@@ -146,13 +166,14 @@ function RefreshTokenCard() {
     }
     const trimmed = text.trim();
     if (!trimmed) {
+      pasting.current = false;
       setPasteError(
         "剪贴板是空的——先在 Chrome 地址栏整条 URL 上 Copy，再回来点这里。",
       );
       return;
     }
     setTicket(trimmed); // show what we're submitting; stays for retry/edit
-    refresh.mutate(trimmed);
+    refresh.mutate(trimmed); // pasting.current released in onSettled
   };
 
   return (
