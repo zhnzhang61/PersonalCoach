@@ -312,6 +312,16 @@ def _build_gcal_mock() -> MagicMock:
         "https://accounts.google.com/o/oauth2/auth?mock=1", "mock_state",
     )
     m.is_connected.return_value = False
+    # connection_state() is the real source of truth now (is_connected is a
+    # thin bool over it). Derive it from is_connected.return_value so the
+    # many tests that flip `m.is_connected.return_value = True/False`
+    # automatically get a coherent state string ("connected"/"disconnected")
+    # for the /api/calendar/events + /status endpoints, which branch on
+    # connection_state(). A test wanting "expired" can override with
+    # `m.connection_state.side_effect = lambda: "expired"`.
+    m.connection_state.side_effect = (
+        lambda: "connected" if m.is_connected.return_value else "disconnected"
+    )
     m.list_events.return_value = []
     m.finish_flow.return_value = None
     m.disconnect.return_value = None

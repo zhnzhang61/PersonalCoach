@@ -232,8 +232,11 @@ signs in directly, the app stores the resulting tokens.
     → *Publish app*; no Google verification needed for personal use —
     accept the "unverified app" warning), then re-consent once to mint a
     long-lived refresh token. `connection_state()` now returns
-    `"expired"` vs `"disconnected"` so the UI prompts **Reconnect**
-    rather than pretending the link never existed.
+    `"expired"` (token rejected → **Reconnect**) vs `"disconnected"`
+    (never linked → **Connect**) vs `"error"` (couldn't *reach* Google to
+    refresh — network blip — → neutral note, no reconnect prompt), so the
+    UI stops pretending a dead-token link never existed and stops crying
+    "reconnect" over a transient outage.
 
 ##### Garmin token setup (the 429 workaround)
 

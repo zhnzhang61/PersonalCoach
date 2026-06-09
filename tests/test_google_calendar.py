@@ -384,6 +384,27 @@ class TestConnectionState:
         ):
             assert cal.connection_state() == "expired"
 
+    def test_error_when_refresh_unreachable(self, tmp_path):
+        """Token may be valid, but the refresh() network call couldn't
+        reach Google (TransportError != RefreshError). Must report
+        'error' — a transient outage, NOT 'expired'. Telling the user to
+        reconnect here would be wrong: the token still works once the
+        network recovers."""
+        from google.auth.exceptions import TransportError
+
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        cal.token_path.write_text('{"token":"abc"}')
+        fake_creds = MagicMock()
+        fake_creds.expired = True
+        fake_creds.refresh_token = "valid-tok"
+        fake_creds.refresh.side_effect = TransportError("Connection refused")
+        with patch.object(
+            gc.Credentials, "from_authorized_user_file", return_value=fake_creds,
+        ):
+            assert cal.connection_state() == "error"
+            # is_connected stays False (== 'connected' only), unchanged.
+            assert cal.is_connected() is False
+
     def test_expired_when_token_file_corrupt(self, tmp_path):
         """A file exists but won't parse — there IS a link to repair, so
         'expired' (reconnect), not 'disconnected' (never connected)."""

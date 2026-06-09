@@ -206,8 +206,10 @@ token。
     显示首次「Connect」。**修法：** 把 OAuth 应用发布到 **Production**
     （APIs & Services → OAuth consent screen → *Publish app*；自用不需要
     Google 验证，接受「未验证应用」警告即可），再重新授权一次拿到长效
-    refresh token。`connection_state()` 现在区分 `"expired"` 和
-    `"disconnected"`，所以 UI 提示 **Reconnect** 而不是假装从没连过。
+    refresh token。`connection_state()` 现在区分 `"expired"`（token 被拒
+    → **Reconnect**）、`"disconnected"`（从没连过 → **Connect**）和
+    `"error"`（够不到 Google 去刷新——网络抖动——→ 中性提示、不催重连），
+    所以 UI 既不会把过期的连接当成从没连过，也不会因为一次网络抖动就喊重连。
 
 ##### Garmin token 设置（429 绕过流程）
 

@@ -533,16 +533,18 @@ export interface CalendarEvent {
   manual_activity?: ManualActivity;
 }
 
-export type GoogleConnectionState = "connected" | "expired" | "disconnected";
+export type GoogleConnectionState =
+  | "connected"
+  | "expired" // link exists but token rejected (revoked / Testing 7-day cap) ⇒ Reconnect
+  | "disconnected" // never linked ⇒ first-time Connect
+  | "error"; // couldn't REACH Google to refresh (network/outage) ⇒ neutral, no reconnect
 
 export interface CalendarEventsResponse {
   start: string;
   end: string;
   google_connected: boolean;
-  // "expired" ⇒ a link exists but the refresh token died (revoked /
-  // Google Testing-mode 7-day cap) ⇒ prompt RE-connect, not first-time
-  // connect. "disconnected" ⇒ never linked. Optional for back-compat
-  // with any cached/old response that predates the field.
+  // See GoogleConnectionState. Optional for back-compat with any
+  // cached/old response that predates the field.
   google_state?: GoogleConnectionState;
   events: CalendarEvent[];
 }

@@ -37,7 +37,7 @@ def _maybe_allow_insecure_localhost() -> None:
 
 _maybe_allow_insecure_localhost()
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -174,14 +174,20 @@ class GoogleCalendar:
 
         - ``"disconnected"`` — no token on disk: never linked (or the
           user disconnected). UI shows a first-time "Connect".
-        - ``"expired"`` — a token IS on disk but loading/refreshing it
-          failed: the refresh token was revoked or hit Google's 7-day
-          "Testing"-mode expiry, or the file is corrupt. UI should say
-          "session expired, reconnect" — NOT pretend it was never linked.
+        - ``"expired"`` — a token IS on disk but it's no good: the refresh
+          token was revoked or hit Google's 7-day "Testing"-mode expiry,
+          or the file is corrupt. UI says "session expired, reconnect" —
+          NOT pretend it was never linked.
+        - ``"error"`` — a token is on disk and may be perfectly valid, but
+          we couldn't *reach* Google to refresh it (network blip, DNS,
+          Google outage). Distinct from "expired" on purpose: telling the
+          user to reconnect over a transient outage is wrong — the token
+          still works once the network recovers. UI shows a neutral
+          "couldn't reach Google" note, no reconnect prompt.
         - ``"connected"`` — creds load (refreshing if needed) cleanly.
 
-        Why this exists: ``is_connected()`` collapsed "expired" and
-        "never connected" into a single ``False``, so the Training tab
+        Why this exists: ``is_connected()`` collapsed "expired", "error",
+        and "never connected" into a single ``False``, so the Training tab
         showed a first-time "Connect Google Calendar" prompt every time
         the daily refresh token died — giving no hint that the fix is a
         re-auth of an existing link. (The refresh-token death itself is
@@ -193,11 +199,19 @@ class GoogleCalendar:
         try:
             return "connected" if self._load_creds() is not None else "disconnected"
         except RefreshError:
-            # Refresh token revoked / expired (Testing-mode 7-day cap).
+            # The token was rejected: refresh token revoked / expired
+            # (Testing-mode 7-day cap). A real re-auth is needed.
             return "expired"
+        except TransportError:
+            # Couldn't reach Google's token endpoint to refresh inside
+            # _load_creds() (network blip, DNS, Google outage). The token
+            # may be fine — do NOT push "reconnect"; this self-heals when
+            # the network recovers.
+            return "error"
         except Exception:
-            # Corrupt / schema-incompatible token file. There IS a file,
-            # so surface "reconnect", not "never connected".
+            # Corrupt / schema-incompatible token file, or any other
+            # unexpected load failure. A file exists, so "reconnect"
+            # beats "never connected".
             return "expired"
 
     def is_connected(self) -> bool:
