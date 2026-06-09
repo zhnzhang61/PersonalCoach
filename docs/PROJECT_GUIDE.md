@@ -221,6 +221,22 @@ signs in directly, the app stores the resulting tokens.
     them and returns just `events`, which trips
     `oauthlib`'s strict scope check → callback errors → silent
     "not connected". List `calendar.events` only.
+  - **Gotcha — the 7-day "Testing" refresh-token expiry (cost another
+    session, 2026-06-08):** a Google OAuth app in **"Testing"**
+    publishing status issues refresh tokens that **expire after 7 days**
+    (for non-trivial scopes like `calendar.events`). Symptom: it works
+    for a week, then `refresh()` throws
+    `invalid_grant: Token has been expired or revoked`, and the Training
+    tab silently shows a first-time "Connect". **Fix:** publish the
+    OAuth app to **Production** (APIs & Services → OAuth consent screen
+    → *Publish app*; no Google verification needed for personal use —
+    accept the "unverified app" warning), then re-consent once to mint a
+    long-lived refresh token. `connection_state()` now returns
+    `"expired"` (token rejected → **Reconnect**) vs `"disconnected"`
+    (never linked → **Connect**) vs `"error"` (couldn't *reach* Google to
+    refresh — network blip — → neutral note, no reconnect prompt), so the
+    UI stops pretending a dead-token link never existed and stops crying
+    "reconnect" over a transient outage.
 
 ##### Garmin token setup (the 429 workaround)
 

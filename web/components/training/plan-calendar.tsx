@@ -6,7 +6,7 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
-import { Plug } from "lucide-react";
+import { CloudOff, Plug } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
@@ -86,7 +86,16 @@ export function PlanCalendar() {
       });
   }, [eventsQuery.data]);
 
-  const googleConnected = eventsQuery.data?.google_connected ?? null;
+  // "expired" (refresh token died) vs "disconnected" (never linked) drive
+  // different copy below — see the banner. Fall back to deriving from the
+  // boolean for any old/cached response that predates google_state.
+  const googleState =
+    eventsQuery.data?.google_state ??
+    (eventsQuery.data
+      ? eventsQuery.data.google_connected
+        ? "connected"
+        : "disconnected"
+      : null);
   const googleError = eventsQuery.data?.events.find(
     (e) => e.source === "google_error",
   );
@@ -121,8 +130,25 @@ export function PlanCalendar() {
           </div>
         </div>
 
-        {/* Google connection state — banner above the calendar */}
-        {googleConnected === false && (
+        {/* Google connection state — banner above the calendar. "expired"
+            (the link exists but the refresh token died) gets a distinct,
+            warmer treatment + "Reconnect" wording so the user knows this
+            is a re-auth of an existing link, not a first-time setup. The
+            href is the same /oauth/google/start either way. */}
+        {googleState === "expired" && (
+          <a
+            href="/oauth/google/start"
+            className="flex items-center gap-2 rounded-md border border-warm-accent/40 bg-warm-bg/40 p-3 text-xs hover:bg-warm-bg/60"
+          >
+            <Plug className="size-4 text-warm-fg" />
+            <span className="flex-1">
+              Google Calendar session expired — reconnect to keep seeing life
+              events alongside your training.
+            </span>
+            <span className="font-medium text-foreground">Reconnect</span>
+          </a>
+        )}
+        {googleState === "disconnected" && (
           <a
             href="/oauth/google/start"
             className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs hover:bg-muted/50"
@@ -133,6 +159,20 @@ export function PlanCalendar() {
             </span>
             <span className="font-medium text-foreground">Connect</span>
           </a>
+        )}
+        {/* "error" = couldn't reach Google to refresh a token that may be
+            perfectly valid (network blip / outage). Deliberately NOT an
+            <a> and NOT a reconnect prompt — the link still works once the
+            network recovers; pushing re-auth here would be wrong. Just a
+            calm, action-less note. */}
+        {googleState === "error" && (
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+            <CloudOff className="size-4 shrink-0" />
+            <span className="flex-1">
+              Couldn&rsquo;t reach Google Calendar just now — life events will
+              reappear automatically once the connection is back.
+            </span>
+          </div>
         )}
         {googleError && (
           <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-xs text-rose-700 dark:text-rose-300">
