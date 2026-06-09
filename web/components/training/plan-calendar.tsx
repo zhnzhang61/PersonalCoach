@@ -86,7 +86,16 @@ export function PlanCalendar() {
       });
   }, [eventsQuery.data]);
 
-  const googleConnected = eventsQuery.data?.google_connected ?? null;
+  // "expired" (refresh token died) vs "disconnected" (never linked) drive
+  // different copy below — see the banner. Fall back to deriving from the
+  // boolean for any old/cached response that predates google_state.
+  const googleState =
+    eventsQuery.data?.google_state ??
+    (eventsQuery.data
+      ? eventsQuery.data.google_connected
+        ? "connected"
+        : "disconnected"
+      : null);
   const googleError = eventsQuery.data?.events.find(
     (e) => e.source === "google_error",
   );
@@ -121,8 +130,25 @@ export function PlanCalendar() {
           </div>
         </div>
 
-        {/* Google connection state — banner above the calendar */}
-        {googleConnected === false && (
+        {/* Google connection state — banner above the calendar. "expired"
+            (the link exists but the refresh token died) gets a distinct,
+            warmer treatment + "Reconnect" wording so the user knows this
+            is a re-auth of an existing link, not a first-time setup. The
+            href is the same /oauth/google/start either way. */}
+        {googleState === "expired" && (
+          <a
+            href="/oauth/google/start"
+            className="flex items-center gap-2 rounded-md border border-warm-accent/40 bg-warm-bg/40 p-3 text-xs hover:bg-warm-bg/60"
+          >
+            <Plug className="size-4 text-warm-fg" />
+            <span className="flex-1">
+              Google Calendar session expired — reconnect to keep seeing life
+              events alongside your training.
+            </span>
+            <span className="font-medium text-foreground">Reconnect</span>
+          </a>
+        )}
+        {googleState === "disconnected" && (
           <a
             href="/oauth/google/start"
             className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs hover:bg-muted/50"

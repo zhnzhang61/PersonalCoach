@@ -37,6 +37,7 @@ def _maybe_allow_insecure_localhost() -> None:
 
 _maybe_allow_insecure_localhost()
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -168,11 +169,39 @@ class GoogleCalendar:
             self._save_creds(creds)
         return creds
 
-    def is_connected(self) -> bool:
+    def connection_state(self) -> str:
+        """Coarse connection status for the UI. One of:
+
+        - ``"disconnected"`` — no token on disk: never linked (or the
+          user disconnected). UI shows a first-time "Connect".
+        - ``"expired"`` — a token IS on disk but loading/refreshing it
+          failed: the refresh token was revoked or hit Google's 7-day
+          "Testing"-mode expiry, or the file is corrupt. UI should say
+          "session expired, reconnect" — NOT pretend it was never linked.
+        - ``"connected"`` — creds load (refreshing if needed) cleanly.
+
+        Why this exists: ``is_connected()`` collapsed "expired" and
+        "never connected" into a single ``False``, so the Training tab
+        showed a first-time "Connect Google Calendar" prompt every time
+        the daily refresh token died — giving no hint that the fix is a
+        re-auth of an existing link. (The refresh-token death itself is
+        expected on a "Testing"-status OAuth app; see the SCOPES note and
+        docs/PROJECT_GUIDE.md §3.2.)
+        """
+        if not self.token_path.exists():
+            return "disconnected"
         try:
-            return self._load_creds() is not None
+            return "connected" if self._load_creds() is not None else "disconnected"
+        except RefreshError:
+            # Refresh token revoked / expired (Testing-mode 7-day cap).
+            return "expired"
         except Exception:
-            return False
+            # Corrupt / schema-incompatible token file. There IS a file,
+            # so surface "reconnect", not "never connected".
+            return "expired"
+
+    def is_connected(self) -> bool:
+        return self.connection_state() == "connected"
 
     def disconnect(self) -> None:
         if self.token_path.exists():

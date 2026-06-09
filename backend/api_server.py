@@ -483,7 +483,10 @@ from fastapi.responses import RedirectResponse
 
 @app.get("/api/oauth/google/status")
 def oauth_google_status() -> dict[str, Any]:
-    return {"connected": gcal.is_connected()}
+    state = gcal.connection_state()
+    # `connected` kept for backward compat; `state` distinguishes
+    # "expired" (reconnect) from "disconnected" (first-time connect).
+    return {"connected": state == "connected", "state": state}
 
 
 @app.get("/oauth/google/start")
@@ -556,7 +559,8 @@ def calendar_events(
     events: list[dict[str, Any]] = []
 
     # ---- Google Calendar (life events: work blocks, PT, sauna, etc.) ----
-    google_connected = gcal.is_connected()
+    google_state = gcal.connection_state()
+    google_connected = google_state == "connected"
     if google_connected:
         try:
             from backend.google_calendar import PLANNED_WORKOUT_MARKER
@@ -635,6 +639,7 @@ def calendar_events(
         "start": start,
         "end": end,
         "google_connected": google_connected,
+        "google_state": google_state,
         "events": events,
     }
 

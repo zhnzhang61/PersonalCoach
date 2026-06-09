@@ -198,6 +198,16 @@ token。
     `calendar.events`——Google 会合并成只给 `events`，触发 `oauthlib`
     的严格 scope 检查 → callback 报错 → 静默"未连接"。只列
     `calendar.events`。
+  - **坑——「Testing」状态下 refresh token 7 天过期（又搭进去一段，
+    2026-06-08）：** Google OAuth 应用处于 **「Testing」** 发布状态时，
+    对 `calendar.events` 这类非平凡 scope 签发的 refresh token **7 天后
+    过期**。症状：能用一周，然后 `refresh()` 抛
+    `invalid_grant: Token has been expired or revoked`，Training 页静默
+    显示首次「Connect」。**修法：** 把 OAuth 应用发布到 **Production**
+    （APIs & Services → OAuth consent screen → *Publish app*；自用不需要
+    Google 验证，接受「未验证应用」警告即可），再重新授权一次拿到长效
+    refresh token。`connection_state()` 现在区分 `"expired"` 和
+    `"disconnected"`，所以 UI 提示 **Reconnect** 而不是假装从没连过。
 
 ##### Garmin token 设置（429 绕过流程）
 

@@ -344,6 +344,76 @@ class TestIsConnected:
             assert cal.is_connected() is False
 
 
+class TestConnectionState:
+    """connection_state() must distinguish 'expired' (a link exists but
+    the refresh token died — Testing-mode 7-day cap / revoked) from
+    'disconnected' (never linked). is_connected() collapsed both to
+    False, so the UI couldn't tell 'reconnect' from 'first-time connect'."""
+
+    def test_disconnected_when_no_token(self, tmp_path):
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        assert cal.connection_state() == "disconnected"
+
+    def test_connected_when_healthy(self, tmp_path):
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        cal.token_path.write_text("{}")
+        fake_creds = MagicMock()
+        fake_creds.expired = False
+        fake_creds.refresh_token = "r"
+        with patch.object(
+            gc.Credentials, "from_authorized_user_file", return_value=fake_creds,
+        ):
+            assert cal.connection_state() == "connected"
+
+    def test_expired_when_refresh_revoked(self, tmp_path):
+        """The exact production failure: token on disk, expired, and the
+        refresh call raises RefreshError (invalid_grant). Must report
+        'expired', not 'disconnected'."""
+        from google.auth.exceptions import RefreshError
+
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        cal.token_path.write_text('{"token":"abc"}')
+        fake_creds = MagicMock()
+        fake_creds.expired = True
+        fake_creds.refresh_token = "revoked-tok"
+        fake_creds.refresh.side_effect = RefreshError(
+            "invalid_grant: Token has been expired or revoked."
+        )
+        with patch.object(
+            gc.Credentials, "from_authorized_user_file", return_value=fake_creds,
+        ):
+            assert cal.connection_state() == "expired"
+
+    def test_expired_when_token_file_corrupt(self, tmp_path):
+        """A file exists but won't parse — there IS a link to repair, so
+        'expired' (reconnect), not 'disconnected' (never connected)."""
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        cal.token_path.write_text("not-json")
+        with patch.object(
+            gc.Credentials,
+            "from_authorized_user_file",
+            side_effect=ValueError("corrupt"),
+        ):
+            assert cal.connection_state() == "expired"
+
+    def test_is_connected_delegates_to_state(self, tmp_path):
+        """is_connected() is now a thin bool over connection_state(): True
+        only for 'connected', False for 'expired'/'disconnected'."""
+        from google.auth.exceptions import RefreshError
+
+        cal = gc.GoogleCalendar(data_dir=str(tmp_path))
+        cal.token_path.write_text('{"token":"abc"}')
+        fake_creds = MagicMock()
+        fake_creds.expired = True
+        fake_creds.refresh_token = "revoked-tok"
+        fake_creds.refresh.side_effect = RefreshError("invalid_grant")
+        with patch.object(
+            gc.Credentials, "from_authorized_user_file", return_value=fake_creds,
+        ):
+            assert cal.connection_state() == "expired"
+            assert cal.is_connected() is False
+
+
 class TestDisconnect:
     def test_removes_token_file(self, tmp_path):
         cal = gc.GoogleCalendar(data_dir=str(tmp_path))
