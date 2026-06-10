@@ -592,6 +592,11 @@ export interface CoachMessage {
   role: "human" | "ai" | "system" | "tool";
   content: string;
   ts?: string;
+  // Profile.*/Cycle.* areas ACTUALLY written this turn — derived
+  // server-side from checkpointed record_coach_fact tool calls (live:
+  // from fact_recorded SSE events). Source of truth for the
+  // "档案已更新 ✓" badge; the model's prose never sets this.
+  facts_recorded?: string[];
 }
 
 export interface CoachSession {

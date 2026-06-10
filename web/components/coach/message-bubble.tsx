@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, FileCheck2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -84,6 +84,29 @@ export function MessageBubble({ message }: Props) {
           </div>
         )}
       </div>
+      {/* "档案已更新 ✓" — rendered ONLY from facts_recorded, which the
+        * backend derives from record_coach_fact tool calls that actually
+        * happened (checkpointed; or fact_recorded SSE events while
+        * streaming). Deliberately NOT parsed from the model's text: the
+        * agent once claimed "已将信息更新至你的档案" with zero tool calls
+        * (2026-05-30). This badge is the source of truth for "did it
+        * record" — if the model says it recorded and this badge is
+        * absent, the model is lying. */}
+      {!isUser && (message.facts_recorded?.length ?? 0) > 0 && (
+        <div className="ml-1 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-emerald-700 dark:text-emerald-400">
+          <FileCheck2 className="size-3" aria-hidden />
+          <span>
+            档案已更新:{" "}
+            {message.facts_recorded!.map((a, i) => (
+              <span key={`${a}-${i}`} className="font-mono">
+                {a}
+                {i < message.facts_recorded!.length - 1 ? ", " : ""}
+              </span>
+            ))}{" "}
+            ✓
+          </span>
+        </div>
+      )}
       <button
         type="button"
         onClick={copy}

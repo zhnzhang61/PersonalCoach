@@ -440,7 +440,7 @@ context.
 
 #### 3.4.3 Prompt versioning
 
-`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v10**).
+`PROMPT_VERSION` constant in `agentic_coach.py` (currently **v11**).
 The system prompt is built per-turn by `_build_prompt(state)` — it
 prepends today's date (tz-aware, honors `PERSONAL_COACH_TZ`) in front
 of the static persona so the agent never schedules workouts in the
@@ -471,6 +471,7 @@ The canonical hash is logged at AgenticCoach init (grep startup output).
 
 | Version | Date | What changed | PR |
 |---|---|---|---|
+| **v11** | 2026-06-10 | Record-discipline rules appended to the intake block (`render_intake_prompt_section()`): (1) **any-turn capture** — when the user states a fact answering an unfilled Profile.\*/Cycle.\* slot (asked OR volunteered, chat or action), call `record_coach_fact` that same turn; (2) **memory promotion** — a fact retrieved from own memory (`recall_topics`/`search_episodes`) for an unfilled slot must also be written back with provenance; (3) **act-before-claim** — never say 已记录/已更新档案 unless the call actually happened this turn (the Layer-2 claim-vs-action check enforces this in code). Anti-fabrication guardrail reworded: "user said it earlier / it's in memory" ≠ 脑补 — the former must be promoted, the latter still asked. Motivated by the 2026-05-30 incident: the model claimed "已将信息更新至你的档案" with zero tool calls. | (this PR) |
 | **v10** | 2026-05-29 | Daily check-in (P3 perceived stream) wired into the agent. `_prefetch_review_health` / `_prefetch_review_workout` / `_prefetch_make_plan` now all pull `get_recent_checkins(days=7)`. The "perceived" section of `_SYSTEM_PROMPT` now describes the daily check-in as a third user-authored layer (4 sliders + notes) and pins the **don't-re-ask rule**: read `get_recent_checkins` before asking "how do you feel today" / "今天感觉如何"; if today's row exists, cite the values and reason from them — only ask for detail beyond the sliders or when today's row is genuinely missing. Fixes the P3 orphan where the check-in tool existed since #83 but the coach never consumed it, so it kept re-asking the user what they'd already filled in. | [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96) |
 | **v9** | 2026-05-29 | Athlete-profile (A) + cycle-config (B) intake block appended to `_SYSTEM_PROMPT`, rendered from `coach_intake` slots via `render_intake_prompt_section()` (good/vague standard per area). Instructs: read `get_coach_profile`/`get_cycle_config`, judge required + specific-enough, on a missing/vague required area ask ONE follow-up and STOP (record the answer only after the user replies next turn — never fabricate it), don't re-ask `pending_count>0` gaps. `make_plan` also gained an instruction bullet. Editing a slot exemplar in `coach_intake.py` now triggers this contract. | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | Per-turn date-header wrapper (`_HEADER_TEMPLATE`) in front of `_SYSTEM_PROMPT`. Pins "Today is YYYY-MM-DD (Weekday)" + relative-time directive in English + Chinese (`今天 / 明天 / 后天 / 这周`) + "never schedule in the past". Today via `datetime.now(_user_tz()).date()` (honors `PERSONAL_COACH_TZ`, falls back to process-local). Hash now covers wrapper + persona with a sentinel date. Fixed a real bug: agent wrote a "今天 easy run" to 2026-05-14 with no date anchor. | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
@@ -780,6 +781,53 @@ park it), so it neither plans on air nor interrogates the user.
   instruction bullet; tests in `test_personal_coach_mcp.py`,
   `test_api_server_behavior.py`, `test_agentic_coach_basics.py`.
 
+##### Claim-vs-action enforcement (治说谎)
+
+> **Why this exists.** 2026-05-30, thread `coach_20260530T143250Z`: the
+> user answered EVERY intake slot in one message (race, date, A/B/C
+> goals, availability, injuries); the model replied "收到…我已将以下信息
+> 更新至你的档案…" with **zero tool calls**. The recording was claimed,
+> not performed — the slot stayed empty and the coach re-asked for days.
+> A model can lie to the user, but not to an if-statement. 4th instance
+> of the §4.5 "capability exists but agent never consumes it" shape
+> (#84 / #95 / #96 prior).
+
+Three layers, all shipped together (`backend/claim_check.py` is the
+pure, unit-tested core):
+
+1. **Prompt discipline (v11)** — the intake block now binds: any-turn
+   capture (volunteered facts recorded the same turn), memory promotion
+   (facts retrieved via `recall_topics`/`search_episodes` for an
+   unfilled slot get written back with provenance), act-before-claim
+   (never say 已记录 unless the call happened this turn). Necessary but
+   not sufficient — layers 2–3 are the actual guarantees.
+2. **Deterministic claim-vs-action check** — after every turn (sync
+   `_enforce_record_claim`; an inline streaming twin in `chat_stream`),
+   if the answer matches a completed-write claim pattern
+   (`claims_recording`; future-tense promises and descriptive reads
+   excluded by design) and the turn's collected tool calls contain no
+   `record_coach_fact`, the agent gets ONE corrective round (a
+   `[系统校验]`-prefixed message, hidden from history/consolidation):
+   record for real or retract. Still claiming falsely afterwards → a
+   deterministic "⚠️ 系统校验：本轮未发生档案写入" line is appended.
+   Every trigger lands in the trace row's `extras.claim_check`
+   (`triggered` / `corrected` / `areas`) so frequency is measurable.
+3. **Actions, not words (UI badge)** — `chat_stream` emits
+   `fact_recorded` (on `on_tool_end` of `record_coach_fact`) and
+   `/api/ai/history` stamps `facts_recorded: [areas]` onto each turn's
+   final ai message, derived from **checkpointed tool calls** — so the
+   badge survives reloads and covers non-streaming actions too. The
+   Coach UI renders "档案已更新: \<area\> ✓" from this field only.
+   **The badge, not the model's prose, is the source of truth for
+   "did it record".** Model says recorded + no badge = it's lying, and
+   layer 2 already caught it.
+
+Known edge (documented in `claim_check.py`): a TRUE claim about a fact
+recorded in a *previous* turn ("是的，已记录在案") can trigger one
+correction round — the model re-records (harmless: the CME
+two-threshold write dedups) or rephrases. Bounded cost, accepted in
+exchange for never letting a false claim through unchallenged.
+
 ---
 
 ## 4. Engineering debt
@@ -873,6 +921,13 @@ Backend is now a `backend/` package (was a flat top-level dump);
   intentionally on-demand-only and not appropriate for either. ~½ day to
   write the test + iterate the allowlist; cheap insurance against a
   fourth instance of the same shape.
+  **Update (2026-06-10): the fourth instance happened anyway** — the
+  agent CLAIMED `record_coach_fact` writes without calling the tool
+  (2026-05-30 incident; a worse variant: not just unconsumed, but
+  claimed-as-consumed). That specific case now has *runtime*
+  enforcement — the claim-vs-action check in §3.4.5 — which is stronger
+  than the static test for write-tools. The static prefetch/prompt
+  coverage test above is still worth writing for read-tools.
 
 (*Sync gap-resilience + stub detection shipped in #77 — `_is_stub` in
 `garmin_sync.py` + `days_back` bumped 5→30 — so it's no longer a gap.*)

@@ -61,6 +61,10 @@ export async function apiDelete<T>(path: string): Promise<T> {
 export type SSEEvent =
   | { type: "token"; content: string }
   | { type: "tool_call"; name: string }
+  // A record_coach_fact write actually COMPLETED (backend emits on
+  // on_tool_end) — drives the "档案已更新 ✓" badge. Actions, not words:
+  // the model claiming it recorded something never produces this event.
+  | { type: "fact_recorded"; area: string }
   | { type: "done" }
   | { type: "error"; message: string };
 

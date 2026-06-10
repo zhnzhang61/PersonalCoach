@@ -391,7 +391,7 @@ context 注入。
 
 #### 3.4.3 Prompt 版本管理
 
-`agentic_coach.py` 里的 `PROMPT_VERSION` 常量（当前 **v10**）。system
+`agentic_coach.py` 里的 `PROMPT_VERSION` 常量（当前 **v11**）。system
 prompt 每轮由 `_build_prompt(state)` 构建——它在静态人设前面前置今天的日期
 （tz-aware，认 `PERSONAL_COACH_TZ`），这样 agent 不会把训练排到过去。
 trace 的 `prompt_hash` 算的是
@@ -418,6 +418,7 @@ jq -c 'select(.prompt_version == "v10" and .prompt_hash != "<current>")' \
 
 | 版本 | 日期 | 改了什么 | PR |
 |---|---|---|---|
+| **v11** | 2026-06-10 | intake 段（`render_intake_prompt_section()`）追加「记录纪律」三条：(1) **任意回合采集**——用户说出能回答未填 Profile.\*/Cycle.\* 槽位的事实（被问到或主动提及、聊天或 action 都算），**当回合**就调 `record_coach_fact`；(2) **记忆提升**——用 `recall_topics`/`search_episodes` 从记忆里查到未填槽位的事实并据此回答，也必须当回合回填（注明来源）；(3) **先做后说**——本回合工具调用真实发生之前，不许说「已记录 / 已更新档案」（Layer-2 对账会在代码层强制）。防脑补 guardrail 重新措辞：「用户此前说过、记忆有据可查」≠ 脑补——前者必须回填，后者必须先问。动机：2026-05-30 事故，模型零工具调用却声称「已将信息更新至你的档案」。 | (本 PR) |
 | **v10** | 2026-05-29 | 把每日 check-in（P3 perceived 流）接进 agent。`_prefetch_review_health` / `_prefetch_review_workout` / `_prefetch_make_plan` 都加了 `get_recent_checkins(days=7)`。`_SYSTEM_PROMPT` 的 perceived 段把每日 check-in 列为第三个用户自填层（4 个 0-5 滑块 + notes），并钉死**别重复问**的规矩：问"今天感觉如何"之前**先读** `get_recent_checkins`；今天已经填了就直接引用滑块值、别重复问；只有滑块覆盖不到或今天确实没填时才追问。修了 P3 时的孤儿——`get_recent_checkins` 工具 #83 就建好了，但教练从来没消费过它，所以一直在重复问用户已经填过的东西。 | [#96](https://github.com/zhnzhang61/PersonalCoach/pull/96) |
 | **v9** | 2026-05-29 | 把运动员档案（A）+ 周期配置（B）的 intake 段追加进 `_SYSTEM_PROMPT`，由 `coach_intake` 的 slot 经 `render_intake_prompt_section()` 渲染（每个 area 带 good/vague 标准）。指令：读 `get_coach_profile`/`get_cycle_config`，判断必需 + 够不够具体，缺/含糊的必需 area → **只问一个然后停下**（用户下一轮回答后再 `record_coach_fact`，绝不脑补），别重复问 `pending_count>0` 的 gap。`make_plan` 也加了一条指令。以后改 `coach_intake.py` 里的 slot 范例也触发这条契约。 | [#95](https://github.com/zhnzhang61/PersonalCoach/pull/95) |
 | **v8** | 2026-05-27 | 在 `_SYSTEM_PROMPT` 前加每轮渲染的日期 header（`_HEADER_TEMPLATE`）。前置 "Today is YYYY-MM-DD (Weekday)" + 中英文相对时间指令（`今天 / 明天 / 后天 / 这周`）+ "绝不把训练排到过去"。今天用 `datetime.now(_user_tz()).date()`（认 `PERSONAL_COACH_TZ`，否则进程本地 tz）。hash 改为覆盖 wrapper + 人设（用 sentinel date）。修了一个真 bug：agent 把"今天 easy run"排到了 2026-05-14，因为它没有日期锚点。 | [#84](https://github.com/zhnzhang61/PersonalCoach/pull/84) |
@@ -681,6 +682,41 @@ guideline 故意收得很紧：明确告诉 agent 什么时候该问（必需 + 
   coach-profile）+ 一条 make_plan 指令；测试在 `test_personal_coach_mcp.py`、
   `test_api_server_behavior.py`、`test_agentic_coach_basics.py`。
 
+##### 声称 vs 行为对账（治说谎）
+
+> **为什么有这个。** 2026-05-30，thread `coach_20260530T143250Z`：用户一条
+> 消息答全了所有 intake 槽位（比赛、日期、A/B/C 目标、可用时间、伤病），
+> 模型回「收到…我已将以下信息更新至你的档案…」——**零工具调用**。「记录」
+> 是声称出来的，不是做出来的——槽位继续空着，教练连问了好几天。模型可以
+> 骗用户，骗不过 if 语句。这是 §4.5「能力存在但 agent 不消费」形状的第 4
+> 次（前三次 #84 / #95 / #96）。
+
+三层一起上（核心是纯函数模块 `backend/claim_check.py`，全部单测覆盖）：
+
+1. **Prompt 纪律（v11）**——intake 段绑定：任意回合采集（主动说出的事实
+   当回合记录）、记忆提升（`recall_topics`/`search_episodes` 查到的未填
+   槽位事实必须回填、注明来源）、先做后说（工具调用没发生不许说已记录）。
+   必要但不充分——真正的保证在第 2、3 层。
+2. **确定性对账**——每轮结束后（同步路径 `_enforce_record_claim`；
+   `chat_stream` 里有流式孪生实现），若回答命中「已完成写入」声称模式
+   （`claims_recording`；将来时承诺和描述既有状态的句子按设计排除）而本轮
+   工具调用里没有 `record_coach_fact`，就给 agent **一轮**纠正机会（注入
+   `[系统校验]` 前缀消息，对 history 和 consolidation 均不可见）：真实记录
+   或者改口。纠正后仍然假声称 → 追加确定性的「⚠️ 系统校验：本轮未发生档案
+   写入」。每次触发都落进 trace 行的 `extras.claim_check`
+   （`triggered` / `corrected` / `areas`），频率可量化。
+3. **信行为不信话（UI 徽章）**——`chat_stream` 发 `fact_recorded` 事件
+   （`record_coach_fact` 的 `on_tool_end` 触发），`/api/ai/history` 从
+   **checkpoint 里的真实工具调用**派生 `facts_recorded: [areas]` 打在该轮
+   最终 ai 消息上——徽章重载后仍在，也覆盖非流式 action。Coach UI 只凭这个
+   字段渲染「档案已更新: \<area\> ✓」。**判断「记没记」的唯一事实来源是
+   徽章，不是模型的话。** 模型说记了但没徽章 = 它在说谎，而且第 2 层已经
+   抓住它了。
+
+已知边界（`claim_check.py` 里有文档）：对**上一轮**已记录事实的真声称
+（「是的，已记录在案」）可能触发一轮纠正——模型会重新记录（无害：CME 的
+双阈值写入会去重）或换措辞。有界的代价，换「假声称绝不放行」。
+
 ---
 
 ## 4. 工程债
@@ -764,6 +800,11 @@ consolidate_memory_background 的轨迹"（CME 提案管道现在记 `topic_deci
   里被点名（agent 至少有一条发现路径）；少量真正只 on-demand 调的工具用
   allowlist 显式标。约半天就能写好 + 调 allowlist；当作防第四次撞同一个
   shape 的便宜保险。
+  **更新（2026-06-10）：第四次还是发生了**——agent **声称**调了
+  `record_coach_fact` 但根本没调（2026-05-30 事故；比「不消费」更糟的
+  变体：声称已消费）。这个具体 case 现在有了**运行时**强制——§3.4.5 的
+  声称 vs 行为对账——对写工具比静态测试更强。上面的静态
+  prefetch/prompt 覆盖测试对读工具仍然值得写。
 
 （*同步 gap 韧性 + stub 检测已在 #77 上线——`garmin_sync.py` 里的
 `_is_stub` + `days_back` 从 5 调到 30——所以不再是缺口。*）

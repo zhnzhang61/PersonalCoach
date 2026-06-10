@@ -124,10 +124,16 @@ export function CoachThread() {
   // Motivation (2026-06-09): the agent once claimed "已将信息更新至你的
   // 档案" with zero tool calls — these chips make that visible the
   // moment it happens instead of requiring trace archaeology.
+  // `factsRecorded` mirrors the backend's fact_recorded SSE events —
+  // record_coach_fact writes that actually COMPLETED this turn. Drives
+  // the live "档案已更新 ✓" badge; after the canonical refresh the same
+  // badge persists via the history's facts_recorded field (derived from
+  // the checkpoint, never from the model's prose).
   const [streamingTurn, setStreamingTurn] = useState<{
     userMessage: string;
     aiContent: string;
     toolCalls: string[];
+    factsRecorded: string[];
   } | null>(null);
 
   const refreshAll = () => {
@@ -213,7 +219,12 @@ export function CoachThread() {
     tid: string,
     text: string,
   ): Promise<"ok" | ReturnType<typeof classifyCoachError>> => {
-    setStreamingTurn({ userMessage: text, aiContent: "", toolCalls: [] });
+    setStreamingTurn({
+      userMessage: text,
+      aiContent: "",
+      toolCalls: [],
+      factsRecorded: [],
+    });
     let streamError: ReturnType<typeof classifyCoachError> | null = null;
     try {
       await streamSSE(
@@ -231,6 +242,17 @@ export function CoachThread() {
             setStreamingTurn((prev) =>
               prev
                 ? { ...prev, toolCalls: [...prev.toolCalls, ev.name] }
+                : prev,
+            );
+          } else if (ev.type === "fact_recorded") {
+            // A profile write actually completed — feeds the live
+            // "档案已更新 ✓" badge on the streaming bubble.
+            setStreamingTurn((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    factsRecorded: [...prev.factsRecorded, ev.area],
+                  }
                 : prev,
             );
           } else if (ev.type === "error") {
@@ -581,6 +603,7 @@ export function CoachThread() {
                 message={{
                   role: "ai",
                   content: streamingTurn.aiContent || "…",
+                  facts_recorded: streamingTurn.factsRecorded,
                 }}
               />
             </>
