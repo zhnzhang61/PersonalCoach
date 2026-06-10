@@ -806,18 +806,28 @@ pure, unit-tested core):
    if the answer matches a completed-write claim pattern
    (`claims_recording`; future-tense promises and descriptive reads
    excluded by design) and the turn's collected tool calls contain no
-   `record_coach_fact`, the agent gets ONE corrective round (a
+   **successful** `record_coach_fact` (errored attempts carry an
+   `"error"` key and don't count — a failed write is still a false
+   claim, codex P2), the agent gets ONE corrective round (a
    `[系统校验]`-prefixed message, hidden from history/consolidation):
    record for real or retract. Still claiming falsely afterwards → a
-   deterministic "⚠️ 系统校验：本轮未发生档案写入" line is appended.
-   Every trigger lands in the trace row's `extras.claim_check`
-   (`triggered` / `corrected` / `areas`) so frequency is measurable.
+   deterministic "⚠️ 系统校验：本轮未发生档案写入" line is appended to
+   the live answer, AND the verdict is durable: the correction-round
+   sentinel is itself checkpointed, so the history walk re-derives the
+   double-lie case on every load and stamps `claim_unverified: true`
+   on the turn's final ai message — the ⚠️ survives reloads, symmetric
+   with the ✓ badge (PR #105 review). Every trigger lands in the trace
+   row's `extras.claim_check` (`triggered` / `corrected` / `areas`) so
+   frequency is measurable.
 3. **Actions, not words (UI badge)** — `chat_stream` emits
-   `fact_recorded` (on `on_tool_end` of `record_coach_fact`) and
-   `/api/ai/history` stamps `facts_recorded: [areas]` onto each turn's
-   final ai message, derived from **checkpointed tool calls** — so the
-   badge survives reloads and covers non-streaming actions too. The
-   Coach UI renders "档案已更新: \<area\> ✓" from this field only.
+   `fact_recorded` (on `on_tool_end` of `record_coach_fact` — fires
+   only on success) and `/api/ai/history` stamps `facts_recorded: [areas]`
+   onto each turn's final ai message, derived from **checkpointed tool
+   calls confirmed by their ToolMessage outcome** (`status != "error"`;
+   a write REQUEST whose result errored or never arrived does not
+   light the badge) — so the badge survives reloads and covers
+   non-streaming actions too. The Coach UI renders
+   "档案已更新: \<area\> ✓" from this field only.
    **The badge, not the model's prose, is the source of truth for
    "did it record".** Model says recorded + no badge = it's lying, and
    layer 2 already caught it.

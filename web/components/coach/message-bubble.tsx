@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, FileCheck2 } from "lucide-react";
+import { Check, Copy, FileCheck2, FileWarning } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -105,6 +105,18 @@ export function MessageBubble({ message }: Props) {
             ))}{" "}
             ✓
           </span>
+        </div>
+      )}
+      {/* The durable negative twin (PR #105 review): this message
+        * claimed a write, the correction round ran, and STILL no
+        * successful record_coach_fact happened. Server-derived from the
+        * checkpointed correction sentinel, so unlike the warning text
+        * streamed into the live bubble it survives reloads — a false
+        * claim can never present itself as clean in persisted history. */}
+      {!isUser && message.claim_unverified && (
+        <div className="ml-1 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-rose-700 dark:text-rose-400">
+          <FileWarning className="size-3" aria-hidden />
+          <span>系统校验：本轮未发生档案写入（该回复的「已记录」声称未经证实）</span>
         </div>
       )}
       <button

@@ -110,18 +110,33 @@ def claims_recording(text: str) -> bool:
     return False
 
 
+def _is_successful_write(tc: dict) -> bool:
+    """A trace entry counts as a real write only if it's the write tool
+    AND it did not error. ToolCallCaptureHandler stamps failed calls
+    with an "error" key (on_tool_error path: invalid area → 400,
+    transient MCP failure, …) and successful ones with "result" — a
+    failed ATTEMPT must not suppress the claim check or light the badge
+    (codex P2 on PR #105: claiming 已记录 after a failed write is still
+    a false claim)."""
+    return tc.get("name") == RECORDING_TOOL and "error" not in tc
+
+
 def has_recording_call(tool_calls: list[dict]) -> bool:
-    """True if the turn's collected tool calls include the write tool.
+    """True if the turn's collected tool calls include a SUCCESSFUL
+    write-tool call.
 
     `tool_calls` is the trace sink: entries are dicts with at least
     {"name": ...}; prefetch entries carry prefetched=True but prefetch
     plans never include the write tool, so no special-casing needed.
+    Errored write attempts (entries carrying "error") don't count.
     """
-    return any(tc.get("name") == RECORDING_TOOL for tc in tool_calls or [])
+    return any(_is_successful_write(tc) for tc in tool_calls or [])
 
 
 def recorded_areas(tool_calls: list[dict]) -> list[str]:
-    """Areas written this turn, in call order (for the UI's ✓ badge).
+    """Areas SUCCESSFULLY written this turn, in call order (for the
+    UI's ✓ badge). Errored attempts are excluded — same predicate as
+    has_recording_call.
 
     Best-effort: each trace entry stores args either as a dict or a
     truncated repr string — extract `area` from both shapes; fall back
@@ -130,7 +145,7 @@ def recorded_areas(tool_calls: list[dict]) -> list[str]:
     """
     out: list[str] = []
     for tc in tool_calls or []:
-        if tc.get("name") != RECORDING_TOOL:
+        if not _is_successful_write(tc):
             continue
         args = tc.get("args")
         area = None

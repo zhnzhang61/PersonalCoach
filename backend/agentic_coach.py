@@ -1653,21 +1653,49 @@ class AgenticCoach:
         out: list[dict] = []
         # Layer-3 "actions, not words" (claim_check.py): walk the
         # checkpointed messages and derive which Profile.*/Cycle.* areas
-        # were ACTUALLY written this turn from AIMessage.tool_calls —
-        # then stamp them onto the turn's final (text-bearing) ai
-        # message as `facts_recorded`. The UI renders its ✓ badge from
-        # this field only; the model's prose never drives it. Derived
-        # from the checkpoint, so it survives reloads.
+        # were ACTUALLY written this turn — then stamp them onto the
+        # turn's final (text-bearing) ai message as `facts_recorded`.
+        # The UI renders its ✓ badge from this field only; the model's
+        # prose never drives it. Derived from the checkpoint, so it
+        # survives reloads.
+        #
+        # An AIMessage.tool_calls entry is the model's REQUEST, not the
+        # outcome — a write only counts once its ToolMessage confirms
+        # success (status != "error"); a failed attempt must not light
+        # the badge (codex P2 on PR #105). Candidates correlate by
+        # tool_call_id.
+        #
+        # The same walk derives the DURABLE negative signal,
+        # `claim_unverified` (PR #105 review): the Layer-2 correction
+        # prompt is itself checkpointed as a sentinel human message, so
+        # its presence marks "a correction round happened here". If the
+        # round produced no successful write and the following answer
+        # still claims one, the turn's final ai message gets
+        # `claim_unverified: true` — the UI renders the ⚠️ from this
+        # field, symmetric with the badge, so the warning survives
+        # reloads instead of living only in the streamed text.
+        # Deliberately sentinel-gated: pre-enforcement history (e.g.
+        # the original 2026-05-30 lie) is not retro-judged, and true-
+        # but-stale claims in ordinary turns never earn a permanent ⚠️.
         pending_areas: list[str] = []
+        write_candidates: dict[Any, str] = {}  # tool_call_id -> area
+        in_correction = False
+        wrote_since_correction = False
         for i, m in enumerate(last_msgs):
             content = self._message_content_text(m)
-            # The injected Layer-2 correction prompt is a system
-            # artifact, not user speech — never show it as a "human"
-            # bubble.
-            if m.type == "human" and content.startswith(CLAIM_SENTINEL):
-                continue
-            # Real AIMessage.tool_calls is a list[dict]; anything else
-            # (absent attr, mock objects in tests) is ignored.
+            if m.type == "human":
+                if content.startswith(CLAIM_SENTINEL):
+                    # System artifact, not user speech — hide the row,
+                    # note that this turn entered a correction round.
+                    in_correction = True
+                    wrote_since_correction = False
+                    continue
+                # A real user message starts a new turn — close any
+                # unresolved correction state from the previous one.
+                in_correction = False
+            # Register write REQUESTS. Real AIMessage.tool_calls is a
+            # list[dict]; anything else (absent attr, mock objects in
+            # tests) is ignored.
             tcs = getattr(m, "tool_calls", None)
             if isinstance(tcs, list):
                 for tc in tcs:
@@ -1679,15 +1707,31 @@ class AgenticCoach:
                         area = (
                             args.get("area") if isinstance(args, dict) else None
                         )
-                        pending_areas.append(area or "?")
+                        write_candidates[tc.get("id")] = area or "?"
+            # Confirm/refute candidates from the ToolMessage outcome.
+            if m.type == "tool":
+                tc_id = getattr(m, "tool_call_id", None)
+                if tc_id in write_candidates:
+                    area = write_candidates.pop(tc_id)
+                    if getattr(m, "status", "success") != "error":
+                        pending_areas.append(area)
+                        wrote_since_correction = True
             row: dict[str, Any] = {
                 "role": m.type,
                 "content": content,
                 "ts": ts_by_index.get(i),
             }
-            if m.type == "ai" and content.strip() and pending_areas:
-                row["facts_recorded"] = pending_areas
-                pending_areas = []
+            if m.type == "ai" and content.strip():
+                if pending_areas:
+                    row["facts_recorded"] = pending_areas
+                    pending_areas = []
+                if (
+                    in_correction
+                    and not wrote_since_correction
+                    and claims_recording(content)
+                ):
+                    row["claim_unverified"] = True
+                    in_correction = False
             out.append(row)
         return out
 

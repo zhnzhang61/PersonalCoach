@@ -700,18 +700,25 @@ guideline 故意收得很紧：明确告诉 agent 什么时候该问（必需 + 
 2. **确定性对账**——每轮结束后（同步路径 `_enforce_record_claim`；
    `chat_stream` 里有流式孪生实现），若回答命中「已完成写入」声称模式
    （`claims_recording`；将来时承诺和描述既有状态的句子按设计排除）而本轮
-   工具调用里没有 `record_coach_fact`，就给 agent **一轮**纠正机会（注入
-   `[系统校验]` 前缀消息，对 history 和 consolidation 均不可见）：真实记录
-   或者改口。纠正后仍然假声称 → 追加确定性的「⚠️ 系统校验：本轮未发生档案
-   写入」。每次触发都落进 trace 行的 `extras.claim_check`
+   工具调用里没有**成功的** `record_coach_fact`（报错的尝试带 `"error"`
+   键、不算数——写失败了还说已记录仍然是假声称，codex P2），就给 agent
+   **一轮**纠正机会（注入 `[系统校验]` 前缀消息，对 history 和
+   consolidation 均不可见）：真实记录或者改口。纠正后仍然假声称 → 在实时
+   回答上追加确定性的「⚠️ 系统校验：本轮未发生档案写入」，**且判定是持久
+   的**：纠正回合的 sentinel 本身就在 checkpoint 里，history walk 每次
+   加载都会重新推导出双重谎言并在该轮最终 ai 消息上打
+   `claim_unverified: true`——⚠️ 重载后仍在，跟 ✓ 徽章对称（PR #105
+   review）。每次触发都落进 trace 行的 `extras.claim_check`
    （`triggered` / `corrected` / `areas`），频率可量化。
 3. **信行为不信话（UI 徽章）**——`chat_stream` 发 `fact_recorded` 事件
-   （`record_coach_fact` 的 `on_tool_end` 触发），`/api/ai/history` 从
-   **checkpoint 里的真实工具调用**派生 `facts_recorded: [areas]` 打在该轮
-   最终 ai 消息上——徽章重载后仍在，也覆盖非流式 action。Coach UI 只凭这个
-   字段渲染「档案已更新: \<area\> ✓」。**判断「记没记」的唯一事实来源是
-   徽章，不是模型的话。** 模型说记了但没徽章 = 它在说谎，而且第 2 层已经
-   抓住它了。
+   （`record_coach_fact` 的 `on_tool_end` 触发——只在成功时发），
+   `/api/ai/history` 从 **checkpoint 里经 ToolMessage 结果确认的工具调用**
+   （`status != "error"`；请求发了但结果报错或根本没回来的，不点亮徽章）
+   派生 `facts_recorded: [areas]` 打在该轮最终 ai 消息上——徽章重载后仍在，
+   也覆盖非流式 action。Coach UI 只凭这个字段渲染
+   「档案已更新: \<area\> ✓」。**判断「记没记」的唯一事实来源是徽章，
+   不是模型的话。** 模型说记了但没徽章 = 它在说谎，而且第 2 层已经抓住
+   它了。
 
 已知边界（`claim_check.py` 里有文档）：对**上一轮**已记录事实的真声称
 （「是的，已记录在案」）可能触发一轮纠正——模型会重新记录（无害：CME 的
