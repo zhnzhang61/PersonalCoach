@@ -417,12 +417,22 @@ export function CoachThread() {
   ]);
 
   // Smooth-follow on live activity: a new message appended, an action
-  // pending, or streaming tokens arriving. Gated on the initial landing
-  // so it doesn't fight (or smooth-animate) the first-open jump above.
+  // pending, streaming tokens arriving — or a tool chip landing. The
+  // toolCalls dep matters during the TOOL PHASE specifically: pending
+  // doesn't change mid-stream and aiContent stays empty until the first
+  // answer token, so without it each appended chip pushes the spinner
+  // toward the fold with nothing re-pinning the view (PR #104 review).
+  // Gated on the initial landing so it doesn't fight (or smooth-animate)
+  // the first-open jump above.
   useEffect(() => {
     if (!didInitialScroll.current) return;
     scrollToBottom(true);
-  }, [activeMessages.length, pending, streamingTurn?.aiContent.length]);
+  }, [
+    activeMessages.length,
+    pending,
+    streamingTurn?.aiContent.length,
+    streamingTurn?.toolCalls.length,
+  ]);
 
   // Filter out tool/system messages from display — those are agent
   // internals, the user sees only human/ai turns.
