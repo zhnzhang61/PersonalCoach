@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, FileCheck2, FileWarning } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -84,6 +84,41 @@ export function MessageBubble({ message }: Props) {
           </div>
         )}
       </div>
+      {/* "档案已更新 ✓" — rendered ONLY from facts_recorded, which the
+        * backend derives from record_coach_fact tool calls that actually
+        * happened (checkpointed; or fact_recorded SSE events while
+        * streaming). Deliberately NOT parsed from the model's text: the
+        * agent once claimed "已将信息更新至你的档案" with zero tool calls
+        * (2026-05-30). This badge is the source of truth for "did it
+        * record" — if the model says it recorded and this badge is
+        * absent, the model is lying. */}
+      {!isUser && (message.facts_recorded?.length ?? 0) > 0 && (
+        <div className="ml-1 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-emerald-700 dark:text-emerald-400">
+          <FileCheck2 className="size-3" aria-hidden />
+          <span>
+            档案已更新:{" "}
+            {message.facts_recorded!.map((a, i) => (
+              <span key={`${a}-${i}`} className="font-mono">
+                {a}
+                {i < message.facts_recorded!.length - 1 ? ", " : ""}
+              </span>
+            ))}{" "}
+            ✓
+          </span>
+        </div>
+      )}
+      {/* The durable negative twin (PR #105 review): this message
+        * claimed a write, the correction round ran, and STILL no
+        * successful record_coach_fact happened. Server-derived from the
+        * checkpointed correction sentinel, so unlike the warning text
+        * streamed into the live bubble it survives reloads — a false
+        * claim can never present itself as clean in persisted history. */}
+      {!isUser && message.claim_unverified && (
+        <div className="ml-1 flex flex-wrap items-center gap-1.5 text-[11px] leading-none text-rose-700 dark:text-rose-400">
+          <FileWarning className="size-3" aria-hidden />
+          <span>系统校验：本轮未发生档案写入（该回复的「已记录」声称未经证实）</span>
+        </div>
+      )}
       <button
         type="button"
         onClick={copy}

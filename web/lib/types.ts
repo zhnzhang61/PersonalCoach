@@ -592,6 +592,17 @@ export interface CoachMessage {
   role: "human" | "ai" | "system" | "tool";
   content: string;
   ts?: string;
+  // Profile.*/Cycle.* areas ACTUALLY written this turn — derived
+  // server-side from checkpointed record_coach_fact tool calls (live:
+  // from fact_recorded SSE events). Source of truth for the
+  // "档案已更新 ✓" badge; the model's prose never sets this.
+  facts_recorded?: string[];
+  // The durable negative twin (PR #105 review): this message claimed a
+  // profile write, a claim-check correction round ran, and STILL no
+  // successful write happened. Derived server-side from the
+  // checkpointed correction-round sentinel — survives reloads, unlike
+  // the warning text streamed into the live bubble.
+  claim_unverified?: boolean;
 }
 
 export interface CoachSession {

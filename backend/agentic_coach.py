@@ -40,6 +40,7 @@ import atexit
 import datetime
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -58,6 +59,14 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 # llm_provider is the ONLY module allowed to construct LangChain models.
+from backend.claim_check import (
+    CORRECTION_PROMPT,
+    SENTINEL as CLAIM_SENTINEL,
+    WARNING_LINE,
+    claims_recording,
+    has_recording_call,
+    recorded_areas,
+)
 from backend.coach_intake import render_intake_prompt_section
 from backend.llm_provider import (
     _get_llm,  # private to other modules; in-project use is fine
@@ -80,7 +89,7 @@ from backend.trace_logger import (
 # that ran" (e.g., uncommitted edit).
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION = "v10"
+PROMPT_VERSION = "v11"
 
 
 # ---------------------------------------------------------------------------
@@ -943,17 +952,74 @@ class AgenticCoach:
                         messages.append(SystemMessage(content=system_context))
                     messages.append(HumanMessage(content=user_input))
 
-                    async for ev in self._agent.astream_events(
-                        {"messages": messages}, config, version="v2"
+                    async def _drive(msgs: list[BaseMessage]) -> None:
+                        """One astream_events pass — shared by the main
+                        turn and the claim-check correction round so both
+                        emit the same token / tool_call / fact_recorded
+                        event shapes."""
+                        async for ev in self._agent.astream_events(
+                            {"messages": msgs}, config, version="v2"
+                        ):
+                            et = ev.get("event")
+                            if et == "on_chat_model_stream":
+                                text = self._chunk_text(ev["data"].get("chunk"))
+                                if text:
+                                    assembled_answer.append(text)
+                                    _emit({"type": "token", "content": text})
+                            elif et == "on_tool_start":
+                                _emit({"type": "tool_call", "name": ev.get("name", "unknown")})
+                            elif (
+                                et == "on_tool_end"
+                                and ev.get("name") == "record_coach_fact"
+                            ):
+                                # Layer-3 "actions, not words": a real,
+                                # completed profile write — the UI's ✓
+                                # badge keys off THIS, never off the
+                                # model's prose. (Errors surface as
+                                # on_tool_error, not on_tool_end.)
+                                inp = (ev.get("data") or {}).get("input")
+                                area = (
+                                    inp.get("area")
+                                    if isinstance(inp, dict)
+                                    else None
+                                )
+                                _emit({
+                                    "type": "fact_recorded",
+                                    "area": area or "?",
+                                })
+
+                    await _drive(messages)
+
+                    # Layer-2 claim-vs-action check (claim_check.py): the
+                    # model can lie to the user, not to an if-statement.
+                    # If the streamed answer CLAIMS a profile write but
+                    # this turn made no record_coach_fact call, run ONE
+                    # bounded correction round on the same thread — its
+                    # tokens stream as a continuation, and any real write
+                    # it makes shows up live via tool_call/fact_recorded
+                    # events. Still claiming without calling afterwards →
+                    # append a deterministic, user-visible warning.
+                    assembled = "".join(assembled_answer)
+                    if claims_recording(assembled) and not has_recording_call(
+                        trace.tool_calls
                     ):
-                        et = ev.get("event")
-                        if et == "on_chat_model_stream":
-                            text = self._chunk_text(ev["data"].get("chunk"))
-                            if text:
-                                assembled_answer.append(text)
-                                _emit({"type": "token", "content": text})
-                        elif et == "on_tool_start":
-                            _emit({"type": "tool_call", "name": ev.get("name", "unknown")})
+                        n_before_calls = len(trace.tool_calls)
+                        seg_start = len(assembled_answer)
+                        sep = "\n\n"
+                        assembled_answer.append(sep)
+                        _emit({"type": "token", "content": sep})
+                        await _drive([HumanMessage(content=CORRECTION_PROMPT)])
+                        new_calls = trace.tool_calls[n_before_calls:]
+                        fixed = has_recording_call(new_calls)
+                        correction_text = "".join(assembled_answer[seg_start:])
+                        trace.extras["claim_check"] = {
+                            "triggered": True,
+                            "corrected": fixed,
+                            "areas": recorded_areas(new_calls),
+                        }
+                        if not fixed and claims_recording(correction_text):
+                            assembled_answer.append(WARNING_LINE)
+                            _emit({"type": "token", "content": WARNING_LINE})
 
                     # Trailing "[Generated by X]" footer — matches what
                     # the sync _run_turn appends, so the persisted
@@ -1230,8 +1296,51 @@ class AgenticCoach:
                 _skip_trace=True,
                 tool_calls_sink=trace.tool_calls,
             )
+            result = await self._enforce_record_claim(
+                result, thread_id, trace.tool_calls, trace
+            )
             trace.final_answer = result
             return result
+
+    async def _enforce_record_claim(
+        self,
+        answer: str,
+        thread_id: str,
+        tool_calls: list[dict],
+        trace,
+    ) -> str:
+        """Layer-2 claim-vs-action enforcement for non-streaming turns
+        (claim_check.py; chat_stream has its own inline copy so the
+        correction can stream). If `answer` claims a profile write but
+        `tool_calls` shows no record_coach_fact call, inject the
+        correction prompt and run ONE more round on the same thread —
+        the model either performs the write for real or retracts. If
+        the correction round STILL claims without calling, append the
+        deterministic warning so a false claim can never present itself
+        as clean. Returns the (possibly extended) answer text."""
+        if not claims_recording(answer) or has_recording_call(tool_calls):
+            return answer
+        n_before = len(tool_calls)
+        correction = await self._run_turn_inner(
+            CORRECTION_PROMPT,
+            thread_id,
+            None,
+            tool_calls_sink=tool_calls,
+        )
+        new_calls = tool_calls[n_before:]
+        fixed = has_recording_call(new_calls)
+        trace.extras["claim_check"] = {
+            "triggered": True,
+            "corrected": fixed,
+            "areas": recorded_areas(new_calls),
+        }
+        # Both rounds end with "[Generated by X]" — strip the inner one
+        # so the combined answer carries a single footer.
+        body = re.sub(r"\n\n\[Generated by [^\]]+\]\s*$", "", answer)
+        combined = body + "\n\n" + correction
+        if not fixed and claims_recording(correction):
+            combined += WARNING_LINE
+        return combined
 
     async def _run_turn(
         self,
@@ -1270,6 +1379,9 @@ class AgenticCoach:
                 thread_id,
                 extra_system_context,
                 tool_calls_sink=trace.tool_calls,
+            )
+            result = await self._enforce_record_claim(
+                result, thread_id, trace.tool_calls, trace
             )
             trace.final_answer = result
             return result
@@ -1539,12 +1651,88 @@ class AgenticCoach:
             (tuples[-1].checkpoint or {}).get("channel_values", {}) or {}
         ).get("messages", []) or []
         out: list[dict] = []
+        # Layer-3 "actions, not words" (claim_check.py): walk the
+        # checkpointed messages and derive which Profile.*/Cycle.* areas
+        # were ACTUALLY written this turn — then stamp them onto the
+        # turn's final (text-bearing) ai message as `facts_recorded`.
+        # The UI renders its ✓ badge from this field only; the model's
+        # prose never drives it. Derived from the checkpoint, so it
+        # survives reloads.
+        #
+        # An AIMessage.tool_calls entry is the model's REQUEST, not the
+        # outcome — a write only counts once its ToolMessage confirms
+        # success (status != "error"); a failed attempt must not light
+        # the badge (codex P2 on PR #105). Candidates correlate by
+        # tool_call_id.
+        #
+        # The same walk derives the DURABLE negative signal,
+        # `claim_unverified` (PR #105 review): the Layer-2 correction
+        # prompt is itself checkpointed as a sentinel human message, so
+        # its presence marks "a correction round happened here". If the
+        # round produced no successful write and the following answer
+        # still claims one, the turn's final ai message gets
+        # `claim_unverified: true` — the UI renders the ⚠️ from this
+        # field, symmetric with the badge, so the warning survives
+        # reloads instead of living only in the streamed text.
+        # Deliberately sentinel-gated: pre-enforcement history (e.g.
+        # the original 2026-05-30 lie) is not retro-judged, and true-
+        # but-stale claims in ordinary turns never earn a permanent ⚠️.
+        pending_areas: list[str] = []
+        write_candidates: dict[Any, str] = {}  # tool_call_id -> area
+        in_correction = False
+        wrote_since_correction = False
         for i, m in enumerate(last_msgs):
-            out.append({
+            content = self._message_content_text(m)
+            if m.type == "human":
+                if content.startswith(CLAIM_SENTINEL):
+                    # System artifact, not user speech — hide the row,
+                    # note that this turn entered a correction round.
+                    in_correction = True
+                    wrote_since_correction = False
+                    continue
+                # A real user message starts a new turn — close any
+                # unresolved correction state from the previous one.
+                in_correction = False
+            # Register write REQUESTS. Real AIMessage.tool_calls is a
+            # list[dict]; anything else (absent attr, mock objects in
+            # tests) is ignored.
+            tcs = getattr(m, "tool_calls", None)
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if (
+                        isinstance(tc, dict)
+                        and tc.get("name") == "record_coach_fact"
+                    ):
+                        args = tc.get("args") or {}
+                        area = (
+                            args.get("area") if isinstance(args, dict) else None
+                        )
+                        write_candidates[tc.get("id")] = area or "?"
+            # Confirm/refute candidates from the ToolMessage outcome.
+            if m.type == "tool":
+                tc_id = getattr(m, "tool_call_id", None)
+                if tc_id in write_candidates:
+                    area = write_candidates.pop(tc_id)
+                    if getattr(m, "status", "success") != "error":
+                        pending_areas.append(area)
+                        wrote_since_correction = True
+            row: dict[str, Any] = {
                 "role": m.type,
-                "content": self._message_content_text(m),
+                "content": content,
                 "ts": ts_by_index.get(i),
-            })
+            }
+            if m.type == "ai" and content.strip():
+                if pending_areas:
+                    row["facts_recorded"] = pending_areas
+                    pending_areas = []
+                if (
+                    in_correction
+                    and not wrote_since_correction
+                    and claims_recording(content)
+                ):
+                    row["claim_unverified"] = True
+                    in_correction = False
+            out.append(row)
         return out
 
     def _chat_list_for_thread(self, thread_id: str) -> list[dict]:
@@ -1561,7 +1749,13 @@ class AgenticCoach:
                     b.get("text", "") for b in content
                     if isinstance(b, dict) and "text" in b
                 )
-            out.append({"role": msg.type, "content": str(content)})
+            content = str(content)
+            # The Layer-2 correction prompt is system-injected, not user
+            # speech — keep it out of consolidation so the CME never
+            # records "the user said [系统校验]…".
+            if msg.type == "human" and content.startswith(CLAIM_SENTINEL):
+                continue
+            out.append({"role": msg.type, "content": content})
         return out
 
     def summarize_thread(self, thread_id: str) -> str | None:

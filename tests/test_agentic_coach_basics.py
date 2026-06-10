@@ -207,12 +207,14 @@ class TestCoachIntakeWiring:
     """§3.4.5 PR-2: the intake block is spliced into the persona, the
     version is bumped, and the prefetch plans read the A/B coverage."""
 
-    def test_prompt_version_is_v10(self):
+    def test_prompt_version_is_v11(self):
         from backend.agentic_coach import PROMPT_VERSION
 
-        # v9 wired the A/B intake (#95); v10 wired the daily check-in
-        # (this PR) — both behavior changes, so each bump is its own row.
-        assert PROMPT_VERSION == "v10"
+        # v9 wired the A/B intake (#95); v10 wired the daily check-in;
+        # v11 added the record-before-claim + memory-promotion rules to
+        # the intake block (claim-vs-action enforcement PR). Each
+        # behavior change is its own §3.4.3 changelog row.
+        assert PROMPT_VERSION == "v11"
 
     def test_system_prompt_contains_intake_block(self):
         from backend.agentic_coach import _SYSTEM_PROMPT
