@@ -121,7 +121,7 @@ fetching. Tailwind. iPhone-first layout.
 | Health | `/` | Today's check-in card, context-events card, readiness, recovery/sleep charts |
 | Activity | `/activity` | Run list + per-run detail (`/activity/[id]`) with map / telemetry / laps + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable) |
-| Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers |
+| Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
 | Setup | `/setup` | Garmin / Google sign-in, sync controls |
 
 **Key client modules (`web/lib/`):**

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, Loader2 } from "lucide-react";
+import { Archive, Loader2, Wrench } from "lucide-react";
 import { apiDelete, apiGet, apiPost, streamSSE } from "@/lib/api";
 import { classifyCoachError } from "@/lib/coach-errors";
 import { useCoachSession } from "@/lib/hooks/use-coach-session";
@@ -115,9 +115,19 @@ export function CoachThread() {
   // of staring at a spinner for 10s. On `done` we drop this and
   // refresh /api/ai/history to pick up the canonical messages (with
   // ts from PR #71).
+  //
+  // `toolCalls` is the live trace of MCP tools the agent invoked this
+  // turn (backend emits a `tool_call` SSE event per on_tool_start).
+  // Rendered as chips above the AI bubble WHILE streaming, then gone
+  // when the canonical answer replaces the optimistic turn — i.e. the
+  // intermediate process is visible live and hidden in the final view.
+  // Motivation (2026-06-09): the agent once claimed "已将信息更新至你的
+  // 档案" with zero tool calls — these chips make that visible the
+  // moment it happens instead of requiring trace archaeology.
   const [streamingTurn, setStreamingTurn] = useState<{
     userMessage: string;
     aiContent: string;
+    toolCalls: string[];
   } | null>(null);
 
   const refreshAll = () => {
@@ -203,7 +213,7 @@ export function CoachThread() {
     tid: string,
     text: string,
   ): Promise<"ok" | ReturnType<typeof classifyCoachError>> => {
-    setStreamingTurn({ userMessage: text, aiContent: "" });
+    setStreamingTurn({ userMessage: text, aiContent: "", toolCalls: [] });
     let streamError: ReturnType<typeof classifyCoachError> | null = null;
     try {
       await streamSSE(
@@ -214,12 +224,20 @@ export function CoachThread() {
             setStreamingTurn((prev) =>
               prev ? { ...prev, aiContent: prev.aiContent + ev.content } : prev,
             );
+          } else if (ev.type === "tool_call") {
+            // Live tool trace — every invocation appended in order,
+            // duplicates included (calling the same tool twice IS
+            // signal). Rendered as chips above the streaming bubble.
+            setStreamingTurn((prev) =>
+              prev
+                ? { ...prev, toolCalls: [...prev.toolCalls, ev.name] }
+                : prev,
+            );
           } else if (ev.type === "error") {
             streamError = classifyCoachError(ev.message);
           }
-          // tool_call + done are informational here — `done` is
-          // implicit when the SSE source closes; we let the loop
-          // exit on its own.
+          // `done` is implicit when the SSE source closes; we let the
+          // loop exit on its own.
         },
       );
     } catch (e) {
@@ -516,6 +534,39 @@ export function CoachThread() {
               <MessageBubble
                 message={{ role: "human", content: streamingTurn.userMessage }}
               />
+              {/* Live tool-call trace — Claude-Code-style intermediate
+                * process. Appears the moment the agent invokes a tool,
+                * latest call pulses while the stream is open. The whole
+                * row vanishes with the optimistic turn once the
+                * canonical answer lands (refreshAll), so the final view
+                * stays clean. Crucially: if the agent CLAIMS it recorded
+                * something and no chip ever appeared, the user can see
+                * the lie in real time. */}
+              {streamingTurn.toolCalls.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pl-1">
+                  {streamingTurn.toolCalls.map((name, i) => {
+                    // Spin only while the agent is still in the tool
+                    // phase (no answer tokens yet) — once text streams,
+                    // tools are done and every chip goes static.
+                    const spinning =
+                      i === streamingTurn.toolCalls.length - 1 &&
+                      !streamingTurn.aiContent;
+                    return (
+                      <span
+                        key={`${name}-${i}`}
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                      >
+                        {spinning ? (
+                          <Loader2 className="size-2.5 animate-spin" aria-hidden />
+                        ) : (
+                          <Wrench className="size-2.5" aria-hidden />
+                        )}
+                        {name}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               <MessageBubble
                 message={{
                   role: "ai",
