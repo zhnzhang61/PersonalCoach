@@ -77,8 +77,13 @@ _CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"已(?:经)?将[^。\n]{0,24}?(?:更新|记录|存入|写入|保存)"),
     # 已(经)更新…档案/资料 — write verb then target
     re.compile(r"已(?:经)?更新[^。\n]{0,12}?(?:档案|资料)"),
-    # 记录在案 (perfective by idiom; future guard handles 我会记录在案)
-    re.compile(r"记录在案"),
+    # 记录在案 — perfective by idiom, but NOT when used attributively
+    # ("记录在案的伤病" = injuries that are on record, a descriptive
+    # READ): require that 的 doesn't follow. The negation guard below
+    # handles "没有记录在案…". Future guard handles 我会记录在案.
+    # First production false positive (2026-06-10): "你目前没有记录在案
+    # 的伤病" triggered a needless correction round.
+    re.compile(r"记录在案(?!的)"),
     # 档案/资料已(经)更新
     re.compile(r"(?:档案|资料)已(?:经)?(?:更新|记录)"),
     # English perfect-tense variants
@@ -94,6 +99,25 @@ _FUTURE_GUARD = re.compile(
     r"\bwill\s*|\bgoing to\s*|\bI'll\s*)[^。.!?\n]{0,6}$"
 )
 
+# Negation markers — "没有记录在案" / "并没有更新你的档案" / "尚未记录"
+# describe the ABSENCE of a write (often while reading existing state,
+# or while honestly retracting in a correction round) — the opposite of
+# a claim. Checked in the same short pre-match window as the future
+# guard. First production false positive (2026-06-10): "你目前没有记录
+# 在案的伤病" matched the bare 记录在案 pattern and fired a needless
+# correction round (trace extras.claim_check.triggered=true, the model
+# then apologized for a claim it never made).
+# The gap between the negation and the verb must stay tiny and must not
+# cross punctuation or a contrast word — otherwise "虽然之前没有，但我
+# 已经为你记录在案" (a TRUE claim after a contrast) would be wrongly
+# skipped. Legitimate gaps: "" (没有记录), 被 (未被记录), 任何/进行
+# (没有进行记录).
+_NEGATION_GUARD = re.compile(
+    r"(?:没有|并?没|并?未|尚未|不曾|从未|从没|无|不存在|"
+    r"\bnot(?:\s+been)?\s*|\bnever\s*|\bhaven't\s*|\bhasn't\s*)"
+    r"[^。.!?，,;；\n但却]{0,4}$"
+)
+
 
 def claims_recording(text: str) -> bool:
     """True if `text` claims a COMPLETED profile/记录 write."""
@@ -101,10 +125,14 @@ def claims_recording(text: str) -> bool:
         return False
     for pat in _CLAIM_PATTERNS:
         for m in pat.finditer(text):
-            # Look at a short window immediately before the match; a
-            # future marker there ("我会记录在案") makes it a promise.
+            # Look at a short window immediately before the match: a
+            # future marker ("我会记录在案") makes it a promise, a
+            # negation ("没有记录在案" / "并没有更新") makes it a
+            # statement of absence — neither is a write claim.
             window = text[max(0, m.start() - 12):m.start()]
             if _FUTURE_GUARD.search(window):
+                continue
+            if _NEGATION_GUARD.search(window):
                 continue
             return True
     return False

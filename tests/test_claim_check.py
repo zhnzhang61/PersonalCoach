@@ -97,6 +97,39 @@ class TestClaimsRecordingNegatives:
             "今天的训练心率控制得很好，保持这个节奏，周六长跑注意补给。"
         )
 
+    def test_negated_attributive_production_false_positive(self):
+        """The first production false positive (2026-06-10, trace
+        claim_check.triggered=true): 没有 + attributive 记录在案的 is a
+        descriptive READ of an empty record, not a write claim — it
+        fired a needless correction round and a confusing apology."""
+        assert not claims_recording(
+            "根据你当前的运动员档案和医疗记录，你目前没有记录在案的伤病。"
+        )
+
+    def test_attributive_use_is_descriptive(self):
+        """记录在案的X = 'the X that is on record' — reading state."""
+        assert not claims_recording("档案中记录在案的旧伤是 2023 年的胫骨应力性骨折。")
+
+    def test_negated_update_is_a_retraction_not_a_claim(self):
+        """The honest correction-round retraction itself must not
+        re-trigger: 并没有更新 states the ABSENCE of a write."""
+        assert not claims_recording(
+            "抱歉，我之前的表述不准确。我并没有更新你的档案，因为现有记录与你的状态一致。"
+        )
+
+    def test_never_recorded_negation(self):
+        assert not claims_recording("该信息尚未记录，需要你确认后我才会写入。")
+
+    def test_negation_followed_by_contrast_still_claims(self):
+        """A negation BEFORE a contrast doesn't neutralize the claim
+        after it — the guard's gap must not cross ，/但."""
+        assert claims_recording("虽然之前没有，但我已经为你记录在案。")
+
+    def test_bare_perfective_idiom_still_claims(self):
+        """The 记录在案 idiom in genuine completed-write position still
+        triggers (no negation, no 的, no future marker)."""
+        assert claims_recording("好的，我把这条伤病信息记录在案了。")
+
 
 # ---------------------------------------------------------------------------
 # Detector — tool-call helpers
