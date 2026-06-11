@@ -122,13 +122,45 @@ class TestClaimsRecordingNegatives:
 
     def test_negation_followed_by_contrast_still_claims(self):
         """A negation BEFORE a contrast doesn't neutralize the claim
-        after it — the guard's gap must not cross ，/但."""
+        after it — '，但我' fails the connector allowlist."""
         assert claims_recording("虽然之前没有，但我已经为你记录在案。")
 
     def test_bare_perfective_idiom_still_claims(self):
         """The 记录在案 idiom in genuine completed-write position still
         triggers (no negation, no 的, no future marker)."""
         assert claims_recording("好的，我把这条伤病信息记录在案了。")
+
+    # -- benign-filler negations (PR #106 review: codex + human) ------
+    # The 没/无 in 没错/没问题/无误 negates something OTHER than the
+    # recording — these are confirmations, not retractions. The guard is
+    # verb-anchored: only a negation directly attached to the matched
+    # claim (via the connector allowlist) suppresses.
+
+    def test_wuwu_filler_still_claims(self):
+        """Codex case: 无 negates 误, not the write."""
+        assert claims_recording("确认无误后已记录。")
+        assert claims_recording("确认无误后我已记录。")
+
+    def test_meicuo_filler_still_claims(self):
+        """Human-review case: 没 negates 错 — and previously the 1-char
+        tail suppressed this while the 3-char 没问题 escaped, making the
+        outcome depend on exact spacing."""
+        assert claims_recording("没错已经记录在案")
+
+    def test_meiwenti_filler_still_claims(self):
+        assert claims_recording("没问题，我已经为你记录在案了")
+        assert claims_recording("没问题我已经为你记录在案了")
+
+    # -- true negations with grammatical connectors stay suppressed --
+
+    def test_negation_with_bei_connector(self):
+        assert not claims_recording("这条信息未被记录在案。")
+
+    def test_negation_with_renhe_connector(self):
+        assert not claims_recording("目前没有任何记录在案的内容。")
+
+    def test_negation_with_beneficiary_connector(self):
+        assert not claims_recording("该偏好尚未为你记录在案，需要先确认。")
 
 
 # ---------------------------------------------------------------------------

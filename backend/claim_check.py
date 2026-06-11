@@ -99,23 +99,32 @@ _FUTURE_GUARD = re.compile(
     r"\bwill\s*|\bgoing to\s*|\bI'll\s*)[^。.!?\n]{0,6}$"
 )
 
-# Negation markers — "没有记录在案" / "并没有更新你的档案" / "尚未记录"
-# describe the ABSENCE of a write (often while reading existing state,
-# or while honestly retracting in a correction round) — the opposite of
-# a claim. Checked in the same short pre-match window as the future
-# guard. First production false positive (2026-06-10): "你目前没有记录
-# 在案的伤病" matched the bare 记录在案 pattern and fired a needless
-# correction round (trace extras.claim_check.triggered=true, the model
-# then apologized for a claim it never made).
-# The gap between the negation and the verb must stay tiny and must not
-# cross punctuation or a contrast word — otherwise "虽然之前没有，但我
-# 已经为你记录在案" (a TRUE claim after a contrast) would be wrongly
-# skipped. Legitimate gaps: "" (没有记录), 被 (未被记录), 任何/进行
-# (没有进行记录).
+# Negation markers — "没有记录在案" / "未被记录" / "not recorded in
+# your profile" describe the ABSENCE of a write (often while reading
+# existing state, or while honestly retracting in a correction round) —
+# the opposite of a claim. First production false positive (2026-06-10):
+# "你目前没有记录在案的伤病" matched the bare 记录在案 pattern and fired
+# a needless correction round (the model then apologized for a claim it
+# never made).
+#
+# VERB-ANCHORED, not position-based (PR #106 review, both codex and
+# human): the negation must directly negate THE MATCHED claim — i.e.
+# sit at the very end of the pre-match window with only a closed
+# allowlist of grammatical connectors (被/任何/进行/再/重新) between it
+# and the claim. A free "any negation within N chars" window wrongly
+# swallowed benign fillers whose 没/无 negates something else entirely:
+#   确认无误后已记录   (无 negates 误)        → must still claim
+#   没错已经记录在案    (没 negates 错)        → must still claim
+#   没问题我已经记录在案 (没 negates 问题)      → must still claim
+# and made the outcome depend on exact character distance — 没错 (1-char
+# tail) suppressed while 没问题 (3-char) escaped via a second pattern.
+# The allowlist approach also subsumes the old punctuation/contrast
+# exclusions: "虽然之前没有，但我已经记录在案" fails the allowlist at
+# "，但我" and correctly still claims.
 _NEGATION_GUARD = re.compile(
     r"(?:没有|并?没|并?未|尚未|不曾|从未|从没|无|不存在|"
-    r"\bnot(?:\s+been)?\s*|\bnever\s*|\bhaven't\s*|\bhasn't\s*)"
-    r"[^。.!?，,;；\n但却]{0,4}$"
+    r"\bnot(?:\s+been)?\s+|\bnever\s+|\bhaven't\s+|\bhasn't\s+)"
+    r"(?:被|任何|进行|再次?|重新|为你|帮你|替你){0,2}$"
 )
 
 
