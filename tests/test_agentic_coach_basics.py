@@ -310,6 +310,67 @@ class TestSanitizeDanglingToolCalls:
         assert "pre_model_hook=_sanitize_history_hook" in src
 
 
+class TestToolErrorRecoverableAndCounted:
+    """The cross-layer hinge (PR #107 review): when ToolNode's
+    handle_tool_errors converts a ToolException into a ToolMessage, the
+    tool's `on_tool_error` callback must STILL fire — so the trace entry
+    carries `error` (not `result`) and claim_check's _is_successful_write
+    keeps treating it as a non-write. If a future langchain/langgraph
+    bump routed handled errors through on_tool_end instead, the model
+    could claim 已记录 after a 400 with no claim-check trigger — silently
+    reopening the bug #105 closed. Pin both halves in one real drive."""
+
+    def test_handled_tool_error_is_recoverable_and_still_counted(self):
+        from langchain_core.messages import AIMessage
+        from langchain_core.tools import ToolException, tool
+        from langgraph.graph import END, START, MessagesState, StateGraph
+        from langgraph.prebuilt import ToolNode
+
+        from backend.agentic_coach import _handle_tool_error
+        from backend.trace_logger import ToolCallCaptureHandler
+
+        @tool
+        def boom(x: str) -> str:
+            """raises like an MCP tool on a backend 4xx"""
+            raise ToolException(
+                "/api/memory/coach-fact → HTTP 400: Unknown coach-intake "
+                "area 'Cycle.psychology'. Did you mean 'Profile.psychology'?"
+            )
+
+        g = StateGraph(MessagesState)
+        g.add_node("tools", ToolNode([boom], handle_tool_errors=_handle_tool_error))
+        g.add_edge(START, "tools")
+        g.add_edge("tools", END)
+        app = g.compile()
+
+        sink: list[dict] = []
+        call = {"name": "boom", "args": {"x": "y"}, "id": "c1", "type": "tool_call"}
+        out = app.invoke(
+            {"messages": [AIMessage(content="", tool_calls=[call])]},
+            config={"callbacks": [ToolCallCaptureHandler(sink)]},
+        )
+
+        # Half 1 — RECOVERABLE: the error became a ToolMessage (the loop
+        # continues), not a re-raise that crashes the turn.
+        last = out["messages"][-1]
+        assert last.type == "tool"
+        assert ("重试" in last.content) or ("没有成功" in last.content)
+
+        # Half 2 — STILL A FAILURE: on_tool_error fired, so the trace
+        # entry carries `error` (not `result`). This is the exact key
+        # claim_check._is_successful_write reads.
+        assert len(sink) == 1
+        assert "error" in sink[0]
+        assert "result" not in sink[0]
+
+        # And the downstream contract, end-to-end on this very entry.
+        from backend.claim_check import has_recording_call
+
+        assert has_recording_call(
+            [{**sink[0], "name": "record_coach_fact"}]
+        ) is False
+
+
 class TestStartedAtFromThreadId:
     """Module-level helper. Pure function, easy to test."""
 
