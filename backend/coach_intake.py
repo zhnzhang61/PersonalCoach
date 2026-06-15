@@ -221,6 +221,31 @@ PROFILE_EVENT_TYPE = "profile"
 CYCLE_EVENT_TYPE = "cycle_config"
 
 
+def unknown_area_message(area: str) -> str:
+    """Actionable error text for an invalid record_coach_fact area.
+
+    The agent's most common mistake is crossing the namespace — sending
+    e.g. ``Cycle.psychology`` when psychology is a *Profile* slot (real
+    repro 2026-06-15, which 400'd and crashed the turn). When the bare
+    slot name exists under the other namespace, name the correct area so
+    the model can retry; otherwise list the valid set. This message ends
+    up in the 400 detail → surfaced to the model as the tool error, so
+    keep it self-correcting, not just descriptive.
+    """
+    suffix = area.split(".", 1)[-1]
+    match = next(
+        (a for a in sorted(ALL_AREAS)
+         if a.split(".", 1)[-1] == suffix and a != area),
+        None,
+    )
+    if match:
+        return f"Unknown coach-intake area {area!r}. Did you mean {match!r}?"
+    return (
+        f"Unknown coach-intake area {area!r}. "
+        f"Valid areas: {', '.join(sorted(ALL_AREAS))}."
+    )
+
+
 def event_type_for_area(area: str) -> str:
     """Map a qualified area to its episode event_type.
 
@@ -231,7 +256,7 @@ def event_type_for_area(area: str) -> str:
         return PROFILE_EVENT_TYPE
     if area in CYCLE_AREAS:
         return CYCLE_EVENT_TYPE
-    raise ValueError(f"Unknown coach-intake area: {area!r}")
+    raise ValueError(unknown_area_message(area))
 
 
 # --------------------------------------------------------------------------

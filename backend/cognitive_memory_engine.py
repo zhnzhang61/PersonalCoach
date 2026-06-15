@@ -30,6 +30,7 @@ from backend.coach_intake import (
     SLOT_BY_AREA,
     CoachSlot,
     event_type_for_area,
+    unknown_area_message,
 )
 from backend.llm_provider import call_embedding, call_llm, cosine_similarity
 from backend.trace_logger import TraceLogger
@@ -1809,7 +1810,7 @@ class MemoryOS:
             ValueError on an unknown area or empty raw_text.
         """
         if area not in ALL_AREAS:
-            raise ValueError(f"Unknown coach-intake area: {area!r}")
+            raise ValueError(unknown_area_message(area))
         raw_text = (raw_text or "").strip()
         if not raw_text:
             raise ValueError("record_coach_fact requires non-empty raw_text")

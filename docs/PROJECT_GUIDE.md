@@ -838,6 +838,43 @@ correction round — the model re-records (harmless: the CME
 two-threshold write dedups) or rephrases. Bounded cost, accepted in
 exchange for never letting a false claim through unchallenged.
 
+**Tool failures are recoverable, not fatal** (`agentic_coach._handle_tool_error`).
+`create_react_agent`'s default `_default_handle_tool_errors` returns a
+message only for `ToolInvocationError` (arg-binding) and **re-raises
+everything else** — including the `ToolException` MCP tools raise on any
+api_server 4xx/5xx/timeout. That re-raise escapes `astream_events` and
+crashes the whole turn into a raw error bubble. So we pass an explicit
+`ToolNode(tools, handle_tool_errors=_handle_tool_error)`: a tool error
+becomes a ToolMessage the model reads and recovers from (retry with
+fixed args, or tell the user honestly). Paired with the MCP wrapper
+surfacing the api_server error **detail** (`_raise_for_status_with_detail`
+in `personal_coach_mcp.py` — not httpx's mozilla link) and self-correcting
+area errors (`coach_intake.unknown_area_message` — "Did you mean
+'Profile.psychology'?"), the model can actually fix the call. Real repro
+2026-06-15: `record_coach_fact(area='Cycle.psychology')` → 400 → fatal
+turn; now → ToolMessage → retry with `Profile.psychology`. The trace
+still records the failed attempt (`ToolCallCaptureHandler.on_tool_error`),
+so claim_check still treats it as a non-write.
+
+**Orphaned tool calls self-heal on load** (`_sanitize_history_hook` +
+`_sanitize_dangling_tool_calls`). If a turn dies *between* an
+`AIMessage(tool_calls)` and its `ToolMessage` — a crash, a rate-limit
+mid-loop, a client disconnect — the checkpoint keeps the orphaned call.
+langgraph's `_validate_chat_history` runs on the **raw state** (before
+the `prompt` callable) and raises "Found AIMessages with tool_calls that
+do not have a corresponding ToolMessage" on *every* later turn, bricking
+the thread (real repro 2026-06-15, fallout from the pre-fix
+`record_coach_fact` crash). The fix is a `pre_model_hook` that strips
+orphaned tool calls (keeping answered calls + text) and returns them as
+`llm_input_messages` — ephemeral, so the orphan stays dormant in the
+checkpoint but never reaches the model or the validator. `pre_model_hook`
+is the right chokepoint precisely because the validator reads
+`llm_input_messages` when a hook is set, then copies it into
+`state["messages"]` for `_build_prompt`. This also un-bricks any thread
+already corrupted before the fix — no DB surgery. The §4 PR-#107
+hardening (errors → ToolMessage) prevents *new* orphans; this recovers
+from existing ones and from other crash paths.
+
 ---
 
 ## 4. Engineering debt

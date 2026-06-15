@@ -39,6 +39,34 @@ mcp = FastMCP("personal-coach")
 # HTTP helpers
 # =============================================================================
 
+def _raise_for_status_with_detail(r: httpx.Response, path: str) -> None:
+    """Like r.raise_for_status(), but put the api_server's actual error
+    DETAIL in the message instead of httpx's generic "Client error '400
+    Bad Request' for url … mozilla.org/…" line.
+
+    Why it matters: a tool error becomes a ToolMessage the agent reads
+    (once tool errors are recoverable — see agentic_coach
+    `_handle_tool_error`). The model can only self-correct if the message
+    is actionable. Real repro 2026-06-15: record_coach_fact(area=
+    'Cycle.psychology') → FastAPI 400 with detail "Unknown coach-intake
+    area 'Cycle.psychology'. Did you mean 'Profile.psychology'?" — but
+    raise_for_status discarded the detail, so the model saw only the
+    mozilla link and couldn't recover.
+    """
+    if r.status_code < 400:
+        return
+    detail: str | None = None
+    try:
+        body = r.json()
+        detail = body.get("detail") if isinstance(body, dict) else None
+    except Exception:
+        detail = (r.text or "").strip() or None
+    msg = f"{path} → HTTP {r.status_code}"
+    if detail:
+        msg += f": {detail}"
+    raise RuntimeError(msg)
+
+
 async def _get(path: str, **params: Any) -> Any:
     """GET an api_server endpoint, raise on non-2xx, return parsed JSON.
     None-valued params are dropped so optional tool args don't clutter
@@ -46,7 +74,7 @@ async def _get(path: str, **params: Any) -> Any:
     clean = {k: v for k, v in params.items() if v is not None}
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.get(f"{API_BASE}{path}", params=clean)
-        r.raise_for_status()
+        _raise_for_status_with_detail(r, path)
         return r.json()
 
 
@@ -56,7 +84,7 @@ async def _post(path: str, body: dict | None = None) -> Any:
     propose_model MCP tools, which mutate state and so need POST."""
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         r = await client.post(f"{API_BASE}{path}", json=body or {})
-        r.raise_for_status()
+        _raise_for_status_with_detail(r, path)
         return r.json()
 
 

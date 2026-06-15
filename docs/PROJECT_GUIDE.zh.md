@@ -724,6 +724,37 @@ guideline 故意收得很紧：明确告诉 agent 什么时候该问（必需 + 
 （「是的，已记录在案」）可能触发一轮纠正——模型会重新记录（无害：CME 的
 双阈值写入会去重）或换措辞。有界的代价，换「假声称绝不放行」。
 
+**工具失败是可恢复的，不是致命的**（`agentic_coach._handle_tool_error`）。
+`create_react_agent` 的默认 `_default_handle_tool_errors` 只对
+`ToolInvocationError`（参数绑定错误）返回消息，**其它一律 re-raise**——
+包括 MCP 工具在 api_server 任何 4xx/5xx/超时时抛的 `ToolException`。这个
+re-raise 会冲出 `astream_events`、把整轮崩成一个原始错误气泡。所以我们显式
+传 `ToolNode(tools, handle_tool_errors=_handle_tool_error)`：工具错误变成
+模型能读到、能据此恢复的 ToolMessage（用更正的参数重试，或如实告诉用户）。
+再配合 MCP wrapper 把 api_server 的错误 **detail** 透出来
+（`personal_coach_mcp.py` 的 `_raise_for_status_with_detail`，而不是 httpx
+的 mozilla 链接）+ 自我纠正的 area 报错（`coach_intake.unknown_area_message`
+——「Did you mean 'Profile.psychology'?」），模型就能真正修好这次调用。
+2026-06-15 实例：`record_coach_fact(area='Cycle.psychology')` → 400 → 整轮
+崩溃；现在 → ToolMessage → 用 `Profile.psychology` 重试。trace 仍记录这次
+失败尝试（`ToolCallCaptureHandler.on_tool_error`），所以 claim_check 照样
+把它当作「没写入」。
+
+**孤儿 tool call 在加载时自愈**（`_sanitize_history_hook` +
+`_sanitize_dangling_tool_calls`）。如果某一轮死在 `AIMessage(tool_calls)`
+和它的 `ToolMessage` 之间——崩溃、循环中途限流、客户端断连——checkpoint
+就留下一个没人应答的 tool call。langgraph 的 `_validate_chat_history` 跑在
+**原始 state** 上（在 `prompt` callable 之前），之后每一轮都会抛「Found
+AIMessages with tool_calls that do not have a corresponding ToolMessage」，
+把整个线程焊死（2026-06-15 实例，修复前 `record_coach_fact` 崩溃的后遗症）。
+修法是一个 `pre_model_hook`：剥掉孤儿 tool call（保留已应答的 call + 文本），
+作为 `llm_input_messages` 返回——临时的，所以孤儿在 checkpoint 里继续休眠、
+但永远到不了模型和校验器。`pre_model_hook` 是正确的卡点，正因为校验器在设了
+hook 时读 `llm_input_messages`、再把它拷进 `state["messages"]` 给
+`_build_prompt`。这也顺带救活修复前就已损坏的线程——不用动数据库。§4 的
+PR-#107 加固（错误 → ToolMessage）防的是**新**孤儿；这个负责从已有孤儿和
+其它崩溃路径里恢复。
+
 ---
 
 ## 4. 工程债
