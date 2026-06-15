@@ -740,6 +740,21 @@ re-raise 会冲出 `astream_events`、把整轮崩成一个原始错误气泡。
 失败尝试（`ToolCallCaptureHandler.on_tool_error`），所以 claim_check 照样
 把它当作「没写入」。
 
+**孤儿 tool call 在加载时自愈**（`_sanitize_history_hook` +
+`_sanitize_dangling_tool_calls`）。如果某一轮死在 `AIMessage(tool_calls)`
+和它的 `ToolMessage` 之间——崩溃、循环中途限流、客户端断连——checkpoint
+就留下一个没人应答的 tool call。langgraph 的 `_validate_chat_history` 跑在
+**原始 state** 上（在 `prompt` callable 之前），之后每一轮都会抛「Found
+AIMessages with tool_calls that do not have a corresponding ToolMessage」，
+把整个线程焊死（2026-06-15 实例，修复前 `record_coach_fact` 崩溃的后遗症）。
+修法是一个 `pre_model_hook`：剥掉孤儿 tool call（保留已应答的 call + 文本），
+作为 `llm_input_messages` 返回——临时的，所以孤儿在 checkpoint 里继续休眠、
+但永远到不了模型和校验器。`pre_model_hook` 是正确的卡点，正因为校验器在设了
+hook 时读 `llm_input_messages`、再把它拷进 `state["messages"]` 给
+`_build_prompt`。这也顺带救活修复前就已损坏的线程——不用动数据库。§4 的
+PR-#107 加固（错误 → ToolMessage）防的是**新**孤儿；这个负责从已有孤儿和
+其它崩溃路径里恢复。
+
 ---
 
 ## 4. 工程债

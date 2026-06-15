@@ -186,6 +186,130 @@ class TestBuildPrompt:
         assert coach._prompt_hash != prompt_hash(_SYSTEM_PROMPT)
 
 
+class TestSanitizeDanglingToolCalls:
+    """Orphaned tool calls in the loaded history (turn died between an
+    AIMessage(tool_calls) and its ToolMessage — crash / rate-limit /
+    disconnect) brick the thread: langgraph's _validate_chat_history
+    rejects them on every later turn. The pre_model_hook strips them so
+    the thread self-heals. Real repro 2026-06-15."""
+
+    @staticmethod
+    def _tc(i, name="record_coach_fact"):
+        return {"name": name, "args": {}, "id": i, "type": "tool_call"}
+
+    def test_dangling_call_with_text_keeps_text_drops_call(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        out = _sanitize_dangling_tool_calls(
+            [HumanMessage(content="hi"),
+             AIMessage(content="已安排。", tool_calls=[self._tc("a")])]
+        )
+        assert len(out) == 2
+        assert not out[-1].tool_calls
+        assert out[-1].content == "已安排。"
+
+    def test_dangling_call_no_text_drops_message(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        out = _sanitize_dangling_tool_calls(
+            [HumanMessage(content="hi"),
+             AIMessage(content="", tool_calls=[self._tc("a")])]
+        )
+        assert [m.type for m in out] == ["human"]
+
+    def test_answered_call_is_untouched(self):
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content="", tool_calls=[self._tc("a")]),
+            ToolMessage(content="ok", tool_call_id="a"),
+            AIMessage(content="done"),
+        ]
+        out = _sanitize_dangling_tool_calls(msgs)
+        assert len(out) == 4
+        assert out[1].tool_calls[0]["id"] == "a"
+
+    def test_mixed_answered_and_orphan_in_one_message(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        out = _sanitize_dangling_tool_calls([
+            AIMessage(content="", tool_calls=[self._tc("a"), self._tc("b")]),
+            ToolMessage(content="ok", tool_call_id="a"),
+        ])
+        assert [c["id"] for c in out[0].tool_calls] == ["a"]
+        assert any(m.type == "tool" for m in out)
+
+    def test_reverse_orphan_toolmessage_dropped(self):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        out = _sanitize_dangling_tool_calls(
+            [HumanMessage(content="hi"),
+             ToolMessage(content="stray", tool_call_id="zzz")]
+        )
+        assert [m.type for m in out] == ["human"]
+
+    def test_clean_history_is_noop(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from backend.agentic_coach import _sanitize_dangling_tool_calls
+
+        msgs = [HumanMessage(content="hi"), AIMessage(content="hello")]
+        out = _sanitize_dangling_tool_calls(msgs)
+        assert out == msgs
+
+    def test_hook_returns_llm_input_messages(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from backend.agentic_coach import _sanitize_history_hook
+
+        h = _sanitize_history_hook(
+            {"messages": [HumanMessage(content="hi"),
+                          AIMessage(content="x", tool_calls=[self._tc("a")])]}
+        )
+        assert list(h.keys()) == ["llm_input_messages"]
+        assert len(h["llm_input_messages"]) == 2
+
+    def test_output_passes_langgraph_validator(self):
+        """The end-to-end guarantee: langgraph's own
+        _validate_chat_history (which bricks the thread) rejects the raw
+        orphaned history but accepts the hook's output."""
+        import pytest as _pytest
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langgraph.prebuilt.chat_agent_executor import (
+            _validate_chat_history,
+        )
+
+        from backend.agentic_coach import _sanitize_history_hook
+
+        orphan = [
+            HumanMessage(content="hi"),
+            AIMessage(content="已安排。", tool_calls=[self._tc("a")]),
+        ]
+        with _pytest.raises(ValueError, match="corresponding ToolMessage"):
+            _validate_chat_history(orphan)
+        clean = _sanitize_history_hook({"messages": orphan})["llm_input_messages"]
+        _validate_chat_history(clean)  # must not raise
+
+    def test_wired_as_pre_model_hook(self):
+        import inspect
+
+        from backend import agentic_coach
+
+        src = inspect.getsource(agentic_coach.AgenticCoach._ensure_agent)
+        assert "pre_model_hook=_sanitize_history_hook" in src
+
+
 class TestStartedAtFromThreadId:
     """Module-level helper. Pure function, easy to test."""
 

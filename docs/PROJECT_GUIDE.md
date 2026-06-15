@@ -856,6 +856,25 @@ turn; now → ToolMessage → retry with `Profile.psychology`. The trace
 still records the failed attempt (`ToolCallCaptureHandler.on_tool_error`),
 so claim_check still treats it as a non-write.
 
+**Orphaned tool calls self-heal on load** (`_sanitize_history_hook` +
+`_sanitize_dangling_tool_calls`). If a turn dies *between* an
+`AIMessage(tool_calls)` and its `ToolMessage` — a crash, a rate-limit
+mid-loop, a client disconnect — the checkpoint keeps the orphaned call.
+langgraph's `_validate_chat_history` runs on the **raw state** (before
+the `prompt` callable) and raises "Found AIMessages with tool_calls that
+do not have a corresponding ToolMessage" on *every* later turn, bricking
+the thread (real repro 2026-06-15, fallout from the pre-fix
+`record_coach_fact` crash). The fix is a `pre_model_hook` that strips
+orphaned tool calls (keeping answered calls + text) and returns them as
+`llm_input_messages` — ephemeral, so the orphan stays dormant in the
+checkpoint but never reaches the model or the validator. `pre_model_hook`
+is the right chokepoint precisely because the validator reads
+`llm_input_messages` when a hook is set, then copies it into
+`state["messages"]` for `_build_prompt`. This also un-bricks any thread
+already corrupted before the fix — no DB surgery. The §4 PR-#107
+hardening (errors → ToolMessage) prevents *new* orphans; this recovers
+from existing ones and from other crash paths.
+
 ---
 
 ## 4. Engineering debt

@@ -53,6 +53,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -443,6 +444,72 @@ def _handle_tool_error(e: Exception) -> str:
     )
 
 
+def _sanitize_dangling_tool_calls(
+    messages: list[BaseMessage],
+) -> list[BaseMessage]:
+    """Drop tool calls that have no answering ToolMessage (and ToolMessages
+    that answer nothing) so the history is valid to send to the LLM.
+
+    Why this is needed: if a turn dies between an AIMessage(tool_calls) and
+    its ToolMessage — a crash, a provider/rate-limit error mid-loop, a
+    client disconnect — the checkpoint keeps the orphaned tool call. Every
+    later turn then reloads it, and langgraph's `_validate_chat_history`
+    (which runs on the raw state, BEFORE the `prompt` callable) raises
+    "Found AIMessages with tool_calls that do not have a corresponding
+    ToolMessage", bricking the thread (real repro 2026-06-15, fallout from
+    the pre-#107 record_coach_fact crash). #107 stops NEW orphans; this
+    makes the agent resilient to any that already exist or arise from
+    other crash paths.
+
+    Surgical, not blunt: an AIMessage keeps its answered tool calls and its
+    text — only the unanswered calls are stripped. An AIMessage left with
+    neither text nor calls is dropped; a ToolMessage referencing a dropped
+    call is dropped. Returns a new list; inputs are not mutated.
+    """
+    answered: set = {
+        m.tool_call_id
+        for m in messages
+        if isinstance(m, ToolMessage) and m.tool_call_id is not None
+    }
+    kept_call_ids: set = set()
+    out: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            good = [tc for tc in m.tool_calls if tc.get("id") in answered]
+            if len(good) == len(m.tool_calls):
+                out.append(m)
+                kept_call_ids.update(tc.get("id") for tc in good)
+                continue
+            # Some/all calls are orphaned. Keep text + answered calls only.
+            text = m.content
+            if not good and not (isinstance(text, str) and text.strip()):
+                continue  # nothing left worth keeping — drop the message
+            out.append(
+                m.model_copy(update={"tool_calls": good})
+                if hasattr(m, "model_copy")
+                else AIMessage(content=text, tool_calls=good)
+            )
+            kept_call_ids.update(tc.get("id") for tc in good)
+        elif isinstance(m, ToolMessage):
+            # Keep only if it answers a tool call we kept (drops reverse
+            # orphans — a result with no surviving request).
+            if m.tool_call_id in kept_call_ids:
+                out.append(m)
+        else:
+            out.append(m)
+    return out
+
+
+def _sanitize_history_hook(state: dict) -> dict:
+    """create_react_agent `pre_model_hook`: hand the model a tool-call-
+    consistent view of the history. Returns `llm_input_messages`
+    (ephemeral — does NOT rewrite the persisted `messages` channel, so the
+    orphan stays dormant in the checkpoint but never reaches the LLM or
+    langgraph's validator). See _sanitize_dangling_tool_calls."""
+    msgs = state.get("messages", []) or []
+    return {"llm_input_messages": _sanitize_dangling_tool_calls(list(msgs))}
+
+
 def _build_prompt(state: dict) -> list[BaseMessage]:
     """LangGraph create_react_agent `prompt` callable. Prepends a
     SystemMessage that pins today's date in front of the persona
@@ -796,6 +863,12 @@ class AgenticCoach:
                 tools=ToolNode(
                     self._mcp_tools, handle_tool_errors=_handle_tool_error
                 ),
+                # Strip orphaned tool calls from the loaded history before
+                # the model + langgraph's _validate_chat_history see it, so
+                # a turn that died mid-tool-call (crash / rate-limit /
+                # disconnect) can't permanently brick the thread. Runs
+                # before _build_prompt; its output feeds state["messages"].
+                pre_model_hook=_sanitize_history_hook,
                 checkpointer=self._aio_checkpointer,
                 # Callable rather than the raw string so today's date is
                 # resolved fresh every turn — otherwise a long-lived
