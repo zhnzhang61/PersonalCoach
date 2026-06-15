@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from backend import personal_coach_mcp as mcp
@@ -804,3 +805,41 @@ class TestRecordCoachFactTool:
         _path, body = fake_post.calls[0]
         assert body["conclusion"] == "训练年龄 5 年，2 个全马"
         assert body["name"] == "跑步背景"
+
+
+# ---------------------------------------------------------------------------
+# _raise_for_status_with_detail — surface the api_server error DETAIL so a
+# tool failure becomes an actionable message (recovery depends on it; see
+# agentic_coach._handle_tool_error). Real repro 2026-06-15: a 400 from
+# record_coach_fact showed only httpx's mozilla link, model couldn't recover.
+# ---------------------------------------------------------------------------
+
+
+class TestRaiseForStatusWithDetail:
+    @staticmethod
+    def _resp(status, *, json=None, text=None):
+        req = httpx.Request("POST", "http://x/api/memory/coach-fact")
+        if json is not None:
+            return httpx.Response(status, json=json, request=req)
+        return httpx.Response(status, text=text or "", request=req)
+
+    def test_2xx_is_noop(self):
+        mcp._raise_for_status_with_detail(self._resp(200, json={"ok": 1}), "/p")
+
+    def test_400_surfaces_fastapi_detail(self):
+        r = self._resp(
+            400,
+            json={"detail": "Unknown coach-intake area 'Cycle.psychology'. "
+                            "Did you mean 'Profile.psychology'?"},
+        )
+        with pytest.raises(RuntimeError) as ei:
+            mcp._raise_for_status_with_detail(r, "/api/memory/coach-fact")
+        msg = str(ei.value)
+        assert "Profile.psychology" in msg  # the actionable bit, not a mozilla link
+        assert "400" in msg
+        assert "mozilla.org" not in msg
+
+    def test_500_plain_text_body_falls_back(self):
+        r = self._resp(500, text="Internal Server Error\nTraceback…")
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            mcp._raise_for_status_with_detail(r, "/api/sync/garmin")

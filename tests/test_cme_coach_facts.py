@@ -122,6 +122,30 @@ class TestTaxonomy:
         with pytest.raises(ValueError):
             ci.event_type_for_area("Bogus.area")
 
+    def test_unknown_area_message_suggests_cross_namespace(self):
+        """The 2026-06-15 production bug: the agent sent Cycle.psychology
+        (psychology is a Profile slot). The error must name the right
+        area so the model can self-correct after the tool error is made
+        recoverable."""
+        msg = ci.unknown_area_message("Cycle.psychology")
+        assert "Profile.psychology" in msg
+        assert "Cycle.psychology" in msg
+        # symmetric — wrong-namespace the other direction
+        assert "Cycle.goal" in ci.unknown_area_message("Profile.goal")
+
+    def test_unknown_area_message_lists_valid_when_no_match(self):
+        """No cross-namespace twin → fall back to listing the valid set
+        so the message is still actionable."""
+        msg = ci.unknown_area_message("Cycle.bogus")
+        assert "Cycle.goal" in msg and "Profile.injury_history" in msg
+        assert "Did you mean" not in msg
+
+    def test_event_type_for_area_uses_rich_message(self):
+        """event_type_for_area routes its ValueError through
+        unknown_area_message (so the 400 detail is self-correcting)."""
+        with pytest.raises(ValueError, match="Did you mean 'Profile.psychology'"):
+            ci.event_type_for_area("Cycle.psychology")
+
 
 class TestRenderIntakePromptSection:
     def test_returns_nonempty_str(self):
@@ -261,6 +285,12 @@ class TestRecordCoachFact:
     def test_unknown_area_raises(self, mem):
         with pytest.raises(ValueError):
             mem.record_coach_fact("Bogus.area", "x")
+
+    def test_unknown_area_raises_with_suggestion(self, mem):
+        """record_coach_fact surfaces the self-correcting message (→ 400
+        detail → tool error → model retries with the right area)."""
+        with pytest.raises(ValueError, match="Profile.psychology"):
+            mem.record_coach_fact("Cycle.psychology", "整体心累")
 
     def test_empty_raw_text_raises(self, mem):
         with pytest.raises(ValueError):

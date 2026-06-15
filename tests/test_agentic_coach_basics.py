@@ -114,6 +114,32 @@ class TestBuildPrompt:
         assert "prompt=_build_prompt," in src
         assert "prompt=_build_prompt(" not in src
 
+    def test_tool_errors_are_recoverable_not_fatal(self):
+        """create_react_agent's default re-raises ToolException (MCP
+        tool 4xx/5xx) and crashes the turn. _ensure_agent must wrap the
+        tools in a ToolNode with our handle_tool_errors so a backend
+        tool failure becomes a ToolMessage the model can recover from.
+        Pin both the wiring and the handler's contract."""
+        import inspect
+
+        from backend import agentic_coach
+        from backend.agentic_coach import _handle_tool_error
+
+        src = inspect.getsource(agentic_coach.AgenticCoach._ensure_agent)
+        assert "ToolNode(" in src
+        assert "handle_tool_errors=_handle_tool_error" in src
+
+        # Handler turns any exception into a non-empty recovery string
+        # (becomes the ToolMessage). It must carry the original error so
+        # the model can self-correct, and must NOT claim success.
+        msg = _handle_tool_error(
+            RuntimeError("/api/memory/coach-fact → HTTP 400: "
+                         "Unknown coach-intake area 'Cycle.psychology'. "
+                         "Did you mean 'Profile.psychology'?")
+        )
+        assert "Profile.psychology" in msg  # original error preserved
+        assert "重试" in msg or "retry" in msg.lower()
+
     def test_user_tz_override_via_env(self, monkeypatch):
         """PERSONAL_COACH_TZ env var overrides process-local tz. A
         UTC server with a Shanghai user needs this to avoid putting

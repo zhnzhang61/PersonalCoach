@@ -56,7 +56,7 @@ from langchain_core.messages import (
 )
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import ToolNode, create_react_agent
 
 # llm_provider is the ONLY module allowed to construct LangChain models.
 from backend.claim_check import (
@@ -416,6 +416,33 @@ _HEADER_TEMPLATE = (
 )
 
 
+def _handle_tool_error(e: Exception) -> str:
+    """ToolNode error handler — make a tool failure RECOVERABLE instead
+    of fatal.
+
+    create_react_agent's default (`_default_handle_tool_errors`) returns
+    a message only for `ToolInvocationError` (arg-binding) and RE-RAISES
+    everything else — including the `ToolException` the MCP adapter
+    raises on any api_server 4xx/5xx/timeout. That re-raise escapes
+    `astream_events`, crashing the whole turn into a raw error bubble
+    ("Error executing tool … 400 … mozilla.org/…"). So ANY backend tool
+    error nuked the user's turn; the 2026-06-15 record_coach_fact(area=
+    'Cycle.psychology') 400 was just the first trigger.
+
+    Returning a string here turns the error into a ToolMessage the model
+    reads and can act on: retry with corrected args (e.g. the area the
+    detail suggests) or tell the user honestly. The trace still records
+    the failure via ToolCallCaptureHandler.on_tool_error, so claim_check
+    still treats the attempt as a non-write.
+    """
+    return (
+        f"工具调用失败：{e}\n"
+        "这一步没有成功，档案/数据未发生改动。不要向用户假称已经完成。"
+        "若是参数问题（例如 area 名称写错、用了不存在的取值），"
+        "用更正后的参数重试一次；否则如实告诉用户这一步没成功。"
+    )
+
+
 def _build_prompt(state: dict) -> list[BaseMessage]:
     """LangGraph create_react_agent `prompt` callable. Prepends a
     SystemMessage that pins today's date in front of the persona
@@ -761,7 +788,14 @@ class AgenticCoach:
 
             self._agent = create_react_agent(
                 model=llm,
-                tools=self._mcp_tools,
+                # Explicit ToolNode so a tool error becomes a ToolMessage
+                # the model can recover from, instead of create_react_agent's
+                # default re-raising it and crashing the turn (see
+                # _handle_tool_error). create_react_agent still binds the
+                # tool schemas to the model from the node's tools.
+                tools=ToolNode(
+                    self._mcp_tools, handle_tool_errors=_handle_tool_error
+                ),
                 checkpointer=self._aio_checkpointer,
                 # Callable rather than the raw string so today's date is
                 # resolved fresh every turn — otherwise a long-lived
