@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow, parseISO } from "date-fns";
 import { ClipboardPaste, ExternalLink, RefreshCw } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -122,6 +122,23 @@ function RefreshTokenCard() {
   // error paths (so the user can retry after a failed clipboard read).
   const pasting = useRef(false);
 
+  // Is one-tap clipboard read even possible here? navigator.clipboard
+  // exists ONLY in a secure context (HTTPS or localhost). On the phone
+  // the app is reached over plain http:// on a LAN IP, which browsers
+  // don't treat as secure → navigator.clipboard is undefined and the
+  // "Paste & refresh" button can never work (not an iOS permission — no
+  // toggle fixes it). Probe after mount (capability is client-only;
+  // checking during render would hydration-mismatch) and hide the
+  // button when unavailable so it isn't a dead end — the manual paste
+  // box below works over http:// just fine.
+  const [clipboardReadable, setClipboardReadable] = useState(false);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setClipboardReadable(
+      typeof navigator !== "undefined" && !!navigator.clipboard?.readText,
+    );
+  }, []);
+
   const refresh = useMutation({
     mutationFn: (t: string) =>
       apiPost<RefreshTokenResult>("/api/sync/garmin/refresh-token", {
@@ -160,7 +177,7 @@ function RefreshTokenCard() {
     } catch {
       pasting.current = false;
       setPasteError(
-        "读不到剪贴板（可能没授权）。请在下面的输入框手动粘贴。",
+        "读不到剪贴板（页面非 HTTPS 时浏览器会禁用，不是 iOS 权限问题）。请在下面手动粘贴。",
       );
       return;
     }
@@ -241,28 +258,41 @@ function RefreshTokenCard() {
               3.
             </span>
             <div className="flex-1 space-y-2">
-              <p>
-                Back here within ~1 minute (the ticket expires fast), tap{" "}
-                <strong>Paste &amp; refresh</strong> — it reads the URL you
-                just copied straight from the clipboard.
-              </p>
-              <Button
-                type="button"
-                onClick={pasteAndRefresh}
-                disabled={refresh.isPending}
-                className="w-full sm:w-auto"
-              >
-                <ClipboardPaste className="size-4" aria-hidden />
-                {refresh.isPending ? "Exchanging…" : "Paste & refresh"}
-              </Button>
-              {pasteError && (
-                <p className="text-sm text-rose-700 dark:text-rose-400">
-                  {pasteError}
+              {clipboardReadable ? (
+                <>
+                  <p>
+                    Back here within ~1 minute (the ticket expires fast),
+                    tap <strong>Paste &amp; refresh</strong> — it reads the
+                    URL you just copied straight from the clipboard.
+                  </p>
+                  <Button
+                    type="button"
+                    onClick={pasteAndRefresh}
+                    disabled={refresh.isPending}
+                    className="w-full sm:w-auto"
+                  >
+                    <ClipboardPaste className="size-4" aria-hidden />
+                    {refresh.isPending ? "Exchanging…" : "Paste & refresh"}
+                  </Button>
+                  {pasteError && (
+                    <p className="text-sm text-rose-700 dark:text-rose-400">
+                      {pasteError}
+                    </p>
+                  )}
+                  <p className="pt-1 text-xs text-muted-foreground">
+                    Or paste it manually:
+                  </p>
+                </>
+              ) : (
+                <p>
+                  Back here within ~1 minute (the ticket expires fast) and
+                  paste the URL below.{" "}
+                  <span className="text-muted-foreground">
+                    (One-tap paste needs an HTTPS connection — over plain
+                    http:// the browser blocks clipboard access.)
+                  </span>
                 </p>
               )}
-              <p className="pt-1 text-xs text-muted-foreground">
-                Or paste it manually:
-              </p>
               <Input
                 value={ticket}
                 onChange={(e) => setTicket(e.target.value)}
@@ -274,7 +304,7 @@ function RefreshTokenCard() {
               />
               <Button
                 type="button"
-                variant="secondary"
+                variant={clipboardReadable ? "secondary" : "default"}
                 onClick={() => refresh.mutate(ticket.trim())}
                 disabled={!ticket.trim() || refresh.isPending}
               >
