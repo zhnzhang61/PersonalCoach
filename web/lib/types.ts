@@ -346,6 +346,7 @@ export interface TreadmillSplit {
   mile: number;
   pace_s: number;
   pace_str: string; // "12:28"
+  avg_hr?: number | null; // duration-weighted avg HR within the split
   partial_mi?: number; // present only on a trailing partial mile
 }
 

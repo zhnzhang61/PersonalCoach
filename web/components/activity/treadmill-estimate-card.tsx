@@ -97,31 +97,48 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
       </div>
 
       <div className="mt-3">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-          Mile splits
+        <div className="grid grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2 text-xs uppercase tracking-wide text-muted-foreground">
+          <span>Mi</span>
+          <span>Pace</span>
+          <span />
+          <span className="text-right">HR</span>
         </div>
-        {/* Mile label and pace deliberately look NOTHING alike: tiny
-            muted upper-case label vs bold mono pace — "1·12:28" read as
-            one blurry number before. */}
-        <div className="mt-1 flex flex-wrap gap-1">
-          {est.splits.map((s) => (
-            <span
-              key={s.mile}
-              className="inline-flex items-baseline gap-1 rounded bg-muted/60 px-1.5 py-0.5"
-              title={
-                s.partial_mi != null
-                  ? `last ${s.partial_mi} mi`
-                  : `mile ${s.mile}`
-              }
-            >
-              <span className="text-[10px] font-medium uppercase text-muted-foreground">
-                {s.partial_mi != null ? `+${s.partial_mi}` : `mi ${s.mile}`}
-              </span>
-              <span className="font-mono text-xs font-semibold">
-                {s.pace_str}
-              </span>
-            </span>
-          ))}
+        {/* Strava-style split rows: bar length ∝ speed, faster = longer.
+            Widths are min-max normalized into 40–100% — raw speed ratios
+            make near-equal splits indistinguishable. */}
+        <div className="mt-1 space-y-1">
+          {(() => {
+            const paces = est.splits.map((s) => s.pace_s);
+            const fast = Math.min(...paces);
+            const slow = Math.max(...paces);
+            const width = (p: number) =>
+              slow === fast ? 100 : 40 + (60 * (slow - p)) / (slow - fast);
+            return est.splits.map((s) => (
+              <div
+                key={s.mile}
+                className="grid grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2"
+                title={
+                  s.partial_mi != null
+                    ? `last ${s.partial_mi} mi`
+                    : `mile ${s.mile}`
+                }
+              >
+                <span className="text-xs text-muted-foreground">
+                  {s.partial_mi != null ? `+${s.partial_mi}` : s.mile}
+                </span>
+                <span className="font-mono text-xs font-semibold">
+                  {s.pace_str}
+                </span>
+                <div
+                  className="h-3 rounded-full bg-warm-accent/70"
+                  style={{ width: `${width(s.pace_s)}%` }}
+                />
+                <span className="text-right font-mono text-xs text-muted-foreground">
+                  {s.avg_hr ?? "—"}
+                </span>
+              </div>
+            ));
+          })()}
         </div>
       </div>
 

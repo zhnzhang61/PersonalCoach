@@ -163,6 +163,9 @@ class TestPredict:
         full = [s for s in est["splits"] if "partial_mi" not in s]
         assert len(full) == int(expected_mi)
         assert max(s["pace_s"] for s in full) - min(s["pace_s"] for s in full) <= 3
+        # Each split carries its duration-weighted avg HR (constant curve
+        # → exactly the input HR).
+        assert all(s["avg_hr"] == 155 for s in est["splits"])
 
     def test_walking_buckets_add_time_not_distance(self, proc):
         df = _constant_telemetry(170.0, 155.0, 1800)
