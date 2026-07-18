@@ -544,10 +544,11 @@ class DataProcessor:
     # --- RESTORED METHODS FOR UI ---
     def get_weeks_for_block(self, block_id):
         """
-        Split a block into ISO-style weeks (Monday-start). Week 0 is the
-        partial week from the block's start date up to the first Sunday;
-        subsequent weeks are full 7-day windows Monday→Sunday. Returns
-        [] if the block id is unknown.
+        Split a block into ISO-style weeks (Monday-start). Week 1 is the
+        (possibly partial) week from the block's start date up to the first
+        Sunday; subsequent weeks are full 7-day windows Monday→Sunday.
+        Numbering is 1-based to match the user's workout naming (W1D1 …).
+        Returns [] if the block id is unknown.
         """
         blocks = self.get_blocks()
         block = next((b for b in blocks if b['id'] == block_id), None)
@@ -557,18 +558,18 @@ class DataProcessor:
         end = datetime.date.fromisoformat(block['end_date'])
         weeks = []
 
-        # Week 0 — from block start through the first Sunday (or block end,
+        # Week 1 — from block start through the first Sunday (or block end,
         # whichever is earlier). Monday=0 … Sunday=6 in Python's weekday().
         days_until_sunday = 6 - start.weekday()
         w0_end = min(start + timedelta(days=days_until_sunday), end)
         weeks.append({
-            "week_num": 0,
+            "week_num": 1,
             "start": start.isoformat(),
             "end": w0_end.isoformat(),
-            "label": f"Week 0 ({w0_end.strftime('%b %d')})",
+            "label": f"Week 1 ({w0_end.strftime('%b %d')})",
         })
         curr = w0_end + timedelta(days=1)
-        week_num = 1
+        week_num = 2
 
         while curr <= end:
             w_end = min(curr + timedelta(days=6), end)
@@ -585,7 +586,7 @@ class DataProcessor:
         # week that's almost never what the user means (off-by-one in their
         # block boundary). Absorb stubs into the previous week so cycle stats
         # and the week selector don't show a "Week 20 (Dec 15)" with one day.
-        # Week 0 (intentional warm-up runway) is left alone — only collapse
+        # Week 1 (intentional warm-up runway) is left alone — only collapse
         # when there's a previous full week to merge into.
         if len(weeks) >= 2:
             last_start = datetime.date.fromisoformat(weeks[-1]["start"])
