@@ -516,3 +516,20 @@ class TestDailyCheckinWiring:
 
         plan = _prefetch_review_workout(123, "2026-05-29")
         assert ("get_recent_checkins", {"days": 7}) in plan
+
+
+class TestMcpSpawnCommand:
+    """The MCP stdio server must be spawned with THIS interpreter, never by
+    shelling out to `uv`. Under launchd the agent PATH is minimal and
+    ~/.local/bin (where uv lives) is absent, so a `uv run …` spawn raises
+    [Errno 2] No such file or directory: 'uv' and every coach turn dies at
+    MCP init (the "review health" outage of 2026-07-17)."""
+
+    def test_spawn_uses_sys_executable_not_uv(self):
+        import inspect
+
+        from backend.agentic_coach import AgenticCoach
+
+        src = inspect.getsource(AgenticCoach._ensure_agent)
+        assert '"command": sys.executable' in src
+        assert '"command": "uv"' not in src
