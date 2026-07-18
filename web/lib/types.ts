@@ -342,6 +342,35 @@ export interface RouteResponse {
   };
 }
 
+export interface TreadmillSplit {
+  mile: number;
+  pace_s: number;
+  pace_str: string; // "12:28"
+  partial_mi?: number; // present only on a trailing partial mile
+}
+
+export interface TreadmillEstimate {
+  activity_id: number;
+  estimate: {
+    total_distance_mi: number;
+    total_distance_km: number;
+    duration_s: number;
+    duration_str: string; // "2:02:24"
+    avg_pace_s_per_mi: number;
+    avg_pace_str: string; // "11:18"
+    splits: TreadmillSplit[];
+  };
+  model: {
+    n_laps: number;
+    n_runs: number;
+    window_days: number;
+    trained_through: string; // "YYYY-MM-DD"
+    cv_median_pct: number | null;
+    fitted_at: string;
+    indoor_temp_f: number;
+  };
+}
+
 export interface WeatherSnapshot {
   activity_id: number;
   lat: number;

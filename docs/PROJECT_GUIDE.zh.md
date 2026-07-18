@@ -181,6 +181,17 @@ Garmin JSON dump + 手动输入，归一化成 typed 结构。
 - **规矩：** 所有 shaping/聚合都在这里；dashboard/UI 只调函数 + 渲染。数据
   同时为 UI 和 AI 成形——数值 + 预格式化字段并列，单位自描述。
 
+**`treadmill_model.py`** — 跑步机 run 的"路面等效"配速/里程估算。室内
+手表(腕部加速度计,慢 ~1 min/mi)和传送带显示(越快虚越多)都不可信,
+唯一可信的是心率带 HR + 步频。模型在用户的**户外 GPS 圈**上拟合
+`stride ~ cad + HR + HR² + cad·HR + hinge(T−15°C) + warmup(12−t) + drift(t)`
+(逐圈已标注、Rest 圈剔除、滚动 150 天窗口以跟踪当前体能;数据薄则放宽
+到 300 天,不足 120 圈则拒绝 → HTTP 503)。拟合缓存在
+`data/derived/treadmill_model.json`,任何 `run_*_meta.json` 变动或跨天
+会懒惰重训。预测按 1% 坡 / 78°F 假设在 HR+步频曲线上积分;步频 <140
+只计时间不计距离。端点 `GET /api/runs/{id}/treadmill-estimate`;前端
+`TreadmillEstimateCard` 在 run 详情页渲染(跑步机/室内 run 顶替地图位)。
+
 ### 3.2 Authentication
 
 两个外部 auth 流程；**app 永远不碰密码**——用户自己登录，app 只存拿到的

@@ -27,6 +27,7 @@ from backend.seed_models import (
     refit_hrv_14d_baseline,
     refit_sleep_debt_14d,
 )
+from backend import treadmill_model
 
 # Registry of stat-derived models. Importable so a future nightly
 # cron (or debug CLI) can iterate without rebuilding — see PR #88
@@ -1291,6 +1292,28 @@ def update_laps(activity_id: int, body: LapsUpdate) -> dict[str, Any]:
         lap_categories=body.categories,
     )
     return {"ok": True, "activity_id": activity_id, "category_stats": stats}
+
+
+@app.get("/api/runs/{activity_id}/treadmill-estimate")
+def treadmill_estimate(activity_id: int) -> dict[str, Any]:
+    """Road-equivalent pace + distance for a treadmill run, computed from
+    the HR + cadence telemetry curves (the only trustworthy indoor
+    signals — watch pace and belt displays are both known-biased). The
+    underlying stride model self-calibrates from recent outdoor labeled
+    runs; see backend/treadmill_model.py."""
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, "Run not found")
+    try:
+        return treadmill_model.predict_run(processor, activity_id, summary)
+    except treadmill_model.NotTreadmill:
+        raise HTTPException(400, "Not a treadmill/indoor run")
+    except treadmill_model.NoTelemetry as exc:
+        raise HTTPException(404, f"Telemetry unavailable: {exc}")
+    except treadmill_model.ModelUnavailable as exc:
+        # 503: the estimate is temporarily impossible (not enough labeled
+        # outdoor runs in the window), not a client error.
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/api/health/today")

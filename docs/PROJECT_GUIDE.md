@@ -201,6 +201,21 @@ shapes.
   calls functions and renders. Data is shaped for BOTH UI and AI —
   numeric + pre-formatted fields side by side, self-describing units.
 
+**`treadmill_model.py`** — road-equivalent pace/distance for treadmill
+runs, where neither the watch (wrist accel, ~1 min/mi slow) nor the
+belt display (overstates with speed) can be trusted. Fits
+`stride ~ cad + HR + HR² + cad·HR + hinge(T−15°C) + warmup(12−t) + drift(t)`
+on the user's **outdoor GPS laps** (lap-labeled, Rest laps excluded,
+rolling 150-day window so it tracks current fitness; widens to 300d if
+thin, refuses below 120 laps → HTTP 503). Fit is cached at
+`data/derived/treadmill_model.json` and lazily refit whenever any
+`run_*_meta.json` changes or a day rolls over. Prediction integrates
+speed over the HR+cadence telemetry curves at 1% incline / 78 °F
+assumptions; cadence <140 spm counts as time-not-distance. Served by
+`GET /api/runs/{id}/treadmill-estimate`; rendered by
+`TreadmillEstimateCard` on the run detail page (replaces the map slot
+for treadmill/indoor runs).
+
 ### 3.2 Authentication
 
 Two external auth flows; **the app never handles passwords** — the user
