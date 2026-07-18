@@ -18,6 +18,9 @@ import { AskAiButton } from "@/components/activity/ask-ai-button";
 import { EditRunForm } from "@/components/activity/edit-run-form";
 import { LapTable } from "@/components/activity/lap-table";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
+import { TreadmillEstimateCard } from "@/components/activity/treadmill-estimate-card";
+
+const TREADMILL_TYPE_KEYS = new Set(["treadmill_running", "indoor_running"]);
 
 const RunMap = dynamic(
   () => import("@/components/activity/run-map").then((m) => m.RunMap),
@@ -188,7 +191,11 @@ export default function ActivityDetailPage({
       </div>
 
       <div className="mt-6 space-y-4">
-        <RunMap activityId={activityId} />
+        {TREADMILL_TYPE_KEYS.has(run.activityType?.typeKey ?? "") ? (
+          <TreadmillEstimateCard activityId={activityId} />
+        ) : (
+          <RunMap activityId={activityId} />
+        )}
         <TelemetryCharts activityId={activityId} />
         <LapTable activityId={activityId} />
       </div>
