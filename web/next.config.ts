@@ -39,6 +39,15 @@ const nextConfig: NextConfig = {
   // Hide the floating "N" route-info badge in dev — we view this on the
   // iPhone where the badge crowds the bottom-left corner.
   devIndicators: false,
+  experimental: {
+    // Dev rewrite proxy kills upstream requests after 30s by default.
+    // POST /api/sync/garmin blocks for ~1-2 min (garmin_sync subprocess +
+    // 120-day ledger rebuild), so the proxy returned 500 "socket hang up"
+    // to the phone while the backend finished fine and logged 200 — Setup
+    // showed "Last attempt succeeded" AND a red 500 at once. Give slow
+    // sync/AI endpoints 3 minutes.
+    proxyTimeout: 180_000,
+  },
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${API_TARGET}/api/:path*` },
