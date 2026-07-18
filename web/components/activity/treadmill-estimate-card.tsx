@@ -60,7 +60,7 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
         </h3>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-3 gap-3">
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Distance
@@ -72,7 +72,7 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
             </span>
           </div>
           <div className="text-xs text-muted-foreground">
-            {est.total_distance_km.toFixed(2)} km · use this in Garmin
+            use this in Garmin
           </div>
         </div>
         <div>
@@ -85,30 +85,43 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
               /mi
             </span>
           </div>
-          <div className="text-xs text-muted-foreground">
-            over {est.duration_str}
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            Time
+          </div>
+          <div className="font-heading text-2xl font-semibold">
+            {est.duration_str}
           </div>
         </div>
-        <div className="col-span-2 sm:col-span-1">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            Mile splits
-          </div>
-          <div className="mt-1 flex flex-wrap gap-1">
-            {est.splits.map((s) => (
-              <span
-                key={s.mile}
-                className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs"
-                title={
-                  s.partial_mi != null
-                    ? `last ${s.partial_mi} mi`
-                    : `mile ${s.mile}`
-                }
-              >
-                {s.partial_mi != null ? `+${s.partial_mi}` : s.mile}·
+      </div>
+
+      <div className="mt-3">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Mile splits
+        </div>
+        {/* Mile label and pace deliberately look NOTHING alike: tiny
+            muted upper-case label vs bold mono pace — "1·12:28" read as
+            one blurry number before. */}
+        <div className="mt-1 flex flex-wrap gap-1">
+          {est.splits.map((s) => (
+            <span
+              key={s.mile}
+              className="inline-flex items-baseline gap-1 rounded bg-muted/60 px-1.5 py-0.5"
+              title={
+                s.partial_mi != null
+                  ? `last ${s.partial_mi} mi`
+                  : `mile ${s.mile}`
+              }
+            >
+              <span className="text-[10px] font-medium uppercase text-muted-foreground">
+                {s.partial_mi != null ? `+${s.partial_mi}` : `mi ${s.mile}`}
+              </span>
+              <span className="font-mono text-xs font-semibold">
                 {s.pace_str}
               </span>
-            ))}
-          </div>
+            </span>
+          ))}
         </div>
       </div>
 
