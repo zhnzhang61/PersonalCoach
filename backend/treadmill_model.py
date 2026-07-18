@@ -67,8 +67,16 @@ class NotTreadmill(Exception):
 
 
 def is_treadmill(summary: dict) -> bool:
-    key = ((summary.get("activityType") or {}).get("typeKey") or "")
-    return key in TREADMILL_TYPE_KEYS
+    """Garmin marks indoor either in typeKey OR in subTypeKey (the repo's
+    own surface bucketing reads subTypeKey — see RunActivity.from_garmin).
+    Check both so a `{typeKey: running, subTypeKey: treadmill_running}`
+    shape neither loses its estimate card nor leaks watch-derived
+    distance into the outdoor training set."""
+    type_info = summary.get("activityType") or {}
+    return (
+        (type_info.get("typeKey") or "") in TREADMILL_TYPE_KEYS
+        or (type_info.get("subTypeKey") or "") in TREADMILL_TYPE_KEYS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +110,10 @@ def _collect_training_laps(processor, start: str, end: str) -> list[dict]:
     rows: list[dict] = []
     for summary in processor.get_activities_in_range(start, end):
         key = ((summary.get("activityType") or {}).get("typeKey") or "")
-        if key not in ("running", "track_running"):
+        # Outdoor GPS only — and never anything indoor-flagged, even when
+        # typeKey says "running" but subTypeKey says treadmill (that shape
+        # would train the fit on watch-guessed distance).
+        if key not in ("running", "track_running") or is_treadmill(summary):
             continue
         rid = summary.get("activityId")
         meta = _read_json(
@@ -318,7 +329,17 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
         raise NoTelemetry(f"telemetry too short for {activity_id}")
 
     hinge = max(INDOOR_TEMP_C - 15, 0)
-    t_min = seconds / 60
+
+    dt = np.diff(seconds, prepend=seconds[0])
+    # Ignore recording gaps (watch paused): they advance neither clock nor
+    # distance — Garmin's own timer excludes them too.
+    dt = np.where((dt <= 0) | (dt > 30), 0.0, dt)
+
+    # Warm-up/drift features run on ACTIVE time (accepted dt), matching
+    # both the timer semantics above and how the training laps' t was
+    # built (cumulative movingDuration). Raw wall-clock would keep
+    # "aging" the runner through a paused gap.
+    t_min = np.cumsum(dt) / 60
     stride = (
         b[0]
         + b[1] * cad
@@ -330,11 +351,6 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
         + b[7] * t_min
     )
     speed = np.where(cad >= MIN_RUN_CADENCE, cad * np.maximum(stride, 0.4) / 60, 0.0)
-
-    dt = np.diff(seconds, prepend=seconds[0])
-    # Ignore recording gaps (watch paused): they advance neither clock nor
-    # distance — Garmin's own timer excludes them too.
-    dt = np.where((dt <= 0) | (dt > 30), 0.0, dt)
     dist_m = np.cumsum(speed * dt)
     total_m = float(dist_m[-1])
     duration_s = float(dt.sum())

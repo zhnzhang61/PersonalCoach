@@ -185,6 +185,90 @@ class TestPredict:
                 proc, 1, {"activityType": {"typeKey": "running"}}
             )
 
+    def test_subtypekey_treadmill_recognized(self, proc):
+        """codex P1: Garmin may flag indoor via subTypeKey with a plain
+        `running` typeKey. Such a run must get an estimate…"""
+        summary = {
+            "activityId": 1,
+            "activityType": {
+                "typeKey": "running",
+                "subTypeKey": "treadmill_running",
+            },
+        }
+        with patch.object(
+            DataProcessor,
+            "get_activity_telemetry",
+            return_value=(_constant_telemetry(), None),
+        ):
+            out = tm.predict_run(proc, 1, summary)
+        assert out["estimate"]["total_distance_mi"] > 0
+
+    def test_subtypekey_treadmill_excluded_from_training(self, proc):
+        """…and must NEVER train the outdoor fit (watch-guessed distance).
+        Poison one such run with absurd strides: n_laps must not move."""
+        baseline = tm.fit_model(proc)["n_laps"]
+        rid = 9_999_999
+        today = datetime.date.today()
+        laps = [
+            {
+                "lapIndex": 1,
+                "duration": 600.0,
+                "movingDuration": 600.0,
+                "distance": 170 * 3.0 / 60 * 600,  # stride 3.0 m — poison
+                "averageRunCadence": 170.0,
+                "averageHR": 150.0,
+                "averageSpeed": 170 * 3.0 / 60,
+                "avgGradeAdjustedSpeed": 170 * 3.0 / 60,
+            }
+        ] * 4
+        _write(os.path.join(proc.paths["splits"], f"{rid}.json"), {"lapDTOs": laps})
+        _write(
+            os.path.join(proc.paths["manual"], f"run_{rid}_meta.json"),
+            {"lap_categories": ["Steady Effort"] * 4},
+        )
+        _write(
+            os.path.join(proc.paths["weather"], f"{rid}.json"),
+            {"temperature_c": 10},
+        )
+        acts_path = os.path.join(proc.paths["activities"], "acts.json")
+        acts = json.load(open(acts_path))
+        acts.append(
+            {
+                "activityId": rid,
+                "activityType": {
+                    "typeKey": "running",
+                    "subTypeKey": "treadmill_running",
+                },
+                "startTimeLocal": f"{(today - datetime.timedelta(days=3)).isoformat()} 07:00:00",
+            }
+        )
+        _write(acts_path, acts)
+        assert tm.fit_model(proc)["n_laps"] == baseline
+
+    def test_pause_gap_does_not_age_the_runner(self, proc):
+        """codex P2: a >30s recording gap must not advance the
+        warm-up/drift clock. Same running signal with and without a
+        15-min mid-run gap → same distance and duration."""
+        first = _constant_telemetry(170.0, 155.0, 1800)
+        second = _constant_telemetry(170.0, 155.0, 1800)
+        second["Second"] = second["Second"] + 1800
+        contiguous = pd.concat([first, second], ignore_index=True)
+        gapped = contiguous.copy()
+        gapped.loc[gapped["Second"] > 1800, "Second"] += 900  # 15-min hole
+        outs = []
+        for frame in (contiguous, gapped):
+            with patch.object(
+                DataProcessor,
+                "get_activity_telemetry",
+                return_value=(frame, None),
+            ):
+                outs.append(tm.predict_run(proc, 1, TREADMILL_SUMMARY))
+        a, g = (o["estimate"] for o in outs)
+        assert g["duration_s"] == pytest.approx(a["duration_s"], abs=6)
+        assert g["total_distance_mi"] == pytest.approx(
+            a["total_distance_mi"], rel=0.005
+        )
+
     def test_no_telemetry_raises(self, proc):
         with patch.object(
             DataProcessor, "get_activity_telemetry", return_value=(None, None)
