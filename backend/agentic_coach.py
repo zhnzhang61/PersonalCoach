@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from datetime import date, timedelta
@@ -823,8 +824,16 @@ class AgenticCoach:
                 await self._require_api_reachable(api_base)
             self._mcp_client = MultiServerMCPClient({
                 "personal-coach": {
-                    "command": "uv",
-                    "args": ["run", "python", "-m", "backend.personal_coach_mcp"],
+                    # Spawn the MCP server with THIS process's interpreter, not
+                    # `uv run`. api_server already runs inside the project venv
+                    # (.venv/bin/python), so sys.executable has every dep — and
+                    # this drops the hard dependency on `uv` being on PATH. Under
+                    # the launchd LaunchAgent the PATH is minimal and ~/.local/bin
+                    # (where uv lives) isn't on it, so `uv run …` raised
+                    # [Errno 2] No such file or directory: 'uv' and every AI
+                    # review died at MCP init. Matches garmin_sync.py's pattern.
+                    "command": sys.executable,
+                    "args": ["-m", "backend.personal_coach_mcp"],
                     "transport": "stdio",
                     "env": {
                         **os.environ,
