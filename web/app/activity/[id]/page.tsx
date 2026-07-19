@@ -29,10 +29,6 @@ const RunMap = dynamic(
   },
 );
 
-function metersToMi(m?: number): number {
-  return (m ?? 0) / 1609.34;
-}
-
 export default function ActivityDetailPage({
   params,
 }: {
@@ -94,8 +90,6 @@ export default function ActivityDetailPage({
   const meta = run.manual_meta ?? {};
   const name = meta.name || run.activityName || "Run";
   const dateStr = run.startTimeLocal?.slice(0, 10);
-  const distMi = metersToMi(run.distance);
-  const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
   const w = weatherQuery.data;
   const showFeels =
     w?.apparent_temperature_f != null &&
@@ -149,12 +143,8 @@ export default function ActivityDetailPage({
         <p className="text-sm text-muted-foreground">
           {[datePart, ...weatherSegments].join(" · ")}
         </p>
-        <p className="text-sm text-muted-foreground">
-          {distMi.toFixed(2)} mi
-          {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
-        </p>
-        {/* Per-effort chips moved into RunSummaryBlock (between the
-            headline stats and the lap bars) — header stays lean. */}
+        {/* Distance/elevation and the per-effort chips all live inside
+            RunSummaryBlock now — header carries only name/date/weather. */}
       </div>
 
       {editing && (

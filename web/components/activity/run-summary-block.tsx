@@ -141,6 +141,10 @@ export function RunSummaryBlock({
   }
 
   const avgPaceS = distanceMi > 0.01 ? durationS / distanceMi : null;
+  // Elevation joins the stat row (moved out of the page header). The
+  // watch reports none/zero indoors, so the stat self-hides on
+  // treadmill runs.
+  const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
 
   // Bar width ∝ speed, min-max amplified into 40–100% across the
   // non-Rest rows (raw ratios make near-equal laps indistinguishable).
@@ -215,6 +219,19 @@ export function RunSummaryBlock({
             {fmtDuration(durationS)}
           </div>
         </div>
+        {elevFt > 0 && (
+          <div>
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+              Elev
+            </div>
+            <div className="font-heading text-2xl font-semibold">
+              ↑{elevFt.toLocaleString()}
+              <span className="ml-1 text-sm font-normal text-muted-foreground">
+                ft
+              </span>
+            </div>
+          </div>
+        )}
       </div>
       {treadmill && (
         <div className="mt-1 text-xs text-muted-foreground">
