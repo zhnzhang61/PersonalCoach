@@ -60,7 +60,11 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
         </h3>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+      {/* flex-wrap, not a 3-col grid: on ≥375px phones all three stats
+          share one row (the requested layout); on 320px screens the time
+          stat wraps below instead of overflowing its column (codex P2 —
+          "1:59:51" at text-2xl is wider than a third of a 320px card). */}
+      <div className="flex flex-wrap items-end gap-x-5 gap-y-2">
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Distance
@@ -70,9 +74,6 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
             <span className="ml-1 text-sm font-normal text-muted-foreground">
               mi
             </span>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            {est.total_distance_km.toFixed(2)} km · use this in Garmin
           </div>
         </div>
         <div>
@@ -85,30 +86,63 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
               /mi
             </span>
           </div>
-          <div className="text-xs text-muted-foreground">
-            over {est.duration_str}
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            Time
+          </div>
+          <div className="font-heading text-2xl font-semibold">
+            {est.duration_str}
           </div>
         </div>
-        <div className="col-span-2 sm:col-span-1">
-          <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            Mile splits
-          </div>
-          <div className="mt-1 flex flex-wrap gap-1">
-            {est.splits.map((s) => (
-              <span
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        distance is the number to enter in Garmin
+      </div>
+
+      <div className="mt-3">
+        <div className="grid grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2 text-xs uppercase tracking-wide text-muted-foreground">
+          <span>Mi</span>
+          <span>Pace</span>
+          <span />
+          <span className="text-right">HR</span>
+        </div>
+        {/* Strava-style split rows: bar length ∝ speed, faster = longer.
+            Widths are min-max normalized into 40–100% — raw speed ratios
+            make near-equal splits indistinguishable. */}
+        <div className="mt-1 space-y-1">
+          {(() => {
+            const paces = est.splits.map((s) => s.pace_s);
+            const fast = Math.min(...paces);
+            const slow = Math.max(...paces);
+            const width = (p: number) =>
+              slow === fast ? 100 : 40 + (60 * (slow - p)) / (slow - fast);
+            return est.splits.map((s) => (
+              <div
                 key={s.mile}
-                className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs"
+                className="grid grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2"
                 title={
                   s.partial_mi != null
                     ? `last ${s.partial_mi} mi`
                     : `mile ${s.mile}`
                 }
               >
-                {s.partial_mi != null ? `+${s.partial_mi}` : s.mile}·
-                {s.pace_str}
-              </span>
-            ))}
-          </div>
+                <span className="text-xs text-muted-foreground">
+                  {s.partial_mi != null ? `+${s.partial_mi}` : s.mile}
+                </span>
+                <span className="font-mono text-xs font-semibold">
+                  {s.pace_str}
+                </span>
+                <div
+                  className="h-3 rounded-full bg-warm-accent/70"
+                  style={{ width: `${width(s.pace_s)}%` }}
+                />
+                <span className="text-right font-mono text-xs text-muted-foreground">
+                  {s.avg_hr ?? "—"}
+                </span>
+              </div>
+            ));
+          })()}
         </div>
       </div>
 

@@ -358,10 +358,19 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
         raise NoTelemetry(f"not enough running signal in {activity_id}")
 
     # Mile splits: time at each whole-mile crossing (linear interp inside
-    # the bucket where the crossing happens).
+    # the bucket where the crossing happens), plus the split's
+    # duration-weighted avg HR — the Strava-style split rows show it.
+    elapsed = np.cumsum(dt)
+
+    def _window_hr(t_from: float, t_to: float) -> int | None:
+        m = (elapsed > t_from) & (elapsed <= t_to) & (dt > 0)
+        w = dt[m]
+        if w.sum() <= 0:
+            return None
+        return int(round(float(np.average(hr[m], weights=w))))
+
     splits = []
     prev_cross = 0.0
-    elapsed = np.cumsum(dt)
     for mile in range(1, int(total_m / MILE_M) + 1):
         target = mile * MILE_M
         idx = int(np.searchsorted(dist_m, target))
@@ -371,7 +380,12 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
         cross = t0 + frac * (elapsed[idx] - t0)
         pace_s = cross - prev_cross
         splits.append(
-            {"mile": mile, "pace_s": round(pace_s), "pace_str": _fmt_pace(pace_s)}
+            {
+                "mile": mile,
+                "pace_s": round(pace_s),
+                "pace_str": _fmt_pace(pace_s),
+                "avg_hr": _window_hr(prev_cross, cross),
+            }
         )
         prev_cross = cross
     partial_mi = total_m / MILE_M - len(splits)
@@ -383,6 +397,7 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
                 "partial_mi": round(partial_mi, 2),
                 "pace_s": round(pace_s),
                 "pace_str": _fmt_pace(pace_s),
+                "avg_hr": _window_hr(prev_cross, duration_s),
             }
         )
 
