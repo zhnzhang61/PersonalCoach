@@ -32,6 +32,7 @@ Out of scope (no current need):
 from __future__ import annotations
 
 import json
+import os
 
 import pandas as pd
 import pytest
@@ -1281,3 +1282,86 @@ class TestSuggestLapCategories:
             "Rest",
             "Rest",
         ]
+
+
+# ===========================================================================
+# compute_resp_hr_relation (PR #114)
+# ===========================================================================
+
+def _resp_hr_df(
+    *,
+    hr_lo: float = 120,
+    hr_hi: float = 175,
+    breakpoint: float | None = 158.0,
+    slope_low: float = 0.02,
+    slope_extra: float = 0.04,
+    n: int = 360,
+    step: int = 10,
+):
+    """Synthetic telemetry: HR ramps linearly over time; resp follows a
+    hinge law (or pure linear when breakpoint is None). Deterministic —
+    no noise — so fit recovery is exact up to grid resolution."""
+    rows = []
+    for i in range(n):
+        frac = i / (n - 1)
+        hr = hr_lo + (hr_hi - hr_lo) * frac
+        resp = 20 + slope_low * (hr - hr_lo)
+        if breakpoint is not None and hr > breakpoint:
+            resp += slope_extra * (hr - breakpoint)
+        rows.append({
+            "Second": i * step,
+            "HeartRate": hr,
+            "RespirationRate": resp,
+        })
+    return pd.DataFrame(rows)
+
+
+class TestComputeRespHrRelation:
+    def _wire(self, proc, df, laps=None, categories=None):
+        proc.get_run_laps = lambda aid: laps or []
+        proc.get_activity_telemetry = lambda aid, laps=None, downsample_sec=10: (df, None)
+        if categories is not None:
+            _write_json(
+                os.path.join(proc.paths["manual"], "run_9_meta.json"),
+                {"lap_categories": categories},
+            )
+
+    def test_recovers_hinge_breakpoint(self, proc):
+        self._wire(proc, _resp_hr_df())
+        out = proc.compute_resp_hr_relation(9)
+        fit = out["fit"]
+        assert fit is not None
+        assert abs(fit["breakpoint_hr"] - 158) <= 2
+        assert abs(fit["slope_low_per_10bpm"] - 0.2) <= 0.1
+        assert abs(fit["slope_high_per_10bpm"] - 0.6) <= 0.15
+        assert "拐点" in fit["summary"]
+
+    def test_linear_run_reports_no_breakpoint(self, proc):
+        self._wire(proc, _resp_hr_df(breakpoint=None))
+        out = proc.compute_resp_hr_relation(9)
+        assert out["fit"] is None
+        assert "接近线性" in out["no_fit_reason"]
+
+    def test_narrow_hr_range_reports_no_breakpoint(self, proc):
+        self._wire(proc, _resp_hr_df(hr_lo=140, hr_hi=155, breakpoint=150.0))
+        out = proc.compute_resp_hr_relation(9)
+        assert out["fit"] is None
+        assert "跨度不足" in out["no_fit_reason"]
+
+    def test_no_respiration_returns_none(self, proc):
+        df = _resp_hr_df()
+        df["RespirationRate"] = None
+        self._wire(proc, df)
+        assert proc.compute_resp_hr_relation(9) is None
+
+    def test_points_carry_effort_labels(self, proc):
+        laps = [{"duration": 1800}, {"duration": 1790}]
+        self._wire(
+            proc, _resp_hr_df(),
+            laps=laps, categories=["Hold Back Easy", "Steady Effort"],
+        )
+        out = proc.compute_resp_hr_relation(9)
+        cats = {p["category"] for p in out["points"]}
+        assert cats == {"Hold Back Easy", "Steady Effort"}
+        early = [p for p in out["points"] if p["hr"] < 125]
+        assert all(p["category"] == "Hold Back Easy" for p in early)

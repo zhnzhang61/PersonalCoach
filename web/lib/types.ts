@@ -359,6 +359,30 @@ export interface VerdictsResponse {
   not_fired: VerdictNotFired[];
 }
 
+// Resp-vs-HR relationship (PR #114): paired smoothed samples colored
+// by effort label + a hinge fit whose knee ≈ ventilatory threshold.
+export interface RespHrPoint {
+  hr: number;
+  resp: number;
+  category: string | null;
+}
+
+export interface RespHrFit {
+  breakpoint_hr: number;
+  slope_low_per_10bpm: number;
+  slope_high_per_10bpm: number;
+  intercept: number;
+  summary: string; // server-formatted caption
+}
+
+export interface RespHrResponse {
+  activity_id: number;
+  points: RespHrPoint[];
+  hr_range: [number, number];
+  fit: RespHrFit | null;
+  no_fit_reason: string | null;
+}
+
 export type LatLng = [number, number]; // [lat, lon]
 
 export interface RouteResponse {

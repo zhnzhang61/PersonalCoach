@@ -23,6 +23,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { effortColor, REST_COLOR } from "@/lib/effort-colors";
+import { RespHrScatter } from "@/components/activity/resp-hr-scatter";
 import type {
   MetricSummary,
   TelemetryResponse,
@@ -595,6 +596,9 @@ export function TelemetryCharts({
   // (treadmill, indoor) won't have distance, so we fall back to time below
   // even if the user previously picked distance.
   const [xMode, setXMode] = useState<XMode>("time");
+  // Resp offers a second lens: the curve over time, or the Resp×HR
+  // relationship scatter (knee ≈ ventilatory threshold).
+  const [respRelation, setRespRelation] = useState(false);
 
   const onTabClick = (key: TelemetrySummaryKey) => {
     setActive((prev) => {
@@ -731,7 +735,31 @@ export function TelemetryCharts({
         ) : (
           <span />
         )}
-        {distanceAvailable && (
+        {renderSpecs.some((s) => s.key === "RespirationRate") && (
+          <div
+            role="group"
+            aria-label="Resp view"
+            className="flex shrink-0 rounded-md border border-border bg-background p-0.5 text-[11px] font-medium"
+          >
+            {([false, true] as const).map((rel) => (
+              <button
+                key={String(rel)}
+                type="button"
+                onClick={() => setRespRelation(rel)}
+                className={
+                  "rounded px-2 py-0.5 transition-colors " +
+                  (respRelation === rel
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:text-foreground")
+                }
+                aria-pressed={respRelation === rel}
+              >
+                {rel ? "关系" : "曲线"}
+              </button>
+            ))}
+          </div>
+        )}
+        {distanceAvailable && !respRelation && (
           <div
             role="group"
             aria-label="X-axis"
@@ -759,12 +787,16 @@ export function TelemetryCharts({
           </div>
         )}
       </div>
-      <ChartPane
-        rows={rows}
-        specs={renderSpecs}
-        xMode={effectiveXMode}
-        decorations={decorations}
-      />
+      {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
+        <RespHrScatter activityId={activityId} />
+      ) : (
+        <ChartPane
+          rows={rows}
+          specs={renderSpecs}
+          xMode={effectiveXMode}
+          decorations={decorations}
+        />
+      )}
     </div>
   );
 }

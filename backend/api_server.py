@@ -1326,6 +1326,19 @@ def run_verdicts(activity_id: int) -> dict[str, Any]:
     )
 
 
+@app.get("/api/runs/{activity_id}/resp-hr")
+def resp_hr_relation(activity_id: int) -> dict[str, Any]:
+    """Resp-vs-HR relationship scatter + hinge fit (PR #114). The
+    knee, when it exists, is the run's apparent ventilatory threshold."""
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, "Run not found")
+    relation = processor.compute_resp_hr_relation(activity_id)
+    if relation is None:
+        raise HTTPException(404, "No respiration telemetry for this run")
+    return relation
+
+
 @app.get("/api/runs/{activity_id}/treadmill-estimate")
 def treadmill_estimate(activity_id: int) -> dict[str, Any]:
     """Road-equivalent pace + distance for a treadmill run, computed from
