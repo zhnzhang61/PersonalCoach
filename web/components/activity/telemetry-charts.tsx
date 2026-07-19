@@ -325,7 +325,33 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   }
 
   const yTickFormatter = (s: MetricSpec) => (v: number) =>
-    `${Math.round(v)}${s.key === "GroundContactBalanceLeft" ? "%" : ""}`;
+    s.key === "GroundContactBalanceLeft"
+      ? `${Number.isInteger(v) ? v : v.toFixed(1)}%`
+      : `${Math.round(v)}`;
+
+  // L/R renders centered on 50% with a symmetric domain sized to the
+  // run's p99 deviation — the 49–51 comfort band and the distance the
+  // line escapes it are the story, not the absolute value. (The user
+  // has a chronic imbalance and reads this chart specifically.) p99
+  // rather than max so a single-sample sensor glitch can't zoom the
+  // axis out and flatten the band; the glitch itself gets clipped via
+  // allowDataOverflow on the axis.
+  const lrDevs = rows
+    .map((r) => r.GroundContactBalanceLeft)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .map((v) => Math.abs(v - 50))
+    .sort((a, b) => a - b);
+  const lrP99 = lrDevs.length
+    ? lrDevs[Math.floor(0.99 * (lrDevs.length - 1))]
+    : 0;
+  const lrSpan = Math.max(1.5, lrP99 + 0.3);
+  const lrDomain: [number, number] = [50 - lrSpan, 50 + lrSpan];
+  const domainFor = (
+    s: MetricSpec,
+  ): [number | string, number | string] =>
+    s.key === "GroundContactBalanceLeft"
+      ? lrDomain
+      : (s.yDomain ?? ["auto", "auto"]);
 
   // Single-spec mode keeps the elevation area shading. Dual-spec collapses
   // to a flat dual-axis line chart — overlaying area fills with another
@@ -386,7 +412,8 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   }
 
   const renderAxis = (s: MetricSpec, side: "left" | "right") => {
-    const domain: [number | string, number | string] = s.yDomain ?? ["auto", "auto"];
+    const domain = domainFor(s);
+    const isLR = s.key === "GroundContactBalanceLeft";
     return (
       <YAxis
         key={side}
@@ -397,7 +424,10 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
         tickMargin={6}
         fontSize={10}
         domain={domain}
-        allowDataOverflow={!!s.yDomain}
+        // Band edges + center only — auto ticks on a fractional
+        // domain produce noise like "46.1%".
+        ticks={isLR ? [49, 50, 51] : undefined}
+        allowDataOverflow={!!s.yDomain || isLR}
         reversed={!!s.invertY}
         tickFormatter={yTickFormatter(s)}
         // Tick text in the metric's color so users can read which axis is which.
@@ -447,24 +477,44 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
             />
           }
         />
-        {primary.key === "GroundContactBalanceLeft" && (
+        {primary.key === "GroundContactBalanceLeft" && [
+          <ReferenceArea
+            key="lr-band"
+            yAxisId="left"
+            y1={49}
+            y2={51}
+            fill="var(--muted-foreground)"
+            fillOpacity={0.08}
+            stroke="none"
+          />,
           <ReferenceLine
+            key="lr-50"
             yAxisId="left"
             y={50}
             stroke="var(--muted-foreground)"
             strokeDasharray="3 3"
             strokeOpacity={0.5}
-          />
-        )}
-        {secondary?.key === "GroundContactBalanceLeft" && (
+          />,
+        ]}
+        {secondary?.key === "GroundContactBalanceLeft" && [
+          <ReferenceArea
+            key="lr-band-r"
+            yAxisId="right"
+            y1={49}
+            y2={51}
+            fill="var(--muted-foreground)"
+            fillOpacity={0.08}
+            stroke="none"
+          />,
           <ReferenceLine
+            key="lr-50-r"
             yAxisId="right"
             y={50}
             stroke="var(--muted-foreground)"
             strokeDasharray="3 3"
             strokeOpacity={0.5}
-          />
-        )}
+          />,
+        ]}
         <Line
           yAxisId="left"
           type="monotone"
@@ -505,6 +555,7 @@ export function TelemetryCharts({
   categories,
   receipts,
   highlight,
+  lrThirdsDetail,
 }: {
   activityId: number;
   // Garmin lap durations + the user's effort labels — drives the
@@ -515,6 +566,10 @@ export function TelemetryCharts({
   // is the one the user tapped in the verdict rows.
   receipts?: VerdictAnchor[];
   highlight?: VerdictAnchor | null;
+  // Preformatted thirds line from the lr_asymmetry verdict (e.g.
+  // "+1.2% 右 → +0.1% 右 → +0.4% 左") — shown as the L/R subtitle.
+  // Server-formatted per the no-shaping-in-dashboard rule.
+  lrThirdsDetail?: string | null;
 }) {
   // Charts use 5s downsample server-side + every-2nd client-side → about 1
   // point per 10s. Plenty of detail, keeps recharts snappy on phone.
@@ -624,6 +679,14 @@ export function TelemetryCharts({
       : null;
 
   const subtitleParts = renderSpecs.map((s) => {
+    // L/R gets the verdict's thirds line (fatigue trajectory) instead
+    // of a flat average — the average hides exactly what the user
+    // watches this metric for.
+    if (s.key === "GroundContactBalanceLeft" && lrThirdsDetail) {
+      return renderSpecs.length === 1
+        ? `前⅓→后⅓: ${lrThirdsDetail}`
+        : `${s.label}: ${lrThirdsDetail}`;
+    }
     const sum = data.summary[s.key];
     if (!sum) return null;
     return renderSpecs.length === 1

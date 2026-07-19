@@ -218,6 +218,10 @@ function TelemetrySection({
   const receipts = (verdictsQuery.data?.verdicts ?? [])
     .filter((v) => v.status === "attention" && v.anchor != null)
     .map((v) => v.anchor as VerdictAnchor);
+  const lrVerdict = verdictsQuery.data?.verdicts.find(
+    (v) => v.key === "lr_asymmetry",
+  );
+  const lrThirdsDetail = (lrVerdict?.data.detail as string | undefined) ?? null;
 
   const onAnchorClick = (v: RunVerdict) => {
     setHighlight(v.anchor);
@@ -249,6 +253,7 @@ function TelemetrySection({
               categories={categories}
               receipts={receipts}
               highlight={highlight}
+              lrThirdsDetail={lrThirdsDetail}
             />
           </div>
         )}
