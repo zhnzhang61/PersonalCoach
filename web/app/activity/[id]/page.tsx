@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
@@ -11,11 +11,17 @@ import { fmtDate } from "@/lib/format";
 import type {
   RunActivity,
   RunDetailResponse,
+  RunVerdict,
+  VerdictAnchor,
   WeatherSnapshot,
 } from "@/lib/types";
 import { AskAiButton } from "@/components/activity/ask-ai-button";
 import { EditRunForm } from "@/components/activity/edit-run-form";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
+import {
+  RunVerdicts,
+  useRunVerdicts,
+} from "@/components/activity/run-verdicts";
 import {
   RunSummaryBlock,
   isTreadmillRun,
@@ -171,36 +177,82 @@ export default function ActivityDetailPage({
         {/* Block 1: map for outdoor runs; treadmill runs have no GPS, so
             no block at all. Block 2 (RunSummaryBlock) is the one shared
             module: headline stats + effort chips + per-lap effort bars —
-            GPS-fed outdoors, model-fed on the treadmill. The telemetry
-            line charts stay complete but fold away by default. */}
+            GPS-fed outdoors, model-fed on the treadmill. Block 3: the
+            verdict rows (always visible — they're the headline
+            judgments) with the telemetry charts folded beneath as
+            their receipts. */}
         {!isTreadmillRun(run) && <RunMap activityId={activityId} />}
         <RunSummaryBlock run={run} activityId={activityId} />
-        <TelemetryDrawer activityId={activityId} />
+        <TelemetrySection run={run} activityId={activityId} />
       </div>
     </div>
   );
 }
 
-// Full telemetry line charts, folded by default — detailed but rarely
-// visited; the fold keeps the page focused on the summary block.
-function TelemetryDrawer({ activityId }: { activityId: number }) {
+// Verdict rows + the telemetry drawer. Tapping an anchored verdict
+// opens the drawer and highlights that window on the chart — the
+// sentence up top, its receipt below.
+function TelemetrySection({
+  run,
+  activityId,
+}: {
+  run: RunActivity;
+  activityId: number;
+}) {
   const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState<VerdictAnchor | null>(null);
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const verdictsQuery = useRunVerdicts(activityId);
+
+  // Same key as the page's detail query — React Query dedupes, so this
+  // is a cache read, not a second fetch. Lap durations are wall-clock
+  // and honest on both run types (only lap *distances* are wrist
+  // guesses indoors).
+  const detail = useQuery({
+    queryKey: ["runs", activityId, "detail"],
+    queryFn: () => apiGet<RunDetailResponse>(`/api/runs/${activityId}`),
+    enabled: Number.isFinite(activityId),
+  });
+  const laps = (detail.data?.laps ?? []) as { duration: number }[];
+  const categories = run.manual_meta?.lap_categories ?? [];
+  const receipts = (verdictsQuery.data?.verdicts ?? [])
+    .filter((v) => v.status === "attention" && v.anchor != null)
+    .map((v) => v.anchor as VerdictAnchor);
+
+  const onAnchorClick = (v: RunVerdict) => {
+    setHighlight(v.anchor);
+    setOpen(true);
+    // Defer the scroll until the drawer content has rendered.
+    requestAnimationFrame(() => {
+      drawerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
   return (
-    <div className="rounded-md border border-border">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-4 py-3 text-sm text-muted-foreground hover:text-foreground"
-        aria-expanded={open}
-      >
-        <span>Detailed telemetry</span>
-        <span aria-hidden>{open ? "\u25be" : "\u25b8"}</span>
-      </button>
-      {open && (
-        <div className="border-t border-border p-3">
-          <TelemetryCharts activityId={activityId} />
-        </div>
-      )}
-    </div>
+    <>
+      <RunVerdicts activityId={activityId} onAnchorClick={onAnchorClick} />
+      <div className="rounded-md border border-border" ref={drawerRef}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between px-4 py-3 text-sm text-muted-foreground hover:text-foreground"
+          aria-expanded={open}
+        >
+          <span>Detailed telemetry</span>
+          <span aria-hidden>{open ? "\u25be" : "\u25b8"}</span>
+        </button>
+        {open && (
+          <div className="border-t border-border p-3">
+            <TelemetryCharts
+              activityId={activityId}
+              laps={laps}
+              categories={categories}
+              receipts={receipts}
+              highlight={highlight}
+            />
+          </div>
+        )}
+      </div>
+    </>
   );
 }

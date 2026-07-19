@@ -327,6 +327,38 @@ export interface TelemetryResponse {
   pace_clip: [number, number]; // min/mi bounds applied when computing pace stats
 }
 
+// Post-run verdict pool (PR #114). Server fires only the verdicts the
+// run qualifies for, sorted attention-first; not_fired carries the
+// reason so "checked, fine" and "couldn't check" stay distinguishable.
+export interface VerdictAnchor {
+  start_sec: number;
+  end_sec: number;
+}
+
+export interface RunVerdict {
+  key: string;
+  title: string;
+  status: "ok" | "attention";
+  summary: string;
+  anchor: VerdictAnchor | null;
+  // Verdict-specific numeric detail — shapes documented in
+  // backend/run_verdicts.py; the rows only render summary/status, the
+  // chart only reads anchors, so the client stays schema-loose here.
+  data: Record<string, unknown>;
+}
+
+export interface VerdictNotFired {
+  key: string;
+  title: string;
+  reason: string;
+}
+
+export interface VerdictsResponse {
+  activity_id: number;
+  verdicts: RunVerdict[];
+  not_fired: VerdictNotFired[];
+}
+
 export type LatLng = [number, number]; // [lat, lon]
 
 export interface RouteResponse {

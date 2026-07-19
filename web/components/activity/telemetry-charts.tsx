@@ -7,8 +7,9 @@ import {
   AreaChart,
   Brush,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
+  ReferenceArea,
   ReferenceLine,
   XAxis,
   YAxis,
@@ -21,11 +22,13 @@ import {
 } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
+import { effortColor, REST_COLOR } from "@/lib/effort-colors";
 import type {
   MetricSummary,
   TelemetryResponse,
   TelemetryRow,
   TelemetrySummaryKey,
+  VerdictAnchor,
 } from "@/lib/types";
 
 interface MetricSpec {
@@ -104,6 +107,143 @@ function downsampleEvery(rows: TelemetryRow[], step: number): TelemetryRow[] {
 
 type XMode = "time" | "distance";
 
+// ---- Chart decorations (PR #114) -----------------------------------------
+// Effort-label washes + lap ticks + verdict receipt bands, all in the
+// run's own time coordinates. Lap boundaries live on the cumulative
+// lap-duration clock — the same clock the backend cuts verdict anchors
+// on, so receipts land exactly where the verdict measured.
+
+interface LapDuration {
+  duration: number;
+}
+
+interface EffortBlock {
+  label: string | null;
+  start_sec: number;
+  end_sec: number;
+}
+
+function effortBlocks(
+  laps: LapDuration[],
+  categories: string[],
+): EffortBlock[] {
+  const blocks: EffortBlock[] = [];
+  let cursor = 0;
+  laps.forEach((lap, i) => {
+    const label = categories[i] ?? null;
+    const end = cursor + (lap.duration ?? 0);
+    const last = blocks[blocks.length - 1];
+    if (last && last.label === label) {
+      last.end_sec = end;
+    } else {
+      blocks.push({ label, start_sec: cursor, end_sec: end });
+    }
+    cursor = end;
+  });
+  return blocks;
+}
+
+// In distance mode the x-axis is cumulative miles, but blocks/anchors
+// are in seconds — interpolate through the telemetry rows.
+function makeSecToX(
+  xMode: XMode,
+  rows: TelemetryRow[],
+): (sec: number) => number | null {
+  if (xMode === "time") return (sec) => sec;
+  const pts = rows
+    .filter(
+      (r) => typeof r.Distance === "number" && Number.isFinite(r.Distance),
+    )
+    .map((r) => [r.Second, r.Distance as number] as const);
+  if (pts.length === 0) return () => null;
+  return (sec) => {
+    if (sec <= pts[0][0]) return pts[0][1];
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i][0] >= sec) {
+        const [s0, d0] = pts[i - 1];
+        const [s1, d1] = pts[i];
+        return s1 === s0 ? d0 : d0 + ((d1 - d0) * (sec - s0)) / (s1 - s0);
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+}
+
+const RECEIPT_COLOR = "#EF9F27";
+
+interface Decorations {
+  blocks: EffortBlock[];
+  lapBoundaries: number[];
+  receipts: VerdictAnchor[];
+  highlight: VerdictAnchor | null;
+}
+
+// Returns recharts elements — must be spread directly into a chart's
+// children (recharts dispatches on child type, so a wrapper component
+// would be invisible to it).
+function renderDecorations(
+  dec: Decorations | null,
+  secToX: (sec: number) => number | null,
+  yAxisId?: string,
+) {
+  if (!dec) return [];
+  const axisProps = yAxisId ? { yAxisId } : {};
+  const out = [];
+  for (const b of dec.blocks) {
+    if (!b.label) continue;
+    const x1 = secToX(b.start_sec);
+    const x2 = secToX(b.end_sec);
+    if (x1 == null || x2 == null) continue;
+    out.push(
+      <ReferenceArea
+        key={`wash-${b.start_sec}`}
+        {...axisProps}
+        x1={x1}
+        x2={x2}
+        fill={b.label === "Rest" ? REST_COLOR : effortColor(b.label)}
+        fillOpacity={0.14}
+        stroke="none"
+      />,
+    );
+  }
+  for (const sec of dec.lapBoundaries) {
+    const x = secToX(sec);
+    if (x == null) continue;
+    out.push(
+      <ReferenceLine
+        key={`lap-${sec}`}
+        {...axisProps}
+        x={x}
+        stroke="var(--muted-foreground)"
+        strokeOpacity={0.25}
+        strokeDasharray="2 6"
+      />,
+    );
+  }
+  for (const r of dec.receipts) {
+    const x1 = secToX(r.start_sec);
+    const x2 = secToX(r.end_sec);
+    if (x1 == null || x2 == null) continue;
+    const active =
+      dec.highlight != null &&
+      dec.highlight.start_sec === r.start_sec &&
+      dec.highlight.end_sec === r.end_sec;
+    out.push(
+      <ReferenceArea
+        key={`receipt-${r.start_sec}`}
+        {...axisProps}
+        x1={x1}
+        x2={x2}
+        fill={RECEIPT_COLOR}
+        fillOpacity={active ? 0.32 : 0.16}
+        stroke={active ? RECEIPT_COLOR : "none"}
+        strokeOpacity={0.8}
+      />,
+    );
+  }
+  return out;
+}
+
 // Stable, locale-free time format. Always colon-delimited so labels can't
 // be confused with distance ("75m" used to read as 75 metres).
 //   < 1h:  MM:SS   (e.g. "25:00", "99:10")
@@ -142,13 +282,32 @@ interface ChartPaneProps {
   specs: MetricSpec[];
   // x-axis mode: "time" plots seconds, "distance" plots cumulative miles.
   xMode: XMode;
+  // Effort washes / lap ticks / verdict receipts (PR #114).
+  decorations?: Decorations | null;
 }
 
-function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
+function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   const xKey = xKeyFor(xMode);
   const xTickFormatter = xTickFor(xMode);
+  const secToX = makeSecToX(xMode, rows);
   const primary = specs[0];
   const secondary = specs[1] ?? null;
+
+  // Always-on elevation silhouette: terrain rides at the bottom of
+  // every chart as attribution context (a HR bump sitting on a hill
+  // explains itself). Squashed into the bottom quarter via its own
+  // hidden axis; skipped when Elevation is itself being plotted.
+  const elevVals = rows
+    .map((r) => r.Elevation)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const showElevSilhouette =
+    elevVals.length > 1 && !specs.some((s) => s.key === "Elevation");
+  const elevMin = showElevSilhouette ? Math.min(...elevVals) : 0;
+  const elevMax = showElevSilhouette ? Math.max(...elevVals) : 1;
+  const elevDomain: [number, number] = [
+    elevMin,
+    elevMin + Math.max(elevMax - elevMin, 1) * 4,
+  ];
   const config: ChartConfig = {
     [primary.key]: { label: primary.label, color: primary.color },
   };
@@ -195,6 +354,7 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
             domain={yDomain}
             tickFormatter={yTickFormatter(primary)}
           />
+          {renderDecorations(decorations, secToX)}
           <ChartTooltip
             content={
               <ChartTooltipContent
@@ -248,7 +408,7 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
 
   return (
     <ChartContainer config={config} className="h-56 w-full">
-      <LineChart data={rows}>
+      <ComposedChart data={rows}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis
           dataKey={xKey}
@@ -262,6 +422,22 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
         />
         {renderAxis(primary, "left")}
         {secondary && renderAxis(secondary, "right")}
+        {showElevSilhouette && (
+          <YAxis yAxisId="elev" hide domain={elevDomain} />
+        )}
+        {renderDecorations(decorations, secToX, "left")}
+        {showElevSilhouette && (
+          <Area
+            yAxisId="elev"
+            type="monotone"
+            dataKey="Elevation"
+            stroke="none"
+            fill="var(--muted-foreground)"
+            fillOpacity={0.16}
+            isAnimationActive={false}
+            connectNulls
+          />
+        )}
         <ChartTooltip
           content={
             <ChartTooltipContent
@@ -318,12 +494,28 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
           travellerWidth={8}
           tickFormatter={xTickFormatter}
         />
-      </LineChart>
+      </ComposedChart>
     </ChartContainer>
   );
 }
 
-export function TelemetryCharts({ activityId }: { activityId: number }) {
+export function TelemetryCharts({
+  activityId,
+  laps,
+  categories,
+  receipts,
+  highlight,
+}: {
+  activityId: number;
+  // Garmin lap durations + the user's effort labels — drives the
+  // wash/tick decorations. Either missing → plain charts, no washes.
+  laps?: LapDuration[];
+  categories?: string[];
+  // Attention-verdict anchor windows (amber receipt bands); highlight
+  // is the one the user tapped in the verdict rows.
+  receipts?: VerdictAnchor[];
+  highlight?: VerdictAnchor | null;
+}) {
   // Charts use 5s downsample server-side + every-2nd client-side → about 1
   // point per 10s. Plenty of detail, keeps recharts snappy on phone.
   const { data, isLoading, isError } = useQuery({
@@ -409,6 +601,28 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   // Defensive fallback if the saved selection no longer maps to a visible metric.
   const renderSpecs = activeSpecs.length > 0 ? activeSpecs : [metrics[0] ?? METRICS_BASE[0]];
 
+  const blocks =
+    laps && laps.length > 0 && categories && categories.length > 0
+      ? effortBlocks(laps, categories)
+      : [];
+  // Cumulative lap-duration boundaries; the run's end isn't one.
+  const lapBoundaries: number[] = [];
+  let cum = 0;
+  for (const l of laps ?? []) {
+    cum += l.duration ?? 0;
+    lapBoundaries.push(cum);
+  }
+  lapBoundaries.pop();
+  const decorations: Decorations | null =
+    blocks.length > 0 || (receipts?.length ?? 0) > 0
+      ? {
+          blocks,
+          lapBoundaries,
+          receipts: receipts ?? [],
+          highlight: highlight ?? null,
+        }
+      : null;
+
   const subtitleParts = renderSpecs.map((s) => {
     const sum = data.summary[s.key];
     if (!sum) return null;
@@ -482,7 +696,12 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
           </div>
         )}
       </div>
-      <ChartPane rows={rows} specs={renderSpecs} xMode={effectiveXMode} />
+      <ChartPane
+        rows={rows}
+        specs={renderSpecs}
+        xMode={effectiveXMode}
+        decorations={decorations}
+      />
     </div>
   );
 }
