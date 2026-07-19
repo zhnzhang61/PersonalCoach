@@ -75,6 +75,8 @@ the contract documented since the shape varies):
 
 from __future__ import annotations
 
+import json
+import os
 import statistics
 from datetime import date, timedelta
 from typing import Any
@@ -479,6 +481,106 @@ def refit_cadence_baseline(
             model_key=model_key,
             name="轻松跑步频基线",
             category="Running/Biomechanics",
+            model_type="mean_std",
+            params_json=params,
+            n_samples=len(samples),
+            confidence=confidence,
+            evidence_json=evidence,
+            derivation_method="stat",
+            status=status,
+        )
+    return model_key
+
+
+# ---------------------------------------------------------------------------
+# PR #114 — rest-recovery (HRR60) baseline
+# ---------------------------------------------------------------------------
+
+
+# HRR changes slowly and interval days are sparse (1-2/week at most),
+# so the 28-day window the aerobic baselines use would rarely collect
+# the 3-run floor. 90 days trades a little staleness for actually
+# having a baseline.
+_HRR_LOOKBACK_DAYS = 90
+
+
+def _compute_run_rest_recovery(activity_id: int, dp: Any) -> float | None:
+    """Median HRR60 across a run's qualifying Rest transitions, using
+    the same definition the per-run verdict uses (run_verdicts.
+    rest_recovery_drops) so verdict and baseline can't drift apart.
+    None when the run has no qualifying transition."""
+    from backend.run_verdicts import rest_recovery_drops
+
+    laps = dp.get_run_laps(activity_id)
+    if not laps:
+        return None
+    meta_path = os.path.join(dp.paths["manual"], f"run_{activity_id}_meta.json")
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path) as f:
+            categories = json.load(f).get("lap_categories") or []
+    except Exception:
+        return None
+    if "Rest" not in categories:
+        return None
+    df_raw, _ = dp.get_activity_telemetry(activity_id, laps=laps)
+    if df_raw is None or len(df_raw) == 0:
+        return None
+    drops = rest_recovery_drops(laps, categories, df_raw)
+    if not drops:
+        return None
+    return float(statistics.median(d["drop_bpm"] for d in drops))
+
+
+def refit_rest_recovery_baseline(
+    memory_engine: Any, data_processor: Any
+) -> str | None:
+    """Typical HRR60 (HR drop in the first 60 s of a Rest-labeled
+    block after hard work) over the last _HRR_LOOKBACK_DAYS. mean_std
+    baseline so the rest_recovery verdict (and the agent) can answer
+    "is today's between-rep recovery normal for this user?".
+
+    Returns the model_key on a successful refit; None when fewer than
+    3 runs in the window have a qualifying Rest transition."""
+    today = date.today()
+    start = (today - timedelta(days=_HRR_LOOKBACK_DAYS)).isoformat()
+    end = today.isoformat()
+    runs = data_processor.list_runs(start, end)
+
+    samples: list[float] = []
+    evidence_aids: list[int] = []
+    for r in runs:
+        d = _compute_run_rest_recovery(r.activity_id, data_processor)
+        if d is None:
+            continue
+        samples.append(d)
+        evidence_aids.append(r.activity_id)
+
+    if len(samples) < 3:
+        return None
+
+    params, confidence, status = _compute_baseline_params(samples)
+    params["units"] = "bpm_per_60s"
+    params["lookback_days"] = _HRR_LOOKBACK_DAYS
+    evidence = {"activity_ids": evidence_aids}
+
+    model_key = "hrr.rest_recovery_baseline"
+    existing = memory_engine.get_model(model_key)
+    if existing:
+        memory_engine.update_model_params(
+            model_key,
+            params_json=params,
+            n_samples=len(samples),
+            confidence=confidence,
+            evidence_json=evidence,
+            status=status,
+        )
+    else:
+        memory_engine.create_model(
+            model_key=model_key,
+            name="组间 HR 恢复基线",
+            category="Running/Recovery",
             model_type="mean_std",
             params_json=params,
             n_samples=len(samples),
