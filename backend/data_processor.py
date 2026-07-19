@@ -1668,6 +1668,44 @@ class DataProcessor:
         with open(os.path.join(self.paths['manual'], f"run_{activity_id}_meta.json"), 'w') as f:
             json.dump(meta, f, indent=4)
 
+    def suggest_lap_categories(self, activity_id) -> list[str]:
+        """HR-based first-guess effort labels for the paint editor's
+        prefill button. One entry per Garmin lap:
+
+          • Rest — micro laps (<30 s or <0.05 mi: autolap boundary
+            blips) and walking laps (cadence <140 spm)
+          • otherwise the user's own HR zone band (user_zones.json
+            rpe_label) for the lap's average HR
+
+        This is deliberately the SIMPLE rule — HR lags on short reps and
+        drifts in heat, so the user corrects from here; the button's
+        job is to make the common case (steady runs) one tap.
+        """
+        zones = self.get_hr_zones()
+
+        def hr_label(hr: float) -> str:
+            for z in zones:
+                if z["low"] <= hr <= z["high"]:
+                    return z["rpe_label"]
+            return zones[-1]["rpe_label"] if zones else "Hold Back Easy"
+
+        out = []
+        for lap in self.get_run_laps(activity_id):
+            duration = lap.get("movingDuration") or lap.get("duration") or 0
+            dist_mi = (lap.get("distance") or 0) / 1609.34
+            cadence = lap.get("averageRunCadence")
+            hr = lap.get("averageHR")
+            if (
+                duration < 30
+                or dist_mi < 0.05
+                or (cadence is not None and cadence < 140)
+                or not hr
+            ):
+                out.append("Rest")
+            else:
+                out.append(hr_label(hr))
+        return out
+
     def get_run_laps(self, activity_id):
         json_path = os.path.join(self.paths['splits'], f"{activity_id}.json")
         if not os.path.exists(json_path): return []

@@ -1238,3 +1238,46 @@ class TestComputeCycleAndWeekStats:
         assert out["week"]["runs"] == 1
         assert out["week"]["miles"] == 10.0
         assert out["week"]["avg_hr"] == 150
+
+
+class TestSuggestLapCategories:
+    """HR-zone prefill for the paint editor. Simple by design: Rest for
+    micro/walk laps, otherwise the user's own zone band for avg HR."""
+
+    def _setup(self, proc):
+        _write_json(proc.paths["user_zones"], {
+            "Steady / Constant":    "145-162 bpm",
+            "Hold Back / Recovery": "<145 bpm",
+            "Increasing Effort":    "163-173 bpm",
+        })
+        laps = [
+            # normal easy lap
+            {"duration": 600, "movingDuration": 600, "distance": 1609.34,
+             "averageRunCadence": 168, "averageHR": 140},
+            # steady HR
+            {"duration": 600, "movingDuration": 600, "distance": 1609.34,
+             "averageRunCadence": 172, "averageHR": 155},
+            # boundary micro lap (autolap blip)
+            {"duration": 2, "movingDuration": 2, "distance": 5,
+             "averageRunCadence": 180, "averageHR": 165},
+            # walking recovery
+            {"duration": 120, "movingDuration": 120, "distance": 160,
+             "averageRunCadence": 110, "averageHR": 150},
+            # no HR (strap dropout)
+            {"duration": 600, "movingDuration": 600, "distance": 1609.34,
+             "averageRunCadence": 168, "averageHR": None},
+        ]
+        import os as _os
+        _write_json(
+            _os.path.join(proc.paths["splits"], "777.json"), {"lapDTOs": laps}
+        )
+
+    def test_maps_hr_and_rest_rules(self, proc):
+        self._setup(proc)
+        assert proc.suggest_lap_categories(777) == [
+            "Hold Back Easy",
+            "Steady Effort",
+            "Rest",
+            "Rest",
+            "Rest",
+        ]
