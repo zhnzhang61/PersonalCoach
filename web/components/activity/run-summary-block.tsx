@@ -145,6 +145,10 @@ export function RunSummaryBlock({
   // watch reports none/zero indoors, so the stat self-hides on
   // treadmill runs.
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
+  const statValueClass =
+    elevFt > 0
+      ? "font-heading text-lg font-semibold whitespace-nowrap max-[350px]:text-base sm:text-2xl"
+      : "font-heading text-2xl font-semibold whitespace-nowrap max-[350px]:text-xl";
 
   // Bar width ∝ speed, min-max amplified into 40–100% across the
   // non-Rest rows (raw ratios make near-equal laps indistinguishable).
@@ -188,14 +192,19 @@ export function RunSummaryBlock({
         </div>
       )}
 
-      <div className="flex flex-wrap items-end gap-x-5 gap-y-2">
+      {/* All headline stats on ONE row, always. Three stats fit at
+          text-2xl even on phones; a fourth (Elev) steps the value font
+          down a notch so the row still holds on 375px. */}
+      <div
+        className={`grid items-end gap-x-2 ${elevFt > 0 ? "grid-cols-4" : "grid-cols-3"}`}
+      >
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Distance
           </div>
-          <div className="font-heading text-2xl font-semibold">
+          <div className={statValueClass}>
             {distanceMi.toFixed(2)}
-            <span className="ml-1 text-sm font-normal text-muted-foreground">
+            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
               mi
             </span>
           </div>
@@ -204,9 +213,9 @@ export function RunSummaryBlock({
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Avg pace
           </div>
-          <div className="font-heading text-2xl font-semibold">
+          <div className={statValueClass}>
             {avgPaceS ? fmtPace(avgPaceS) : "—"}
-            <span className="ml-1 text-sm font-normal text-muted-foreground">
+            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
               /mi
             </span>
           </div>
@@ -215,7 +224,7 @@ export function RunSummaryBlock({
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Time
           </div>
-          <div className="font-heading text-2xl font-semibold">
+          <div className={statValueClass}>
             {fmtDuration(durationS)}
           </div>
         </div>
@@ -224,9 +233,9 @@ export function RunSummaryBlock({
             <div className="text-xs uppercase tracking-wide text-muted-foreground">
               Elev
             </div>
-            <div className="font-heading text-2xl font-semibold">
+            <div className={statValueClass}>
               ↑{elevFt.toLocaleString()}
-              <span className="ml-1 text-sm font-normal text-muted-foreground">
+              <span className="ml-0.5 text-xs font-normal text-muted-foreground">
                 ft
               </span>
             </div>
