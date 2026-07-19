@@ -1,39 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check } from "lucide-react";
 import { apiGet, apiPut } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  EFFORT_CATEGORIES,
-  type Lap,
-  type LapsResponse,
-  type LapsUpdateBody,
-  type RunActivity,
+import type {
+  LapsResponse,
+  LapsUpdateBody,
+  RunActivity,
 } from "@/lib/types";
+import { EffortPaintEditor } from "@/components/activity/effort-paint-editor";
 
 interface Props {
   run: RunActivity;
   onClose: () => void;
-}
-
-// Bumped from text-xs / py-1 to feel tappable on a phone.
-const SELECT_CLASS =
-  "rounded-md border border-border bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-warm-accent/40";
-
-function metersToMi(m: number): number {
-  return m / 1609.34;
-}
-
-function paceForLap(lap: Lap): string {
-  if (lap.distance <= 0 || lap.duration <= 0) return "—";
-  const dec = lap.duration / 60 / metersToMi(lap.distance);
-  return `${Math.floor(dec)}:${Math.floor((dec % 1) * 60)
-    .toString()
-    .padStart(2, "0")}`;
 }
 
 export function EditRunForm({ run, onClose }: Props) {
@@ -51,8 +34,6 @@ export function EditRunForm({ run, onClose }: Props) {
   // The server's categories are the baseline; per-lap overrides layer on top
   // until save. This avoids setState-in-effect — no hydration step needed.
   const [overrides, setOverrides] = useState<Record<number, string>>({});
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [bulkCat, setBulkCat] = useState<string>("Hold Back Easy");
 
   const mutation = useMutation({
     mutationFn: (body: LapsUpdateBody) =>
@@ -74,29 +55,18 @@ export function EditRunForm({ run, onClose }: Props) {
   const categoryAt = (i: number): string =>
     overrides[i] ?? laps[i]?.category ?? "Hold Back Easy";
 
-  const updateLapCategory = (i: number, c: string) => {
-    setOverrides((prev) => ({ ...prev, [i]: c }));
-  };
-
-  const toggleSelected = (i: number) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
-      return next;
-    });
-  };
-
-  const applyBulk = () => {
-    if (selected.size === 0) return;
+  const paintLaps = (indices: number[], category: string) => {
     setOverrides((prev) => {
       const next = { ...prev };
-      selected.forEach((i) => {
-        next[i] = bulkCat;
+      indices.forEach((i) => {
+        next[i] = category;
       });
       return next;
     });
-    setSelected(new Set());
+  };
+
+  const setAllCategories = (categories: string[]) => {
+    setOverrides(Object.fromEntries(categories.map((c, i) => [i, c])));
   };
 
   const onSave = () => {
@@ -109,11 +79,6 @@ export function EditRunForm({ run, onClose }: Props) {
       notes,
     });
   };
-
-  const allChecked = useMemo(
-    () => laps.length > 0 && selected.size === laps.length,
-    [laps.length, selected.size],
-  );
 
   // Embedded inside RunCard now (no outer Card wrapper). Caller is
   // responsible for visual chrome / Separator above this block.
@@ -149,100 +114,15 @@ export function EditRunForm({ run, onClose }: Props) {
           No lap data found for this run. (Try syncing splits in Setup.)
         </div>
       ) : (
-        <>
-          <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
-            <p className="eyebrow text-xs">Bulk edit</p>
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                className={SELECT_CLASS}
-                value={bulkCat}
-                onChange={(e) => setBulkCat(e.target.value)}
-                aria-label="Bulk category"
-              >
-                {EFFORT_CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={applyBulk}
-                disabled={selected.size === 0}
-              >
-                Apply to {selected.size || "selected"}
-              </Button>
-              <button
-                type="button"
-                className="text-sm text-muted-foreground underline"
-                onClick={() =>
-                  setSelected(
-                    allChecked ? new Set() : new Set(laps.map((_, i) => i)),
-                  )
-                }
-              >
-                {allChecked ? "Clear" : "Select all"}
-              </button>
-            </div>
-          </div>
-
-          <div className="overflow-hidden rounded-md border border-border">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-muted/40 text-muted-foreground">
-                <tr>
-                  <th className="w-8 py-2 pl-2"></th>
-                  <th className="py-2 pr-2 font-medium">Lap</th>
-                  <th className="py-2 pr-2 text-right font-medium">Mi</th>
-                  <th className="py-2 pr-2 text-right font-medium">Pace</th>
-                  <th className="py-2 pr-2 text-right font-medium">HR</th>
-                  <th className="py-2 pr-2 font-medium">Effort</th>
-                </tr>
-              </thead>
-              <tbody>
-                {laps.map((lap, i) => (
-                  <tr key={i} className="border-t border-border/50">
-                    <td className="py-2 pl-2">
-                      <input
-                        type="checkbox"
-                        className="size-4"
-                        checked={selected.has(i)}
-                        onChange={() => toggleSelected(i)}
-                        aria-label={`Select lap ${i + 1}`}
-                      />
-                    </td>
-                    <td className="py-2 pr-2 tabular-nums">{i + 1}</td>
-                    <td className="py-2 pr-2 text-right tabular-nums">
-                      {metersToMi(lap.distance).toFixed(2)}
-                    </td>
-                    <td className="py-2 pr-2 text-right tabular-nums">
-                      {paceForLap(lap)}
-                    </td>
-                    <td className="py-2 pr-2 text-right tabular-nums">
-                      {lap.averageHR ?? "—"}
-                    </td>
-                    <td className="py-2 pr-2">
-                      <select
-                        className={SELECT_CLASS}
-                        value={categoryAt(i)}
-                        onChange={(e) =>
-                          updateLapCategory(i, e.target.value)
-                        }
-                        aria-label={`Lap ${i + 1} effort`}
-                      >
-                        {EFFORT_CATEGORIES.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+        <div className="rounded-md border border-border bg-muted/10 p-3">
+          <EffortPaintEditor
+            run={run}
+            laps={laps}
+            categories={laps.map((_, i) => categoryAt(i))}
+            onPaint={paintLaps}
+            onSetAll={setAllCategories}
+          />
+        </div>
       )}
 
       {mutation.isError && (

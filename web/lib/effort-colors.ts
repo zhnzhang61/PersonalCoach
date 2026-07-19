@@ -18,6 +18,7 @@ export const EFFORT_COLORS: Record<string, string> = {
   Marathon: "#993C1D",
   "LT Effort": "#712B13",
   VO2Max: "#4A1B0C",
+  Sprint: "#2A0D05",
 };
 
 export const EFFORT_SHORT: Record<string, string> = {
@@ -27,7 +28,11 @@ export const EFFORT_SHORT: Record<string, string> = {
   Marathon: "M",
   "LT Effort": "LT",
   VO2Max: "VO2",
+  Sprint: "Spr",
+  Rest: "Rest",
 };
+
+export const REST_COLOR = "#B4B2A9";
 
 // Legacy free-form labels fall back to a neutral tone instead of
 // crashing the color lookup.
