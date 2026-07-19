@@ -60,7 +60,11 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
         </h3>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      {/* flex-wrap, not a 3-col grid: on ≥375px phones all three stats
+          share one row (the requested layout); on 320px screens the time
+          stat wraps below instead of overflowing its column (codex P2 —
+          "1:59:51" at text-2xl is wider than a third of a 320px card). */}
+      <div className="flex flex-wrap items-end gap-x-5 gap-y-2">
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Distance
@@ -70,9 +74,6 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
             <span className="ml-1 text-sm font-normal text-muted-foreground">
               mi
             </span>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            use this in Garmin
           </div>
         </div>
         <div>
@@ -94,6 +95,9 @@ export function TreadmillEstimateCard({ activityId }: { activityId: number }) {
             {est.duration_str}
           </div>
         </div>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        distance is the number to enter in Garmin
       </div>
 
       <div className="mt-3">
