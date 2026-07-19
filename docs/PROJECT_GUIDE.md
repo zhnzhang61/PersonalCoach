@@ -137,8 +137,37 @@ fetching. Tailwind. iPhone-first layout.
    outdoors and by the treadmill model indoors — same component, same
    visual grammar, different coordinate system. Replaced the old
    `LapTable` + `TreadmillEstimateCard` (both deleted).
-3. **`TelemetryDrawer`** — the full telemetry line charts, complete but
-   folded away by default so the page opens on the summary.
+3. **Verdict rows + `TelemetryDrawer`** (PR #114) — post-run judgment
+   sentences above the folded telemetry charts. The verdicts are a
+   conditional POOL, not a dashboard: each has a trigger gate, a run
+   only shows the ones it qualifies for, attention-first, normal ones
+   folded into one "其余 N 项正常" line. Tapping an anchored verdict
+   opens the drawer and highlights that window on the chart — the
+   sentence up top, its receipt below. The pool (all four are
+   questions the user actually asks; HR drift was rejected twice in
+   design — whole-run dies on structured runs + out-and-back terrain,
+   segment-level answers a question this positive-split runner never
+   asks): 标注 vs 客观 / Rest 段恢复 (HRR60 vs personal baseline) /
+   L/R 疲劳不对称 / Easy 纯度.
+
+   The charts themselves know what they're drawing now: effort-label
+   washes + a full-saturation 6px top rail (adjacent warm tints are
+   indistinguishable at wash opacity — the rail identifies the block)
+   + color→label legend, lap-boundary ticks, amber receipt bands on
+   attention anchors, and an always-on gray **elevation silhouette**
+   squashed into the bottom quarter (terrain as attribution context —
+   a HR bump sitting on a hill explains itself). Elevation has no tab
+   anymore; the silhouette is its render. Tabs: HR / Pace / Cadence /
+   L/R / Resp / Stride. On treadmill runs the Pace tab carries a
+   standing caveat (watch pace ≈1 min/mi slow; shape informative,
+   numbers not).
+
+   Two dedicated reads: **L/R** renders centered on 50% with a 49–51
+   comfort band, p99-sized domain (a one-sample glitch must not zoom
+   the axis), ticks pinned to 49/50/51, and the verdict's thirds line
+   as subtitle. **Resp** offers a "曲线 | 关系" toggle; 关系 is the
+   Resp×HR scatter (dot color = effort label) with the server's hinge
+   fit and a dashed knee marker ≈ ventilatory threshold.
 
 Effort labels have **one shared visual vocabulary** in
 `lib/effort-colors.ts` (warm scale, light→dark with intensity, matching
@@ -275,6 +304,30 @@ wrist guess. So `predict_run` returns, alongside the run total:
 The difference is not cosmetic: on the NYC W7D4 progression run the
 watch priced the Hold Back Easy block at 10.0 mi · 10:42, the model at
 9.4 mi · 11:11.
+
+**`run_verdicts.py`** (PR #114) — the post-run verdict pool. Four
+conditional judgment sentences (标注 vs 客观 / Rest 段恢复 / L/R 疲劳
+不对称 / Easy 纯度), each with an explicit trigger gate; whatever
+doesn't fire is returned in `not_fired` with the reason, so UI and
+agent both distinguish "checked, fine" from "couldn't check". Served
+by `GET /api/runs/{id}/verdicts`. Numeric + preformatted side by side;
+anchors are `{start_sec, end_sec}` on the cumulative lap-duration
+clock so the frontend can highlight the exact window. Key internals:
+45 s smoothing for zone-mismatch (15 s for recovery — HRR60 needs
+sharpness), 105 s block-start amnesty (60 s HR settle + 45 s smoother
+memory), HRR60 start point = peak before the Rest boundary. The
+`hrr.rest_recovery_baseline` mean_std model (90-day window — interval
+days are sparse) joins `REFIT_REGISTRY`.
+
+**`compute_resp_hr_relation`** (data_processor, PR #114) — Resp×HR
+pairs (30 s smoothed, one per ≥15 s, running samples only per the
+cadence ≥140 rule; walk/stand samples pair at-rest HR with elevated
+breathing and drag the low slope negative) + a continuous hinge fit.
+The knee ≈ ventilatory threshold; only reported with ≥25 bpm HR span
+and slope gain ≥ +0.2 br/min per 10 bpm, otherwise `no_fit_reason`
+says which gate failed. Served by `GET /api/runs/{id}/resp-hr`.
+First real result: user's outdoor VT ≈ 154 bpm (+1.9 br/min per
+10 bpm below, +8.5 above); treadmill knee ≈ 146.
 
 ### 3.2 Authentication
 
@@ -1065,6 +1118,22 @@ Backend is now a `backend/` package (was a flat top-level dump);
   what happened. ~2–3 days.
 - **§8 goal feasibility** — projection + plan adjustment from completed
   work in the cycle. ~2–3 days.
+- **Agent consumption of the verdict pool** (follow-up to PR #114) —
+  `/api/runs/{id}/verdicts` and `/resp-hr` exist and are shaped for
+  the agent, but no MCP tool / prefetch consumes them yet. This is
+  precisely the §4.5 "tool exists but nothing consumes it" shape
+  (#84/#95/#96) — wire it deliberately in the next agent PR, don't
+  let it become the fifth instance. ~½ day.
+- **Speed-per-heartbeat race review** (agent-side, from PR #114
+  design) — for marathon post-mortems: per-segment EF (speed/HR)
+  trajectory distinguishes "downshifted, engine fine" from "cost per
+  mile rose" in the user's positive-split races. Deliberately NOT a
+  UI verdict (asked a few times a year, not per-run). ~1 day, lives
+  in the race-review prompt/tooling.
+- **VT trend across runs** — compute_resp_hr_relation's knee, tracked
+  over months: rightward drift = aerobic gain; also treadmill-vs-
+  outdoor knee gap (146 vs 154 on first measurement) may be a heat
+  signal. Needs a few dozen runs of history first.
 
 ---
 

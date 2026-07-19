@@ -254,6 +254,7 @@ function TelemetrySection({
               receipts={receipts}
               highlight={highlight}
               lrThirdsDetail={lrThirdsDetail}
+              treadmill={isTreadmillRun(run)}
             />
           </div>
         )}

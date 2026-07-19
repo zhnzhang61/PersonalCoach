@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Area,
-  AreaChart,
   Brush,
   CartesianGrid,
   ComposedChart,
@@ -37,7 +36,6 @@ interface MetricSpec {
   label: string;
   color: string;
   invertY?: boolean;            // pace: lower = faster, so invert
-  area?: boolean;               // elevation rendered as area for terrain feel
   yDomain?: [number, number];   // hard Y bounds (e.g., pace [4,14] to clip stoplight spikes visually)
   formatSubtitle: (s: MetricSummary) => string;
 }
@@ -51,6 +49,8 @@ const fmtPace = (decMinPerMi: number): string => {
 
 // Tab specs. Subtitle formatting and Y-axis presentation rules live here;
 // avg / min / max come from the server (data_processor.compute_telemetry_summary).
+// Elevation has no tab — it rides under every chart as the always-on
+// silhouette instead (its job is attribution context, not solo study).
 const METRICS_BASE: MetricSpec[] = [
   {
     key: "HeartRate",
@@ -67,10 +67,10 @@ const METRICS_BASE: MetricSpec[] = [
     formatSubtitle: (s) => `avg ${fmtPace(s.avg)} /mi`,
   },
   {
-    key: "StrideLength",
-    label: "Stride",
-    color: "var(--chart-3)",
-    formatSubtitle: (s) => `avg ${Math.round(s.avg)} cm`,
+    key: "Cadence",
+    label: "Cadence",
+    color: "var(--chart-4)",
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} spm`,
   },
   {
     key: "GroundContactBalanceLeft",
@@ -80,24 +80,16 @@ const METRICS_BASE: MetricSpec[] = [
       `L ${s.avg.toFixed(1)}% / R ${(100 - s.avg).toFixed(1)}%`,
   },
   {
-    key: "Cadence",
-    label: "Cadence",
-    color: "var(--chart-4)",
-    formatSubtitle: (s) => `avg ${Math.round(s.avg)} spm`,
-  },
-  {
     key: "RespirationRate",
     label: "Resp",
     color: "var(--chart-5)",
     formatSubtitle: (s) => `avg ${Math.round(s.avg)} br/min`,
   },
   {
-    key: "Elevation",
-    label: "Elev",
-    color: "var(--chart-1)",
-    area: true,
-    formatSubtitle: (s) =>
-      `avg ${Math.round(s.avg)} m · gain ${Math.round(s.max - s.min)} m`,
+    key: "StrideLength",
+    label: "Stride",
+    color: "var(--chart-3)",
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} cm`,
   },
 ];
 
@@ -303,8 +295,8 @@ const xTickFor = (mode: XMode) =>
 
 interface ChartPaneProps {
   rows: TelemetryRow[];
-  // 1 spec → single-axis chart (area allowed for elevation).
-  // 2 specs → dual-axis line chart; first goes on the left, second on the right.
+  // 1 spec → single-axis chart; 2 specs → dual-axis, first on the
+  // left, second on the right.
   specs: MetricSpec[];
   // x-axis mode: "time" plots seconds, "distance" plots cumulative miles.
   xMode: XMode;
@@ -322,12 +314,11 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   // Always-on elevation silhouette: terrain rides at the bottom of
   // every chart as attribution context (a HR bump sitting on a hill
   // explains itself). Squashed into the bottom quarter via its own
-  // hidden axis; skipped when Elevation is itself being plotted.
+  // hidden axis. Elevation has no tab of its own — this IS its render.
   const elevVals = rows
     .map((r) => r.Elevation)
     .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-  const showElevSilhouette =
-    elevVals.length > 1 && !specs.some((s) => s.key === "Elevation");
+  const showElevSilhouette = elevVals.length > 1;
   const elevMin = showElevSilhouette ? Math.min(...elevVals) : 0;
   const elevMax = showElevSilhouette ? Math.max(...elevVals) : 1;
   const elevDomain: [number, number] = [
@@ -378,65 +369,6 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
     s.key === "GroundContactBalanceLeft"
       ? lrDomain
       : (s.yDomain ?? ["auto", "auto"]);
-
-  // Single-spec mode keeps the elevation area shading. Dual-spec collapses
-  // to a flat dual-axis line chart — overlaying area fills with another
-  // line gets visually noisy.
-  if (!secondary && primary.area) {
-    const yDomain: [number | string, number | string] = primary.yDomain ?? ["auto", "auto"];
-    return (
-      <ChartContainer config={config} className="h-56 w-full">
-        <AreaChart data={rows}>
-          <CartesianGrid vertical={false} strokeDasharray="3 3" />
-          <XAxis
-            dataKey={xKey}
-            tickLine={false}
-            axisLine={false}
-            tickMargin={6}
-            fontSize={10}
-            tickFormatter={xTickFormatter}
-            type="number"
-            domain={["dataMin", "dataMax"]}
-          />
-          <YAxis
-            tickLine={false}
-            axisLine={false}
-            tickMargin={6}
-            fontSize={10}
-            width={34}
-            domain={yDomain}
-            tickFormatter={yTickFormatter(primary)}
-          />
-          {renderDecorations(decorations, secToX)}
-          <ChartTooltip
-            content={
-              <ChartTooltipContent
-                labelFormatter={(_v, payload) =>
-                  xTickFormatter(payload?.[0]?.payload?.[xKey])
-                }
-              />
-            }
-          />
-          <Area
-            type="monotone"
-            dataKey={primary.key}
-            stroke={primary.color}
-            fill={primary.color}
-            fillOpacity={0.18}
-            strokeWidth={1.5}
-            isAnimationActive={false}
-          />
-          <Brush
-            dataKey={xKey}
-            height={20}
-            stroke="var(--muted-foreground)"
-            travellerWidth={8}
-            tickFormatter={xTickFormatter}
-          />
-        </AreaChart>
-      </ChartContainer>
-    );
-  }
 
   const renderAxis = (s: MetricSpec, side: "left" | "right") => {
     const domain = domainFor(s);
@@ -584,6 +516,7 @@ export function TelemetryCharts({
   receipts,
   highlight,
   lrThirdsDetail,
+  treadmill = false,
 }: {
   activityId: number;
   // Garmin lap durations + the user's effort labels — drives the
@@ -598,6 +531,10 @@ export function TelemetryCharts({
   // "+1.2% 右 → +0.1% 右 → +0.4% 左") — shown as the L/R subtitle.
   // Server-formatted per the no-shaping-in-dashboard rule.
   lrThirdsDetail?: string | null;
+  // Treadmill runs plot the WATCH's pace curve, which is known-biased
+  // (~1 min/mi slow, user-confirmed). We keep the curve (its shape is
+  // still informative) but must say so whenever it's on screen.
+  treadmill?: boolean;
 }) {
   // Charts use 5s downsample server-side + every-2nd client-side → about 1
   // point per 10s. Plenty of detail, keeps recharts snappy on phone.
@@ -814,6 +751,13 @@ export function TelemetryCharts({
           </div>
         )}
       </div>
+      {treadmill && !respRelation &&
+        renderSpecs.some((s) => s.key === "Pace") && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            腕表配速 — 跑步机上系统性偏慢约 1 min/mi，形状可信、数值不可信；
+            真实配速看上方汇总块的模型估算。
+          </p>
+        )}
       {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
         <RespHrScatter activityId={activityId} />
       ) : (
