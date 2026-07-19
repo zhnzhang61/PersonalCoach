@@ -272,6 +272,54 @@ class TestPredict:
             a["total_distance_mi"], rel=0.005
         )
 
+    def test_garmin_lap_view_repriced_in_model_coordinates(self, proc):
+        """Block-2 unification: rows = Garmin laps, numbers = model.
+        Two fake 900s watch-laps over a constant 1800s curve must each
+        get half the model distance, the meta's categories, and a
+        category_stats_model aggregate that ignores the Rest lap."""
+        rid = 1
+        _write(
+            os.path.join(proc.paths["splits"], f"{rid}.json"),
+            {
+                "lapDTOs": [
+                    {"lapIndex": 1, "duration": 900.0, "distance": 1609.34},
+                    {"lapIndex": 2, "duration": 900.0, "distance": 1609.34},
+                    {"lapIndex": 3, "duration": 60.0, "distance": 10.0},
+                ]
+            },
+        )
+        _write(
+            os.path.join(proc.paths["manual"], f"run_{rid}_meta.json"),
+            {"lap_categories": ["Hold Back Easy", "Steady Effort", "Rest"]},
+        )
+        cad, hr = 170.0, 155.0
+        with patch.object(
+            DataProcessor,
+            "get_activity_telemetry",
+            return_value=(_constant_telemetry(cad, hr, 1860), None),
+        ):
+            out = tm.predict_run(proc, rid, TREADMILL_SUMMARY)
+        laps = out["estimate"]["laps"]
+        assert [l["category"] for l in laps] == [
+            "Hold Back Easy",
+            "Steady Effort",
+            "Rest",
+        ]
+        half_mi = cad * true_stride(cad, hr) / 60 * 900 / 1609.34
+        assert laps[0]["model_distance_mi"] == pytest.approx(half_mi, rel=0.04)
+        assert laps[1]["model_distance_mi"] == pytest.approx(half_mi, rel=0.04)
+        # constant curve → both full laps show the same model pace ±2s
+        assert abs(laps[0]["pace_s"] - laps[1]["pace_s"]) <= 2
+        assert laps[0]["avg_hr"] == 155
+        cats = {c["category"] for c in out["estimate"]["category_stats_model"]}
+        assert cats == {"Hold Back Easy", "Steady Effort"}  # Rest excluded
+        hbe = next(
+            c
+            for c in out["estimate"]["category_stats_model"]
+            if c["category"] == "Hold Back Easy"
+        )
+        assert hbe["distance_mi"] == pytest.approx(half_mi, rel=0.04)
+
     def test_no_telemetry_raises(self, proc):
         with patch.object(
             DataProcessor, "get_activity_telemetry", return_value=(None, None)

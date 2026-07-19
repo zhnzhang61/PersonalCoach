@@ -401,6 +401,69 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
             }
         )
 
+    # Garmin-lap view: the watch's autolap boundaries are real TIME
+    # markers (labels attach to them via lap_categories), but their
+    # distances are wrist-accelerometer guesses. Re-price each lap window
+    # in model coordinates so the UI can show one honest lap table and
+    # the paint editor can keep operating on lap indices. Windows are cut
+    # on the raw telemetry clock (lap durations are wall-clock too), the
+    # integrals inside use accepted-dt only — consistent with the totals.
+    wall_elapsed = seconds - seconds[0]
+
+    def _window_stats(w0: float, w1: float) -> tuple[float, float]:
+        m = (wall_elapsed > w0) & (wall_elapsed <= w1)
+        return float((speed[m] * dt[m]).sum()), float(dt[m].sum())
+
+    garmin_laps = processor.get_run_laps(activity_id)
+    meta = _read_json(
+        os.path.join(processor.paths["manual"], f"run_{activity_id}_meta.json")
+    )
+    lap_categories = (meta or {}).get("lap_categories") or []
+    laps_out = []
+    cat_agg: dict[str, dict] = {}
+    cursor = 0.0
+    for i, lap in enumerate(garmin_laps):
+        lap_len = float(lap.get("duration") or 0)
+        w0, w1 = cursor, cursor + lap_len
+        cursor = w1
+        lap_m, active_s = _window_stats(w0, w1)
+        lap_mi = lap_m / MILE_M
+        category = lap_categories[i] if i < len(lap_categories) else None
+        m = (wall_elapsed > w0) & (wall_elapsed <= w1) & (dt > 0)
+        lap_hr = (
+            int(round(float(np.average(hr[m], weights=dt[m]))))
+            if dt[m].sum() > 0
+            else None
+        )
+        pace_s = active_s / lap_mi if lap_mi > 0.01 else None
+        laps_out.append(
+            {
+                "lap": i + 1,
+                "category": category,
+                "model_distance_mi": round(lap_mi, 2),
+                "pace_s": round(pace_s) if pace_s else None,
+                "pace_str": _fmt_pace(pace_s) if pace_s else None,
+                "avg_hr": lap_hr,
+            }
+        )
+        if category and category != "Rest" and lap_mi > 0.01:
+            agg = cat_agg.setdefault(
+                category, {"distance_m": 0.0, "time_s": 0.0, "hr_ws": 0.0}
+            )
+            agg["distance_m"] += lap_m
+            agg["time_s"] += active_s
+            if lap_hr:
+                agg["hr_ws"] += lap_hr * active_s
+    category_stats_model = [
+        {
+            "category": c,
+            "distance_mi": round(a["distance_m"] / MILE_M, 2),
+            "pace": _fmt_pace(a["time_s"] / (a["distance_m"] / MILE_M)),
+            "avg_hr": int(round(a["hr_ws"] / a["time_s"])) if a["hr_ws"] else None,
+        }
+        for c, a in cat_agg.items()
+    ]
+
     avg_pace_s = duration_s / (total_m / MILE_M)
     return {
         "activity_id": activity_id,
@@ -412,6 +475,8 @@ def predict_run(processor, activity_id: int, summary: dict) -> dict:
             "avg_pace_s_per_mi": round(avg_pace_s),
             "avg_pace_str": _fmt_pace(avg_pace_s),
             "splits": splits,
+            "laps": laps_out,
+            "category_stats_model": category_stats_model,
         },
         "model": {
             k: model.get(k)

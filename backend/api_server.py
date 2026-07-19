@@ -1294,6 +1294,20 @@ def update_laps(activity_id: int, body: LapsUpdate) -> dict[str, Any]:
     return {"ok": True, "activity_id": activity_id, "category_stats": stats}
 
 
+@app.get("/api/runs/{activity_id}/suggest-labels")
+def suggest_labels(activity_id: int) -> dict[str, Any]:
+    """First-guess effort labels (HR-zone based + Rest heuristics) for
+    the paint editor's prefill button. Suggestions only — nothing is
+    written until the user saves."""
+    laps = processor.get_run_laps(activity_id)
+    if not laps:
+        raise HTTPException(404, "No lap data found")
+    return {
+        "activity_id": activity_id,
+        "categories": processor.suggest_lap_categories(activity_id),
+    }
+
+
 @app.get("/api/runs/{activity_id}/treadmill-estimate")
 def treadmill_estimate(activity_id: int) -> dict[str, Any]:
     """Road-equivalent pace + distance for a treadmill run, computed from
