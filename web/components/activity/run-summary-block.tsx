@@ -192,12 +192,12 @@ export function RunSummaryBlock({
         </div>
       )}
 
-      {/* All headline stats on ONE row, always. Three stats fit at
-          text-2xl even on phones; a fourth (Elev) steps the value font
-          down a notch so the row still holds on 375px. */}
-      <div
-        className={`grid items-end gap-x-2 ${elevFt > 0 ? "grid-cols-4" : "grid-cols-3"}`}
-      >
+      {/* All headline stats on ONE row, always — spread edge-to-edge
+          (justify-between) so the middle stats don't bunch up against
+          Avg pace's wide value. Three stats fit at text-2xl even on
+          phones; a fourth (Elev) steps the value font down a notch so
+          the row still holds on 375px. */}
+      <div className="flex items-end justify-between gap-x-2">
         <div>
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
             Distance
