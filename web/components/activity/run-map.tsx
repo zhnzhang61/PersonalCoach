@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
 import Map, { Layer, Marker, Source, type MapRef } from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
@@ -31,7 +38,43 @@ const ROUTE_COLOR = "#fc4c02";
 const START_COLOR = "#16a34a";
 const END_COLOR = "#dc2626";
 
-export function RunMap({
+// mapbox-gl is the one component tree that can throw synchronously at
+// render/commit time (Marker appends into the map's canvas container —
+// during teardown/remount races that container is undefined:
+// "Cannot read properties of undefined (reading 'appendChild')").
+// Without a boundary that single throw blanks the WHOLE detail page, so
+// the map degrades to a quiet placeholder instead.
+class MapErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="flex h-32 items-center justify-center rounded-md border border-border bg-muted/30 text-xs text-muted-foreground">
+          Map failed to render — reload to retry.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export function RunMap(props: { activityId: number; interactive?: boolean }) {
+  return (
+    <MapErrorBoundary>
+      <RunMapInner {...props} />
+    </MapErrorBoundary>
+  );
+}
+
+function RunMapInner({
   activityId,
   interactive = true,
 }: {
@@ -40,6 +83,9 @@ export function RunMap({
 }) {
   const [styleId, setStyleId] = useState<StyleId>("outdoors-v12");
   const [fullscreen, setFullscreen] = useState(false);
+  // Markers append themselves into the map's canvas container; hold them
+  // back until the map reports ready so they can never race its mount.
+  const [mapReady, setMapReady] = useState(false);
   const mapRef = useRef<MapRef>(null);
 
   // While fullscreen, kill page scroll and let Escape close it. react-map-gl's
@@ -151,6 +197,7 @@ export function RunMap({
         attributionControl={false}
         interactive={interactive}
         terrain={useTerrain ? { source: "mapbox-dem", exaggeration: 1.2 } : undefined}
+        onLoad={() => setMapReady(true)}
       >
         <Source
           id="mapbox-dem"
@@ -181,20 +228,32 @@ export function RunMap({
             layout={{ "line-cap": "round", "line-join": "round" }}
           />
         </Source>
-        <Marker longitude={data.start[1]} latitude={data.start[0]} anchor="center">
-          <div
-            className="size-3 rounded-full border-2 border-white shadow"
-            style={{ backgroundColor: START_COLOR }}
-            aria-label="Start"
-          />
-        </Marker>
-        <Marker longitude={data.end[1]} latitude={data.end[0]} anchor="center">
-          <div
-            className="size-3 rounded-full border-2 border-white shadow"
-            style={{ backgroundColor: END_COLOR }}
-            aria-label="End"
-          />
-        </Marker>
+        {mapReady && (
+          <>
+            <Marker
+              longitude={data.start[1]}
+              latitude={data.start[0]}
+              anchor="center"
+            >
+              <div
+                className="size-3 rounded-full border-2 border-white shadow"
+                style={{ backgroundColor: START_COLOR }}
+                aria-label="Start"
+              />
+            </Marker>
+            <Marker
+              longitude={data.end[1]}
+              latitude={data.end[0]}
+              anchor="center"
+            >
+              <div
+                className="size-3 rounded-full border-2 border-white shadow"
+                style={{ backgroundColor: END_COLOR }}
+                aria-label="End"
+              />
+            </Marker>
+          </>
+        )}
       </Map>
 
       {/*
