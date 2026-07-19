@@ -100,6 +100,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
             axisLine={false}
             tickMargin={6}
             fontSize={10}
+            width={30}
             tickFormatter={(v: number) => `${Math.round(v)}`}
           />
           {fit && (

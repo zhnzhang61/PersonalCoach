@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
-import { effortColor, REST_COLOR } from "@/lib/effort-colors";
+import { effortColor, EFFORT_SHORT, REST_COLOR } from "@/lib/effort-colors";
 import { RespHrScatter } from "@/components/activity/resp-hr-scatter";
 import type {
   MetricSummary,
@@ -179,6 +179,30 @@ interface Decorations {
   highlight: VerdictAnchor | null;
 }
 
+// Wash + rail in one custom ReferenceArea shape: the pale full-height
+// wash, plus a full-saturation 6px rail at the top of the plot —
+// adjacent effort tints are indistinguishable at wash opacity; the
+// rail is what actually identifies the block (mockup-verified). A
+// custom shape gets the computed pixel rect, so no phantom [0,1] axis
+// is needed (recharts drops ReferenceAreas bound to an axis that has
+// no series).
+function washWithRail(fill: string) {
+  return function WashWithRail(p: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  }) {
+    const { x = 0, y = 0, width = 0, height = 0 } = p;
+    return (
+      <g>
+        <rect x={x} y={y} width={width} height={height} fill={fill} fillOpacity={0.14} />
+        <rect x={x} y={y} width={width} height={6} fill={fill} fillOpacity={1} />
+      </g>
+    );
+  };
+}
+
 // Returns recharts elements — must be spread directly into a chart's
 // children (recharts dispatches on child type, so a wrapper component
 // would be invisible to it).
@@ -195,15 +219,16 @@ function renderDecorations(
     const x1 = secToX(b.start_sec);
     const x2 = secToX(b.end_sec);
     if (x1 == null || x2 == null) continue;
+    const color = b.label === "Rest" ? REST_COLOR : effortColor(b.label);
     out.push(
       <ReferenceArea
         key={`wash-${b.start_sec}`}
         {...axisProps}
         x1={x1}
         x2={x2}
-        fill={b.label === "Rest" ? REST_COLOR : effortColor(b.label)}
-        fillOpacity={0.14}
+        fill={color}
         stroke="none"
+        shape={washWithRail(color)}
       />,
     );
   }
@@ -378,6 +403,7 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
             axisLine={false}
             tickMargin={6}
             fontSize={10}
+            width={34}
             domain={yDomain}
             tickFormatter={yTickFormatter(primary)}
           />
@@ -424,6 +450,7 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
         axisLine={false}
         tickMargin={6}
         fontSize={10}
+        width={34}
         domain={domain}
         // Band edges + center only — auto ticks on a fractional
         // domain produce noise like "46.1%".
@@ -790,12 +817,34 @@ export function TelemetryCharts({
       {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
         <RespHrScatter activityId={activityId} />
       ) : (
-        <ChartPane
-          rows={rows}
-          specs={renderSpecs}
-          xMode={effectiveXMode}
-          decorations={decorations}
-        />
+        <>
+          <ChartPane
+            rows={rows}
+            specs={renderSpecs}
+            xMode={effectiveXMode}
+            decorations={decorations}
+          />
+          {blocks.length > 0 && (
+            // Which color is which effort — the washes/rail alone
+            // don't identify adjacent tints of the warm scale.
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {[...new Set(blocks.map((b) => b.label))]
+                .filter((l): l is string => l != null)
+                .map((label) => (
+                  <span key={label} className="inline-flex items-center gap-1">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{
+                        background:
+                          label === "Rest" ? REST_COLOR : effortColor(label),
+                      }}
+                    />
+                    {EFFORT_SHORT[label] ?? label}
+                  </span>
+                ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
