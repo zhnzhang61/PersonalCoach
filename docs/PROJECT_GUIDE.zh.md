@@ -113,13 +113,43 @@ Tailwind。iPhone 优先布局。
 | Tab | 路由 | 内容 |
 |---|---|---|
 | Health | `/` | 今日 check-in 卡、context-events 卡、readiness、恢复/睡眠图表 |
-| Activity | `/activity` | 跑步列表 + 单次详情（`/activity/[id]`）含地图/遥测/分段 + "Ask AI about this run" |
+| Activity | `/activity` | 跑步列表 + 单次详情（`/activity/[id]`）：地图（仅户外）→ run 汇总块 → 折叠的遥测抽屉 + "Ask AI about this run" |
 | Training | `/training` | 周期总览、月度图、计划日历、未来计划训练（可编辑） |
 | Coach | `/coach` | session 制聊天线程（流式）、action pills、day dividers、agent 工作时实时显示工具调用 chips（答案落地后隐藏） |
 | Setup | `/setup` | Garmin / Google 登录、同步控制 |
 
+**Run 详情页（`/activity/[id]`）——三个块（#113）：**
+
+1. **地图** — 只有户外 run 才有。跑步机 run 没有 GPS，就干脆不渲染这个块
+   （而不是留一个空占位）。
+2. **`RunSummaryBlock`** — 两种 run 类型共用的那一个模块：顶部
+   **距离 / 平均配速 / 时间** → 各强度 **chips** → 逐圈 **强度条**
+   （条色 = 标注的强度，右侧 HR，Rest 圈画成细灰条）。条宽 ∝ 速度，但在
+   非 Rest 的行之间把 min-max **放大映射到 40–100%**——直接用原始比例的话，
+   配速接近的圈根本看不出区别。
+   户外由 GPS 喂数据，室内由跑步机模型喂——同一个组件、同一套视觉语法，
+   只是坐标系不同。取代了旧的 `LapTable` + `TreadmillEstimateCard`
+   （两个都已删除）。
+3. **`TelemetryDrawer`** — 完整的遥测折线图，内容一条没少，但默认折叠，
+   让页面打开时聚焦在汇总块上。
+
+强度标签有**统一的视觉词汇表**，定义在 `lib/effort-colors.ts`（暖色阶，
+随强度由浅到深，跟 coach 的 zone 排序一致）。chips、逐圈强度条、画笔编辑
+器的笔刷都从这里取色，所以同一个主观强度在任何地方看起来都一样。未知/历史
+遗留的自由文本标签回退到中性色，而不是让取色崩掉。
+
+**强度标注——`EffortPaintEditor`（#113）。** 圈标签是用户的**主观**强度，
+又正好是跑步机模型的训练输入，所以录入必须够便宜。编辑器做成画笔式：先选
+一支笔刷（每个强度标签一个 chip），然后**点一行**把它刷上，或者
+**长按 350 ms 再拖**扫一整段。行就是汇总块里的那套强度条，而笔刷面板放在
+列表**下面**——手机上正好在拇指够得着的位置。两个批量快捷键：**Paint all**
+和 **Prefill from HR**（从 `GET /api/runs/{id}/suggest-labels` 拿一版初猜，
+见 §3.1）。在用户保存之前什么都不会落盘。取代了原来逐圈 checkbox + 下拉框
+的表单。
+
 **关键 client 模块（`web/lib/`）：**
 - `api.ts` — `apiGet/Post/Put/Delete` + `streamSSE`（流式聊天的 SSE 帧解析）
+- `effort-colors.ts` — 共用的强度色阶 + 标签排序/缩写
 - `hooks/use-coach-session.ts` — localStorage 存当前 `thread_id`
 - `coach-errors.ts` — 把 provider 限流/代理超时分类成友好的中文提示 + 重试建议
 - `todays-read.ts` — "Today's Read" 句子的按天缓存
@@ -177,6 +207,14 @@ Garmin JSON dump + 手动输入，归一化成 typed 结构。
   run_miles）——喂 HRV/睡眠/里程模型。
 - `compute_route_profile(activity_id)` — 从遥测算坡度分布 + 爬升/下降
   （P5）。
+- `suggest_lap_categories(activity_id)` — 给画笔编辑器预填按钮用的初猜强度
+  标签：微小圈（<30 秒或 <0.05 mi——autolap 抖出来的碎圈）和走路圈（步频
+  <140 spm）判为 **Rest**，其余按该圈平均 HR 取用户自己 HR 区间的
+  `rpe_label`。这里**故意**只用最笨的规则——HR 在短间歇里滞后、在高温下
+  漂移，所以用户是在这版基础上改；按钮只需要把最常见的情况（匀速跑）压
+  成一次点击。端点 `GET /api/runs/{id}/suggest-labels`；只是建议，保存前
+  不落盘。**它们依然是主观强度标签——预填是打字快捷方式，不是在宣称
+  HR 就等于标签。**
 - CRUD：check-in、计划训练、训练周期块、手动活动、用户 HR 区间。
 - **规矩：** 所有 shaping/聚合都在这里；dashboard/UI 只调函数 + 渲染。数据
   同时为 UI 和 AI 成形——数值 + 预格式化字段并列，单位自描述。
@@ -189,8 +227,21 @@ Garmin JSON dump + 手动输入，归一化成 typed 结构。
 到 300 天,不足 120 圈则拒绝 → HTTP 503)。拟合缓存在
 `data/derived/treadmill_model.json`,任何 `run_*_meta.json` 变动或跨天
 会懒惰重训。预测按 1% 坡 / 78°F 假设在 HR+步频曲线上积分;步频 <140
-只计时间不计距离。端点 `GET /api/runs/{id}/treadmill-estimate`;前端
-`TreadmillEstimateCard` 在 run 详情页渲染(跑步机/室内 run 顶替地图位)。
+只计时间不计距离。端点 `GET /api/runs/{id}/treadmill-estimate`;前端由
+`RunSummaryBlock` 在 run 详情页渲染。
+
+**Garmin 圈按模型坐标重新计价（#113）。** 跑步机的圈边界是诚实的**时间**
+标记——用户确实按了按钮，强度标签也挂在这个圈上——但这个圈的**距离**是
+腕表在猜。所以 `predict_run` 除了 run 总量之外还返回：
+
+- `estimate.laps` — 每个 Garmin 圈一行，含模型积分出来的距离/配速、按时长
+  加权的 HR、以及该圈的强度类别。行与 `lap_categories` 严格 1:1，标签不会
+  错位到别的圈上，同时显示的每个数都是模型的而不是腕表的。
+- `estimate.category_stats_model` — 模型坐标下的各强度聚合（剔除 Rest），
+  也就是汇总块 chips 渲染的那份数据。
+
+这个差别不是装饰性的：在 NYC W7D4 那次渐进跑上，腕表把 Hold Back Easy 段
+算成 10.0 mi · 10:42，模型算出来是 9.4 mi · 11:11。
 
 ### 3.2 Authentication
 

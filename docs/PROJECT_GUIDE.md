@@ -119,13 +119,48 @@ fetching. Tailwind. iPhone-first layout.
 | Tab | Route | What's there |
 |---|---|---|
 | Health | `/` | Today's check-in card, context-events card, readiness, recovery/sleep charts |
-| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`) with map / telemetry / laps + "Ask AI about this run" |
+| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable) |
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
 | Setup | `/setup` | Garmin / Google sign-in, sync controls |
 
+**Run detail page (`/activity/[id]`) — three blocks (#113):**
+
+1. **Map** — outdoor only. Treadmill runs have no GPS, so there is no
+   block at all (rather than an empty placeholder).
+2. **`RunSummaryBlock`** — the one shared module for both run types:
+   headline **Distance / Avg pace / Time** → per-effort **chips** →
+   per-lap **effort bars** (bar color = the labeled effort, HR on the
+   right, Rest laps as thin gray sticks). Bar width ∝ speed, but
+   min-max **amplified into 40–100%** across the non-Rest rows — raw
+   ratios make near-equal laps indistinguishable. Fed by GPS
+   outdoors and by the treadmill model indoors — same component, same
+   visual grammar, different coordinate system. Replaced the old
+   `LapTable` + `TreadmillEstimateCard` (both deleted).
+3. **`TelemetryDrawer`** — the full telemetry line charts, complete but
+   folded away by default so the page opens on the summary.
+
+Effort labels have **one shared visual vocabulary** in
+`lib/effort-colors.ts` (warm scale, light→dark with intensity, matching
+the coach's zone ordering). Chips, lap bars, and the paint editor's
+brushes all read from it, so a given perceived effort looks identical
+everywhere. Unknown/legacy free-form labels fall back to a neutral tone
+instead of crashing the lookup.
+
+**Effort labeling — `EffortPaintEditor` (#113).** Lap labels are the
+user's *perceived* effort, and they're the input the treadmill model
+trains on, so entering them has to be cheap. The editor is paint-style:
+pick a brush (one chip per effort label), then **tap a row** to paint
+it, or **press-and-hold 350 ms then drag** to sweep a range. The rows
+are the same bars as the summary block, and the brush palette sits
+*below* the list — in thumb reach on a phone. Two bulk shortcuts:
+**Paint all** and **Prefill from HR** (seeds a first guess from
+`GET /api/runs/{id}/suggest-labels`, see §3.1). Nothing persists until
+the user saves. Replaced the previous per-lap checkbox + dropdown form.
+
 **Key client modules (`web/lib/`):**
 - `api.ts` — `apiGet/Post/Put/Delete` + `streamSSE` (the SSE frame parser for streaming chat)
+- `effort-colors.ts` — the shared effort color scale + label ordering/abbreviations
 - `hooks/use-coach-session.ts` — localStorage-backed current `thread_id`
 - `coach-errors.ts` — classify provider rate-limit / proxy timeouts → friendly Chinese messages + retry hints
 - `todays-read.ts` — per-day cache for the "Today's Read" sentence
@@ -195,6 +230,16 @@ shapes.
   hrv, stress, run_miles) — feeds HRV/sleep/volume models.
 - `compute_route_profile(activity_id)` — grade-band distribution +
   climb/loss from telemetry (P5).
+- `suggest_lap_categories(activity_id)` — first-guess effort labels for
+  the paint editor's prefill button: micro laps (<30 s or <0.05 mi —
+  autolap blips) and walking laps (cadence <140 spm) become **Rest**,
+  everything else takes the user's own HR-zone `rpe_label` for its avg
+  HR. Deliberately the *simple* rule — HR lags on short reps and drifts
+  in heat, so the user corrects from here; the button only has to make
+  the common case (steady runs) one tap. Served by
+  `GET /api/runs/{id}/suggest-labels`; suggestions only, nothing is
+  persisted until save. **These stay perceived-effort labels — the
+  suggestion is a typing shortcut, not a claim that HR *is* the label.**
 - CRUD for: check-ins, planned workouts, training blocks, manual
   activities, user HR zones.
 - **Rule:** all shaping/aggregation lives here; the dashboard/UI only
@@ -212,9 +257,24 @@ thin, refuses below 120 laps → HTTP 503). Fit is cached at
 `run_*_meta.json` changes or a day rolls over. Prediction integrates
 speed over the HR+cadence telemetry curves at 1% incline / 78 °F
 assumptions; cadence <140 spm counts as time-not-distance. Served by
-`GET /api/runs/{id}/treadmill-estimate`; rendered by
-`TreadmillEstimateCard` on the run detail page (replaces the map slot
-for treadmill/indoor runs).
+`GET /api/runs/{id}/treadmill-estimate`; rendered by `RunSummaryBlock`
+on the run detail page.
+
+**Garmin laps re-priced in model coordinates (#113).** A treadmill lap
+boundary is an honest *time* marker — the user pressed the button, and
+their effort label attaches to that lap — but the lap's *distance* is a
+wrist guess. So `predict_run` returns, alongside the run total:
+
+- `estimate.laps` — one row per Garmin lap, with model-integrated
+  distance/pace, duration-weighted HR, and the lap's effort category.
+  Rows match `lap_categories` 1:1, so labels never drift off their laps,
+  while every number shown is the model's rather than the watch's.
+- `estimate.category_stats_model` — per-effort aggregates in model
+  coordinates (Rest excluded), which is what the summary chips render.
+
+The difference is not cosmetic: on the NYC W7D4 progression run the
+watch priced the Hold Back Easy block at 10.0 mi · 10:42, the model at
+9.4 mi · 11:11.
 
 ### 3.2 Authentication
 
