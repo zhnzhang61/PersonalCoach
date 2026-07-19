@@ -3,11 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "@/lib/api";
-import {
-  EFFORT_SHORT,
-  REST_COLOR,
-  effortColor,
-} from "@/lib/effort-colors";
+import { REST_COLOR, effortColor } from "@/lib/effort-colors";
 import {
   EFFORT_CATEGORIES,
   type Lap,
@@ -174,7 +170,7 @@ export function EffortPaintEditor({
       </div>
       <div
         ref={listRef}
-        className="space-y-1"
+        className="space-y-0"
         onPointerMove={onPointerMove}
         onPointerLeave={endSweep}
       >
@@ -187,7 +183,7 @@ export function EffortPaintEditor({
               data-lap-idx={r.idx}
               onPointerDown={() => onPointerDown(r.idx)}
               onClick={() => onRowClick(r.idx)}
-              className={`grid cursor-pointer select-none grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2 rounded py-0.5 ${
+              className={`grid cursor-pointer select-none grid-cols-[2.5rem_3.25rem_1fr_2.5rem] items-center gap-x-2 rounded py-2.5 ${
                 sweepUi ? "bg-muted/30" : "hover:bg-muted/30"
               }`}
               title={`lap ${r.idx + 1} → ${brush}`}
@@ -207,7 +203,7 @@ export function EffortPaintEditor({
                 />
               ) : (
                 <div
-                  className="h-3 rounded-full"
+                  className="h-3.5 rounded-full"
                   style={{
                     width: `${widthPct(r.paceS)}%`,
                     backgroundColor: effortColor(cat),
@@ -236,18 +232,18 @@ export function EffortPaintEditor({
                 aria-label={`Brush: ${c}`}
                 aria-pressed={active}
                 title={c}
-                className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] transition-transform ${
+                className={`flex items-center gap-1.5 rounded-md px-3 py-2 text-xs transition-transform ${
                   active
-                    ? "scale-110 ring-2 ring-foreground/60 ring-offset-1 ring-offset-background"
+                    ? "scale-105 ring-2 ring-foreground/60 ring-offset-1 ring-offset-background"
                     : "opacity-80 hover:opacity-100"
                 }`}
                 style={{ backgroundColor: `${color}33` }}
               >
                 <span
-                  className="size-4 rounded"
+                  className="size-4 shrink-0 rounded"
                   style={{ backgroundColor: color }}
                 />
-                {EFFORT_SHORT[c] ?? c}
+                {c}
               </button>
             );
           })}
@@ -258,7 +254,7 @@ export function EffortPaintEditor({
             onClick={() => onSetAll(laps.map(() => brush))}
             className="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted/40"
           >
-            Paint all: {EFFORT_SHORT[brush] ?? brush}
+            Paint all: {brush}
           </button>
           <button
             type="button"
