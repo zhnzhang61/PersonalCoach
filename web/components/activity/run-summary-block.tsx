@@ -176,13 +176,7 @@ export function RunSummaryBlock({
   ].filter((c) => c !== "Rest");
 
   return (
-    <div
-      className={
-        treadmill
-          ? "rounded-md border border-warm-accent/40 bg-warm-bg/40 p-4"
-          : "rounded-md border border-border p-4"
-      }
-    >
+    <div className="rounded-md border border-border p-4">
       {treadmill && (
         <div className="mb-3 flex items-center gap-2">
           <Footprints className="size-4 text-muted-foreground" aria-hidden />
