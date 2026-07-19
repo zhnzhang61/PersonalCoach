@@ -350,6 +350,15 @@ export interface TreadmillSplit {
   partial_mi?: number; // present only on a trailing partial mile
 }
 
+export interface TreadmillLapView {
+  lap: number;
+  category: string | null;
+  model_distance_mi: number;
+  pace_s: number | null;
+  pace_str: string | null;
+  avg_hr: number | null;
+}
+
 export interface TreadmillEstimate {
   activity_id: number;
   estimate: {
@@ -360,6 +369,8 @@ export interface TreadmillEstimate {
     avg_pace_s_per_mi: number;
     avg_pace_str: string; // "11:18"
     splits: TreadmillSplit[];
+    laps: TreadmillLapView[];
+    category_stats_model: RunCategoryStat[];
   };
   model: {
     n_laps: number;

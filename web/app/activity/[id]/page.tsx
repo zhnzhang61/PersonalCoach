@@ -6,7 +6,6 @@ import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Pencil, X } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate } from "@/lib/format";
 import type {
@@ -16,11 +15,11 @@ import type {
 } from "@/lib/types";
 import { AskAiButton } from "@/components/activity/ask-ai-button";
 import { EditRunForm } from "@/components/activity/edit-run-form";
-import { LapTable } from "@/components/activity/lap-table";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
-import { TreadmillEstimateCard } from "@/components/activity/treadmill-estimate-card";
-
-const TREADMILL_TYPE_KEYS = new Set(["treadmill_running", "indoor_running"]);
+import {
+  RunSummaryBlock,
+  isTreadmillRun,
+} from "@/components/activity/run-summary-block";
 
 const RunMap = dynamic(
   () => import("@/components/activity/run-map").then((m) => m.RunMap),
@@ -97,7 +96,6 @@ export default function ActivityDetailPage({
   const dateStr = run.startTimeLocal?.slice(0, 10);
   const distMi = metersToMi(run.distance);
   const elevFt = Math.round((run.elevationGain ?? 0) * 3.281);
-  const breakdown = meta.category_stats ?? [];
   const w = weatherQuery.data;
   const showFeels =
     w?.apparent_temperature_f != null &&
@@ -155,19 +153,8 @@ export default function ActivityDetailPage({
           {distMi.toFixed(2)} mi
           {elevFt > 0 ? ` · ↑ ${elevFt.toLocaleString()} ft` : ""}
         </p>
-        {breakdown.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {breakdown.map((c) => (
-              <Badge
-                key={c.category}
-                variant="outline"
-                className="text-xs font-normal"
-              >
-                {c.category} · {c.distance_mi.toFixed(1)}mi · {c.pace}
-              </Badge>
-            ))}
-          </div>
-        ) : null}
+        {/* Per-effort chips moved into RunSummaryBlock (between the
+            headline stats and the lap bars) — header stays lean. */}
       </div>
 
       {editing && (
@@ -191,14 +178,39 @@ export default function ActivityDetailPage({
       </div>
 
       <div className="mt-6 space-y-4">
-        {TREADMILL_TYPE_KEYS.has(run.activityType?.typeKey ?? "") ? (
-          <TreadmillEstimateCard activityId={activityId} />
-        ) : (
-          <RunMap activityId={activityId} />
-        )}
-        <TelemetryCharts activityId={activityId} />
-        <LapTable activityId={activityId} />
+        {/* Block 1: map for outdoor runs; treadmill runs have no GPS, so
+            no block at all. Block 2 (RunSummaryBlock) is the one shared
+            module: headline stats + effort chips + per-lap effort bars —
+            GPS-fed outdoors, model-fed on the treadmill. The telemetry
+            line charts stay complete but fold away by default. */}
+        {!isTreadmillRun(run) && <RunMap activityId={activityId} />}
+        <RunSummaryBlock run={run} activityId={activityId} />
+        <TelemetryDrawer activityId={activityId} />
       </div>
+    </div>
+  );
+}
+
+// Full telemetry line charts, folded by default — detailed but rarely
+// visited; the fold keeps the page focused on the summary block.
+function TelemetryDrawer({ activityId }: { activityId: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-3 text-sm text-muted-foreground hover:text-foreground"
+        aria-expanded={open}
+      >
+        <span>Detailed telemetry</span>
+        <span aria-hidden>{open ? "\u25be" : "\u25b8"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-border p-3">
+          <TelemetryCharts activityId={activityId} />
+        </div>
+      )}
     </div>
   );
 }
