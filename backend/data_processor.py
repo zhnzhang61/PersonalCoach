@@ -1983,6 +1983,120 @@ class DataProcessor:
         }
         return out
 
+    def compute_resp_hr_relation(self, activity_id) -> dict | None:
+        """Resp-vs-HR relationship for one run (PR #114): paired samples
+        colored by the user's effort label, plus a continuous two-segment
+        (hinge) fit whose knee is the run's apparent ventilatory
+        threshold. The user has felt that resp doesn't track HR linearly;
+        this makes the bend — and the HR it happens at — visible.
+
+        Fit: resp = a + s1·hr + s2·max(0, hr − b), b grid-searched over
+        the middle of the HR range, least squares per candidate. The
+        breakpoint is only reported when it means something: enough HR
+        range to have two regimes (≥25 bpm), and a slope change that
+        isn't noise (s2 ≥ 0.02 br/min per bpm, i.e. the post-knee slope
+        gains ≥0.2 br/min per 10 bpm — a real VT shows ~+0.4). Otherwise
+        breakpoint is None and the relation is served as a single trend.
+
+        Returns None when the run has no telemetry or no respiration
+        samples (older watches). Numeric + preformatted side by side —
+        the same payload feeds the chart and the agent.
+        """
+        laps = self.get_run_laps(activity_id)
+        df_raw, _ = self.get_activity_telemetry(activity_id, laps=laps)
+        if df_raw is None or len(df_raw) == 0:
+            return None
+        df = df_raw[["Second", "HeartRate", "RespirationRate"]].copy()
+        if df["RespirationRate"].dropna().empty or df["HeartRate"].dropna().empty:
+            return None
+        # Running samples only — standing around and walk breaks pair an
+        # at-rest HR with still-elevated breathing and drag the low-HR
+        # slope negative. Same cadence rule as the treadmill model's
+        # walk bucket. Runs without cadence keep everything.
+        if "Cadence" in df_raw.columns and df_raw["Cadence"].notna().any():
+            df = df[df_raw["Cadence"].fillna(0) >= 140]
+            if len(df) == 0:
+                return None
+
+        # 30s smoothing on both series (breathing is reported in coarse
+        # steps; raw pairs are a staircase), then one pair per 15s so the
+        # scatter stays a few hundred points.
+        idx = pd.to_timedelta(df["Second"], unit="s")
+        hr_s = df["HeartRate"].astype(float).set_axis(idx).rolling("30s", min_periods=1).mean().to_numpy()
+        resp_s = df["RespirationRate"].astype(float).set_axis(idx).rolling("30s", min_periods=1).mean().to_numpy()
+        secs_all = df["Second"].to_numpy(dtype=float)
+        ok = ~(np.isnan(hr_s) | np.isnan(resp_s))
+        secs_all, hr_s, resp_s = secs_all[ok], hr_s[ok], resp_s[ok]
+        if len(secs_all) == 0:
+            return None
+        # One pair per ≥15s of elapsed time.
+        kept: list[int] = []
+        last = -1e9
+        for i, s in enumerate(secs_all):
+            if s - last >= 15:
+                kept.append(i)
+                last = s
+        seconds, hr, resp = secs_all[kept], hr_s[kept], resp_s[kept]
+        if len(hr) < 30:
+            return None
+
+        # Label each pair with the effort block it fell in (chart colors
+        # the dots with the shared effort scale; unlabeled → None).
+        from backend.run_verdicts import segments_from_laps
+        meta = self.load_json_safe(self.paths['manual'], f"run_{activity_id}_meta.json") or {}
+        blocks = segments_from_laps(laps, meta.get("lap_categories") or [])
+
+        def label_at(sec: float) -> str | None:
+            for b in blocks:
+                if b["start_sec"] <= sec < b["end_sec"]:
+                    return b["label"]
+            return None
+
+        points = [
+            {"hr": round(float(h), 1), "resp": round(float(r), 1),
+             "category": label_at(float(s))}
+            for s, h, r in zip(seconds, hr, resp)
+        ]
+
+        hr_lo, hr_hi = float(hr.min()), float(hr.max())
+        fit: dict | None = None
+        if hr_hi - hr_lo >= 25:
+            best = None
+            for b in np.arange(np.percentile(hr, 20), np.percentile(hr, 85), 1.0):
+                hinge = np.maximum(0.0, hr - b)
+                design = np.column_stack([np.ones_like(hr), hr, hinge])
+                coef, residual, _, _ = np.linalg.lstsq(design, resp, rcond=None)
+                sse = float(residual[0]) if len(residual) else float(
+                    ((design @ coef - resp) ** 2).sum()
+                )
+                if best is None or sse < best[0]:
+                    best = (sse, float(b), coef)
+            if best is not None:
+                _, b, (a, s1, s2) = best
+                if s2 >= 0.02:
+                    fit = {
+                        "breakpoint_hr": round(b),
+                        "slope_low_per_10bpm": round(10 * s1, 1),
+                        "slope_high_per_10bpm": round(10 * (s1 + s2), 1),
+                        "intercept": round(float(a), 1),
+                        "summary": (
+                            f"{round(b)} bpm 以下每 +10 bpm ≈ "
+                            f"{round(10 * s1, 1):+g} br/min；以上 ≈ "
+                            f"{round(10 * (s1 + s2), 1):+g} — 拐点≈通气阈"
+                        ),
+                    }
+
+        return {
+            "activity_id": activity_id,
+            "points": points,
+            "hr_range": [round(hr_lo), round(hr_hi)],
+            "fit": fit,
+            "no_fit_reason": None if fit else (
+                "HR 跨度不足，无法分辨两段斜率" if hr_hi - hr_lo < 25
+                else "斜率变化太小，本次接近线性"
+            ),
+        }
+
     def get_run_chat_history(self, activity_id):
         return self.load_json_safe(self.paths['manual'], f"run_{activity_id}_chat.json") or []
 

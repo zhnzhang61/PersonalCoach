@@ -4,11 +4,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Area,
-  AreaChart,
   Brush,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
+  ReferenceArea,
   ReferenceLine,
   XAxis,
   YAxis,
@@ -21,11 +21,14 @@ import {
 } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
+import { effortColor, EFFORT_SHORT, REST_COLOR } from "@/lib/effort-colors";
+import { RespHrScatter } from "@/components/activity/resp-hr-scatter";
 import type {
   MetricSummary,
   TelemetryResponse,
   TelemetryRow,
   TelemetrySummaryKey,
+  VerdictAnchor,
 } from "@/lib/types";
 
 interface MetricSpec {
@@ -33,7 +36,6 @@ interface MetricSpec {
   label: string;
   color: string;
   invertY?: boolean;            // pace: lower = faster, so invert
-  area?: boolean;               // elevation rendered as area for terrain feel
   yDomain?: [number, number];   // hard Y bounds (e.g., pace [4,14] to clip stoplight spikes visually)
   formatSubtitle: (s: MetricSummary) => string;
 }
@@ -47,6 +49,8 @@ const fmtPace = (decMinPerMi: number): string => {
 
 // Tab specs. Subtitle formatting and Y-axis presentation rules live here;
 // avg / min / max come from the server (data_processor.compute_telemetry_summary).
+// Elevation has no tab — it rides under every chart as the always-on
+// silhouette instead (its job is attribution context, not solo study).
 const METRICS_BASE: MetricSpec[] = [
   {
     key: "HeartRate",
@@ -63,10 +67,10 @@ const METRICS_BASE: MetricSpec[] = [
     formatSubtitle: (s) => `avg ${fmtPace(s.avg)} /mi`,
   },
   {
-    key: "StrideLength",
-    label: "Stride",
-    color: "var(--chart-3)",
-    formatSubtitle: (s) => `avg ${Math.round(s.avg)} cm`,
+    key: "Cadence",
+    label: "Cadence",
+    color: "var(--chart-4)",
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} spm`,
   },
   {
     key: "GroundContactBalanceLeft",
@@ -76,24 +80,16 @@ const METRICS_BASE: MetricSpec[] = [
       `L ${s.avg.toFixed(1)}% / R ${(100 - s.avg).toFixed(1)}%`,
   },
   {
-    key: "Cadence",
-    label: "Cadence",
-    color: "var(--chart-4)",
-    formatSubtitle: (s) => `avg ${Math.round(s.avg)} spm`,
-  },
-  {
     key: "RespirationRate",
     label: "Resp",
     color: "var(--chart-5)",
     formatSubtitle: (s) => `avg ${Math.round(s.avg)} br/min`,
   },
   {
-    key: "Elevation",
-    label: "Elev",
-    color: "var(--chart-1)",
-    area: true,
-    formatSubtitle: (s) =>
-      `avg ${Math.round(s.avg)} m · gain ${Math.round(s.max - s.min)} m`,
+    key: "StrideLength",
+    label: "Stride",
+    color: "var(--chart-3)",
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} cm`,
   },
 ];
 
@@ -103,6 +99,168 @@ function downsampleEvery(rows: TelemetryRow[], step: number): TelemetryRow[] {
 }
 
 type XMode = "time" | "distance";
+
+// ---- Chart decorations (PR #114) -----------------------------------------
+// Effort-label washes + lap ticks + verdict receipt bands, all in the
+// run's own time coordinates. Lap boundaries live on the cumulative
+// lap-duration clock — the same clock the backend cuts verdict anchors
+// on, so receipts land exactly where the verdict measured.
+
+interface LapDuration {
+  duration: number;
+}
+
+interface EffortBlock {
+  label: string | null;
+  start_sec: number;
+  end_sec: number;
+}
+
+function effortBlocks(
+  laps: LapDuration[],
+  categories: string[],
+): EffortBlock[] {
+  const blocks: EffortBlock[] = [];
+  let cursor = 0;
+  laps.forEach((lap, i) => {
+    const label = categories[i] ?? null;
+    const end = cursor + (lap.duration ?? 0);
+    const last = blocks[blocks.length - 1];
+    if (last && last.label === label) {
+      last.end_sec = end;
+    } else {
+      blocks.push({ label, start_sec: cursor, end_sec: end });
+    }
+    cursor = end;
+  });
+  return blocks;
+}
+
+// In distance mode the x-axis is cumulative miles, but blocks/anchors
+// are in seconds — interpolate through the telemetry rows.
+function makeSecToX(
+  xMode: XMode,
+  rows: TelemetryRow[],
+): (sec: number) => number | null {
+  if (xMode === "time") return (sec) => sec;
+  const pts = rows
+    .filter(
+      (r) => typeof r.Distance === "number" && Number.isFinite(r.Distance),
+    )
+    .map((r) => [r.Second, r.Distance as number] as const);
+  if (pts.length === 0) return () => null;
+  return (sec) => {
+    if (sec <= pts[0][0]) return pts[0][1];
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i][0] >= sec) {
+        const [s0, d0] = pts[i - 1];
+        const [s1, d1] = pts[i];
+        return s1 === s0 ? d0 : d0 + ((d1 - d0) * (sec - s0)) / (s1 - s0);
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+}
+
+const RECEIPT_COLOR = "#EF9F27";
+
+interface Decorations {
+  blocks: EffortBlock[];
+  lapBoundaries: number[];
+  receipts: VerdictAnchor[];
+  highlight: VerdictAnchor | null;
+}
+
+// Wash + rail in one custom ReferenceArea shape: the pale full-height
+// wash, plus a full-saturation 6px rail at the top of the plot —
+// adjacent effort tints are indistinguishable at wash opacity; the
+// rail is what actually identifies the block (mockup-verified). A
+// custom shape gets the computed pixel rect, so no phantom [0,1] axis
+// is needed (recharts drops ReferenceAreas bound to an axis that has
+// no series).
+function washWithRail(fill: string) {
+  return function WashWithRail(p: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  }) {
+    const { x = 0, y = 0, width = 0, height = 0 } = p;
+    return (
+      <g>
+        <rect x={x} y={y} width={width} height={height} fill={fill} fillOpacity={0.14} />
+        <rect x={x} y={y} width={width} height={6} fill={fill} fillOpacity={1} />
+      </g>
+    );
+  };
+}
+
+// Returns recharts elements — must be spread directly into a chart's
+// children (recharts dispatches on child type, so a wrapper component
+// would be invisible to it).
+function renderDecorations(
+  dec: Decorations | null,
+  secToX: (sec: number) => number | null,
+  yAxisId?: string,
+) {
+  if (!dec) return [];
+  const axisProps = yAxisId ? { yAxisId } : {};
+  const out = [];
+  for (const b of dec.blocks) {
+    if (!b.label) continue;
+    const x1 = secToX(b.start_sec);
+    const x2 = secToX(b.end_sec);
+    if (x1 == null || x2 == null) continue;
+    const color = b.label === "Rest" ? REST_COLOR : effortColor(b.label);
+    out.push(
+      <ReferenceArea
+        key={`wash-${b.start_sec}`}
+        {...axisProps}
+        x1={x1}
+        x2={x2}
+        fill={color}
+        stroke="none"
+        shape={washWithRail(color)}
+      />,
+    );
+  }
+  for (const sec of dec.lapBoundaries) {
+    const x = secToX(sec);
+    if (x == null) continue;
+    out.push(
+      <ReferenceLine
+        key={`lap-${sec}`}
+        {...axisProps}
+        x={x}
+        stroke="var(--muted-foreground)"
+        strokeOpacity={0.25}
+        strokeDasharray="2 6"
+      />,
+    );
+  }
+  for (const r of dec.receipts) {
+    const x1 = secToX(r.start_sec);
+    const x2 = secToX(r.end_sec);
+    if (x1 == null || x2 == null) continue;
+    const active =
+      dec.highlight != null &&
+      dec.highlight.start_sec === r.start_sec &&
+      dec.highlight.end_sec === r.end_sec;
+    out.push(
+      <ReferenceArea
+        key={`receipt-${r.start_sec}`}
+        {...axisProps}
+        x1={x1}
+        x2={x2}
+        fill={RECEIPT_COLOR}
+        fillOpacity={active ? 0.32 : 0.16}
+        stroke={active ? RECEIPT_COLOR : "none"}
+        strokeOpacity={0.8}
+      />,
+    );
+  }
+  return out;
+}
 
 // Stable, locale-free time format. Always colon-delimited so labels can't
 // be confused with distance ("75m" used to read as 75 metres).
@@ -137,18 +295,36 @@ const xTickFor = (mode: XMode) =>
 
 interface ChartPaneProps {
   rows: TelemetryRow[];
-  // 1 spec → single-axis chart (area allowed for elevation).
-  // 2 specs → dual-axis line chart; first goes on the left, second on the right.
+  // 1 spec → single-axis chart; 2 specs → dual-axis, first on the
+  // left, second on the right.
   specs: MetricSpec[];
   // x-axis mode: "time" plots seconds, "distance" plots cumulative miles.
   xMode: XMode;
+  // Effort washes / lap ticks / verdict receipts (PR #114).
+  decorations?: Decorations | null;
 }
 
-function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
+function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   const xKey = xKeyFor(xMode);
   const xTickFormatter = xTickFor(xMode);
+  const secToX = makeSecToX(xMode, rows);
   const primary = specs[0];
   const secondary = specs[1] ?? null;
+
+  // Always-on elevation silhouette: terrain rides at the bottom of
+  // every chart as attribution context (a HR bump sitting on a hill
+  // explains itself). Squashed into the bottom quarter via its own
+  // hidden axis. Elevation has no tab of its own — this IS its render.
+  const elevVals = rows
+    .map((r) => r.Elevation)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const showElevSilhouette = elevVals.length > 1;
+  const elevMin = showElevSilhouette ? Math.min(...elevVals) : 0;
+  const elevMax = showElevSilhouette ? Math.max(...elevVals) : 1;
+  const elevDomain: [number, number] = [
+    elevMin,
+    elevMin + Math.max(elevMax - elevMin, 1) * 4,
+  ];
   const config: ChartConfig = {
     [primary.key]: { label: primary.label, color: primary.color },
   };
@@ -166,67 +342,37 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
   }
 
   const yTickFormatter = (s: MetricSpec) => (v: number) =>
-    `${Math.round(v)}${s.key === "GroundContactBalanceLeft" ? "%" : ""}`;
+    s.key === "GroundContactBalanceLeft"
+      ? `${Number.isInteger(v) ? v : v.toFixed(1)}%`
+      : `${Math.round(v)}`;
 
-  // Single-spec mode keeps the elevation area shading. Dual-spec collapses
-  // to a flat dual-axis line chart — overlaying area fills with another
-  // line gets visually noisy.
-  if (!secondary && primary.area) {
-    const yDomain: [number | string, number | string] = primary.yDomain ?? ["auto", "auto"];
-    return (
-      <ChartContainer config={config} className="h-56 w-full">
-        <AreaChart data={rows}>
-          <CartesianGrid vertical={false} strokeDasharray="3 3" />
-          <XAxis
-            dataKey={xKey}
-            tickLine={false}
-            axisLine={false}
-            tickMargin={6}
-            fontSize={10}
-            tickFormatter={xTickFormatter}
-            type="number"
-            domain={["dataMin", "dataMax"]}
-          />
-          <YAxis
-            tickLine={false}
-            axisLine={false}
-            tickMargin={6}
-            fontSize={10}
-            domain={yDomain}
-            tickFormatter={yTickFormatter(primary)}
-          />
-          <ChartTooltip
-            content={
-              <ChartTooltipContent
-                labelFormatter={(_v, payload) =>
-                  xTickFormatter(payload?.[0]?.payload?.[xKey])
-                }
-              />
-            }
-          />
-          <Area
-            type="monotone"
-            dataKey={primary.key}
-            stroke={primary.color}
-            fill={primary.color}
-            fillOpacity={0.18}
-            strokeWidth={1.5}
-            isAnimationActive={false}
-          />
-          <Brush
-            dataKey={xKey}
-            height={20}
-            stroke="var(--muted-foreground)"
-            travellerWidth={8}
-            tickFormatter={xTickFormatter}
-          />
-        </AreaChart>
-      </ChartContainer>
-    );
-  }
+  // L/R renders centered on 50% with a symmetric domain sized to the
+  // run's p99 deviation — the 49–51 comfort band and the distance the
+  // line escapes it are the story, not the absolute value. (The user
+  // has a chronic imbalance and reads this chart specifically.) p99
+  // rather than max so a single-sample sensor glitch can't zoom the
+  // axis out and flatten the band; the glitch itself gets clipped via
+  // allowDataOverflow on the axis.
+  const lrDevs = rows
+    .map((r) => r.GroundContactBalanceLeft)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .map((v) => Math.abs(v - 50))
+    .sort((a, b) => a - b);
+  const lrP99 = lrDevs.length
+    ? lrDevs[Math.floor(0.99 * (lrDevs.length - 1))]
+    : 0;
+  const lrSpan = Math.max(1.5, lrP99 + 0.3);
+  const lrDomain: [number, number] = [50 - lrSpan, 50 + lrSpan];
+  const domainFor = (
+    s: MetricSpec,
+  ): [number | string, number | string] =>
+    s.key === "GroundContactBalanceLeft"
+      ? lrDomain
+      : (s.yDomain ?? ["auto", "auto"]);
 
   const renderAxis = (s: MetricSpec, side: "left" | "right") => {
-    const domain: [number | string, number | string] = s.yDomain ?? ["auto", "auto"];
+    const domain = domainFor(s);
+    const isLR = s.key === "GroundContactBalanceLeft";
     return (
       <YAxis
         key={side}
@@ -236,8 +382,12 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
         axisLine={false}
         tickMargin={6}
         fontSize={10}
+        width={34}
         domain={domain}
-        allowDataOverflow={!!s.yDomain}
+        // Band edges + center only — auto ticks on a fractional
+        // domain produce noise like "46.1%".
+        ticks={isLR ? [49, 50, 51] : undefined}
+        allowDataOverflow={!!s.yDomain || isLR}
         reversed={!!s.invertY}
         tickFormatter={yTickFormatter(s)}
         // Tick text in the metric's color so users can read which axis is which.
@@ -248,7 +398,7 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
 
   return (
     <ChartContainer config={config} className="h-56 w-full">
-      <LineChart data={rows}>
+      <ComposedChart data={rows}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis
           dataKey={xKey}
@@ -262,6 +412,22 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
         />
         {renderAxis(primary, "left")}
         {secondary && renderAxis(secondary, "right")}
+        {showElevSilhouette && (
+          <YAxis yAxisId="elev" hide domain={elevDomain} />
+        )}
+        {renderDecorations(decorations, secToX, "left")}
+        {showElevSilhouette && (
+          <Area
+            yAxisId="elev"
+            type="monotone"
+            dataKey="Elevation"
+            stroke="none"
+            fill="var(--muted-foreground)"
+            fillOpacity={0.16}
+            isAnimationActive={false}
+            connectNulls
+          />
+        )}
         <ChartTooltip
           content={
             <ChartTooltipContent
@@ -271,24 +437,44 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
             />
           }
         />
-        {primary.key === "GroundContactBalanceLeft" && (
+        {primary.key === "GroundContactBalanceLeft" && [
+          <ReferenceArea
+            key="lr-band"
+            yAxisId="left"
+            y1={49}
+            y2={51}
+            fill="var(--muted-foreground)"
+            fillOpacity={0.08}
+            stroke="none"
+          />,
           <ReferenceLine
+            key="lr-50"
             yAxisId="left"
             y={50}
             stroke="var(--muted-foreground)"
             strokeDasharray="3 3"
             strokeOpacity={0.5}
-          />
-        )}
-        {secondary?.key === "GroundContactBalanceLeft" && (
+          />,
+        ]}
+        {secondary?.key === "GroundContactBalanceLeft" && [
+          <ReferenceArea
+            key="lr-band-r"
+            yAxisId="right"
+            y1={49}
+            y2={51}
+            fill="var(--muted-foreground)"
+            fillOpacity={0.08}
+            stroke="none"
+          />,
           <ReferenceLine
+            key="lr-50-r"
             yAxisId="right"
             y={50}
             stroke="var(--muted-foreground)"
             strokeDasharray="3 3"
             strokeOpacity={0.5}
-          />
-        )}
+          />,
+        ]}
         <Line
           yAxisId="left"
           type="monotone"
@@ -318,12 +504,38 @@ function ChartPane({ rows, specs, xMode }: ChartPaneProps) {
           travellerWidth={8}
           tickFormatter={xTickFormatter}
         />
-      </LineChart>
+      </ComposedChart>
     </ChartContainer>
   );
 }
 
-export function TelemetryCharts({ activityId }: { activityId: number }) {
+export function TelemetryCharts({
+  activityId,
+  laps,
+  categories,
+  receipts,
+  highlight,
+  lrThirdsDetail,
+  treadmill = false,
+}: {
+  activityId: number;
+  // Garmin lap durations + the user's effort labels — drives the
+  // wash/tick decorations. Either missing → plain charts, no washes.
+  laps?: LapDuration[];
+  categories?: string[];
+  // Attention-verdict anchor windows (amber receipt bands); highlight
+  // is the one the user tapped in the verdict rows.
+  receipts?: VerdictAnchor[];
+  highlight?: VerdictAnchor | null;
+  // Preformatted thirds line from the lr_asymmetry verdict (e.g.
+  // "+1.2% 右 → +0.1% 右 → +0.4% 左") — shown as the L/R subtitle.
+  // Server-formatted per the no-shaping-in-dashboard rule.
+  lrThirdsDetail?: string | null;
+  // Treadmill runs plot the WATCH's pace curve, which is known-biased
+  // (~1 min/mi slow, user-confirmed). We keep the curve (its shape is
+  // still informative) but must say so whenever it's on screen.
+  treadmill?: boolean;
+}) {
   // Charts use 5s downsample server-side + every-2nd client-side → about 1
   // point per 10s. Plenty of detail, keeps recharts snappy on phone.
   const { data, isLoading, isError } = useQuery({
@@ -348,6 +560,9 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   // (treadmill, indoor) won't have distance, so we fall back to time below
   // even if the user previously picked distance.
   const [xMode, setXMode] = useState<XMode>("time");
+  // Resp offers a second lens: the curve over time, or the Resp×HR
+  // relationship scatter (knee ≈ ventilatory threshold).
+  const [respRelation, setRespRelation] = useState(false);
 
   const onTabClick = (key: TelemetrySummaryKey) => {
     setActive((prev) => {
@@ -409,7 +624,37 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
   // Defensive fallback if the saved selection no longer maps to a visible metric.
   const renderSpecs = activeSpecs.length > 0 ? activeSpecs : [metrics[0] ?? METRICS_BASE[0]];
 
+  const blocks =
+    laps && laps.length > 0 && categories && categories.length > 0
+      ? effortBlocks(laps, categories)
+      : [];
+  // Cumulative lap-duration boundaries; the run's end isn't one.
+  const lapBoundaries: number[] = [];
+  let cum = 0;
+  for (const l of laps ?? []) {
+    cum += l.duration ?? 0;
+    lapBoundaries.push(cum);
+  }
+  lapBoundaries.pop();
+  const decorations: Decorations | null =
+    blocks.length > 0 || (receipts?.length ?? 0) > 0
+      ? {
+          blocks,
+          lapBoundaries,
+          receipts: receipts ?? [],
+          highlight: highlight ?? null,
+        }
+      : null;
+
   const subtitleParts = renderSpecs.map((s) => {
+    // L/R gets the verdict's thirds line (fatigue trajectory) instead
+    // of a flat average — the average hides exactly what the user
+    // watches this metric for.
+    if (s.key === "GroundContactBalanceLeft" && lrThirdsDetail) {
+      return renderSpecs.length === 1
+        ? `前⅓→后⅓: ${lrThirdsDetail}`
+        : `${s.label}: ${lrThirdsDetail}`;
+    }
     const sum = data.summary[s.key];
     if (!sum) return null;
     return renderSpecs.length === 1
@@ -454,7 +699,31 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
         ) : (
           <span />
         )}
-        {distanceAvailable && (
+        {renderSpecs.some((s) => s.key === "RespirationRate") && (
+          <div
+            role="group"
+            aria-label="Resp view"
+            className="flex shrink-0 rounded-md border border-border bg-background p-0.5 text-[11px] font-medium"
+          >
+            {([false, true] as const).map((rel) => (
+              <button
+                key={String(rel)}
+                type="button"
+                onClick={() => setRespRelation(rel)}
+                className={
+                  "rounded px-2 py-0.5 transition-colors " +
+                  (respRelation === rel
+                    ? "bg-foreground text-background"
+                    : "text-muted-foreground hover:text-foreground")
+                }
+                aria-pressed={respRelation === rel}
+              >
+                {rel ? "关系" : "曲线"}
+              </button>
+            ))}
+          </div>
+        )}
+        {distanceAvailable && !respRelation && (
           <div
             role="group"
             aria-label="X-axis"
@@ -482,7 +751,45 @@ export function TelemetryCharts({ activityId }: { activityId: number }) {
           </div>
         )}
       </div>
-      <ChartPane rows={rows} specs={renderSpecs} xMode={effectiveXMode} />
+      {treadmill && !respRelation &&
+        renderSpecs.some((s) => s.key === "Pace") && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            腕表配速 — 跑步机上系统性偏慢约 1 min/mi，形状可信、数值不可信；
+            真实配速看上方汇总块的模型估算。
+          </p>
+        )}
+      {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
+        <RespHrScatter activityId={activityId} />
+      ) : (
+        <>
+          <ChartPane
+            rows={rows}
+            specs={renderSpecs}
+            xMode={effectiveXMode}
+            decorations={decorations}
+          />
+          {blocks.length > 0 && (
+            // Which color is which effort — the washes/rail alone
+            // don't identify adjacent tints of the warm scale.
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {[...new Set(blocks.map((b) => b.label))]
+                .filter((l): l is string => l != null)
+                .map((label) => (
+                  <span key={label} className="inline-flex items-center gap-1">
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{
+                        background:
+                          label === "Rest" ? REST_COLOR : effortColor(label),
+                      }}
+                    />
+                    {EFFORT_SHORT[label] ?? label}
+                  </span>
+                ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

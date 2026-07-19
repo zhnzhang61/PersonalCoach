@@ -119,13 +119,77 @@ fetching. Tailwind. iPhone-first layout.
 | Tab | Route | What's there |
 |---|---|---|
 | Health | `/` | Today's check-in card, context-events card, readiness, recovery/sleep charts |
-| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`) with map / telemetry / laps + "Ask AI about this run" |
+| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable) |
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
 | Setup | `/setup` | Garmin / Google sign-in, sync controls |
 
+**Run detail page (`/activity/[id]`) — three blocks (#113):**
+
+1. **Map** — outdoor only. Treadmill runs have no GPS, so there is no
+   block at all (rather than an empty placeholder).
+2. **`RunSummaryBlock`** — the one shared module for both run types:
+   headline **Distance / Avg pace / Time** → per-effort **chips** →
+   per-lap **effort bars** (bar color = the labeled effort, HR on the
+   right, Rest laps as thin gray sticks). Bar width ∝ speed, but
+   min-max **amplified into 40–100%** across the non-Rest rows — raw
+   ratios make near-equal laps indistinguishable. Fed by GPS
+   outdoors and by the treadmill model indoors — same component, same
+   visual grammar, different coordinate system. Replaced the old
+   `LapTable` + `TreadmillEstimateCard` (both deleted).
+3. **Verdict rows + `TelemetryDrawer`** (PR #114) — post-run judgment
+   sentences above the folded telemetry charts. The verdicts are a
+   conditional POOL, not a dashboard: each has a trigger gate, a run
+   only shows the ones it qualifies for, attention-first, normal ones
+   folded into one "其余 N 项正常" line. Tapping an anchored verdict
+   opens the drawer and highlights that window on the chart — the
+   sentence up top, its receipt below. The pool (all four are
+   questions the user actually asks; HR drift was rejected twice in
+   design — whole-run dies on structured runs + out-and-back terrain,
+   segment-level answers a question this positive-split runner never
+   asks): 标注 vs 客观 / Rest 段恢复 (HRR60 vs personal baseline) /
+   L/R 疲劳不对称 / Easy 纯度.
+
+   The charts themselves know what they're drawing now: effort-label
+   washes + a full-saturation 6px top rail (adjacent warm tints are
+   indistinguishable at wash opacity — the rail identifies the block)
+   + color→label legend, lap-boundary ticks, amber receipt bands on
+   attention anchors, and an always-on gray **elevation silhouette**
+   squashed into the bottom quarter (terrain as attribution context —
+   a HR bump sitting on a hill explains itself). Elevation has no tab
+   anymore; the silhouette is its render. Tabs: HR / Pace / Cadence /
+   L/R / Resp / Stride. On treadmill runs the Pace tab carries a
+   standing caveat (watch pace ≈1 min/mi slow; shape informative,
+   numbers not).
+
+   Two dedicated reads: **L/R** renders centered on 50% with a 49–51
+   comfort band, p99-sized domain (a one-sample glitch must not zoom
+   the axis), ticks pinned to 49/50/51, and the verdict's thirds line
+   as subtitle. **Resp** offers a "曲线 | 关系" toggle; 关系 is the
+   Resp×HR scatter (dot color = effort label) with the server's hinge
+   fit and a dashed knee marker ≈ ventilatory threshold.
+
+Effort labels have **one shared visual vocabulary** in
+`lib/effort-colors.ts` (warm scale, light→dark with intensity, matching
+the coach's zone ordering). Chips, lap bars, and the paint editor's
+brushes all read from it, so a given perceived effort looks identical
+everywhere. Unknown/legacy free-form labels fall back to a neutral tone
+instead of crashing the lookup.
+
+**Effort labeling — `EffortPaintEditor` (#113).** Lap labels are the
+user's *perceived* effort, and they're the input the treadmill model
+trains on, so entering them has to be cheap. The editor is paint-style:
+pick a brush (one chip per effort label), then **tap a row** to paint
+it, or **press-and-hold 350 ms then drag** to sweep a range. The rows
+are the same bars as the summary block, and the brush palette sits
+*below* the list — in thumb reach on a phone. Two bulk shortcuts:
+**Paint all** and **Prefill from HR** (seeds a first guess from
+`GET /api/runs/{id}/suggest-labels`, see §3.1). Nothing persists until
+the user saves. Replaced the previous per-lap checkbox + dropdown form.
+
 **Key client modules (`web/lib/`):**
 - `api.ts` — `apiGet/Post/Put/Delete` + `streamSSE` (the SSE frame parser for streaming chat)
+- `effort-colors.ts` — the shared effort color scale + label ordering/abbreviations
 - `hooks/use-coach-session.ts` — localStorage-backed current `thread_id`
 - `coach-errors.ts` — classify provider rate-limit / proxy timeouts → friendly Chinese messages + retry hints
 - `todays-read.ts` — per-day cache for the "Today's Read" sentence
@@ -195,6 +259,16 @@ shapes.
   hrv, stress, run_miles) — feeds HRV/sleep/volume models.
 - `compute_route_profile(activity_id)` — grade-band distribution +
   climb/loss from telemetry (P5).
+- `suggest_lap_categories(activity_id)` — first-guess effort labels for
+  the paint editor's prefill button: micro laps (<30 s or <0.05 mi —
+  autolap blips) and walking laps (cadence <140 spm) become **Rest**,
+  everything else takes the user's own HR-zone `rpe_label` for its avg
+  HR. Deliberately the *simple* rule — HR lags on short reps and drifts
+  in heat, so the user corrects from here; the button only has to make
+  the common case (steady runs) one tap. Served by
+  `GET /api/runs/{id}/suggest-labels`; suggestions only, nothing is
+  persisted until save. **These stay perceived-effort labels — the
+  suggestion is a typing shortcut, not a claim that HR *is* the label.**
 - CRUD for: check-ins, planned workouts, training blocks, manual
   activities, user HR zones.
 - **Rule:** all shaping/aggregation lives here; the dashboard/UI only
@@ -212,9 +286,48 @@ thin, refuses below 120 laps → HTTP 503). Fit is cached at
 `run_*_meta.json` changes or a day rolls over. Prediction integrates
 speed over the HR+cadence telemetry curves at 1% incline / 78 °F
 assumptions; cadence <140 spm counts as time-not-distance. Served by
-`GET /api/runs/{id}/treadmill-estimate`; rendered by
-`TreadmillEstimateCard` on the run detail page (replaces the map slot
-for treadmill/indoor runs).
+`GET /api/runs/{id}/treadmill-estimate`; rendered by `RunSummaryBlock`
+on the run detail page.
+
+**Garmin laps re-priced in model coordinates (#113).** A treadmill lap
+boundary is an honest *time* marker — the user pressed the button, and
+their effort label attaches to that lap — but the lap's *distance* is a
+wrist guess. So `predict_run` returns, alongside the run total:
+
+- `estimate.laps` — one row per Garmin lap, with model-integrated
+  distance/pace, duration-weighted HR, and the lap's effort category.
+  Rows match `lap_categories` 1:1, so labels never drift off their laps,
+  while every number shown is the model's rather than the watch's.
+- `estimate.category_stats_model` — per-effort aggregates in model
+  coordinates (Rest excluded), which is what the summary chips render.
+
+The difference is not cosmetic: on the NYC W7D4 progression run the
+watch priced the Hold Back Easy block at 10.0 mi · 10:42, the model at
+9.4 mi · 11:11.
+
+**`run_verdicts.py`** (PR #114) — the post-run verdict pool. Four
+conditional judgment sentences (标注 vs 客观 / Rest 段恢复 / L/R 疲劳
+不对称 / Easy 纯度), each with an explicit trigger gate; whatever
+doesn't fire is returned in `not_fired` with the reason, so UI and
+agent both distinguish "checked, fine" from "couldn't check". Served
+by `GET /api/runs/{id}/verdicts`. Numeric + preformatted side by side;
+anchors are `{start_sec, end_sec}` on the cumulative lap-duration
+clock so the frontend can highlight the exact window. Key internals:
+45 s smoothing for zone-mismatch (15 s for recovery — HRR60 needs
+sharpness), 105 s block-start amnesty (60 s HR settle + 45 s smoother
+memory), HRR60 start point = peak before the Rest boundary. The
+`hrr.rest_recovery_baseline` mean_std model (90-day window — interval
+days are sparse) joins `REFIT_REGISTRY`.
+
+**`compute_resp_hr_relation`** (data_processor, PR #114) — Resp×HR
+pairs (30 s smoothed, one per ≥15 s, running samples only per the
+cadence ≥140 rule; walk/stand samples pair at-rest HR with elevated
+breathing and drag the low slope negative) + a continuous hinge fit.
+The knee ≈ ventilatory threshold; only reported with ≥25 bpm HR span
+and slope gain ≥ +0.2 br/min per 10 bpm, otherwise `no_fit_reason`
+says which gate failed. Served by `GET /api/runs/{id}/resp-hr`.
+First real result: user's outdoor VT ≈ 154 bpm (+1.9 br/min per
+10 bpm below, +8.5 above); treadmill knee ≈ 146.
 
 ### 3.2 Authentication
 
@@ -1005,6 +1118,22 @@ Backend is now a `backend/` package (was a flat top-level dump);
   what happened. ~2–3 days.
 - **§8 goal feasibility** — projection + plan adjustment from completed
   work in the cycle. ~2–3 days.
+- **Agent consumption of the verdict pool** (follow-up to PR #114) —
+  `/api/runs/{id}/verdicts` and `/resp-hr` exist and are shaped for
+  the agent, but no MCP tool / prefetch consumes them yet. This is
+  precisely the §4.5 "tool exists but nothing consumes it" shape
+  (#84/#95/#96) — wire it deliberately in the next agent PR, don't
+  let it become the fifth instance. ~½ day.
+- **Speed-per-heartbeat race review** (agent-side, from PR #114
+  design) — for marathon post-mortems: per-segment EF (speed/HR)
+  trajectory distinguishes "downshifted, engine fine" from "cost per
+  mile rose" in the user's positive-split races. Deliberately NOT a
+  UI verdict (asked a few times a year, not per-run). ~1 day, lives
+  in the race-review prompt/tooling.
+- **VT trend across runs** — compute_resp_hr_relation's knee, tracked
+  over months: rightward drift = aerobic gain; also treadmill-vs-
+  outdoor knee gap (146 vs 154 on first measurement) may be a heat
+  signal. Needs a few dozen runs of history first.
 
 ---
 

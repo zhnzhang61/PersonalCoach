@@ -327,6 +327,62 @@ export interface TelemetryResponse {
   pace_clip: [number, number]; // min/mi bounds applied when computing pace stats
 }
 
+// Post-run verdict pool (PR #114). Server fires only the verdicts the
+// run qualifies for, sorted attention-first; not_fired carries the
+// reason so "checked, fine" and "couldn't check" stay distinguishable.
+export interface VerdictAnchor {
+  start_sec: number;
+  end_sec: number;
+}
+
+export interface RunVerdict {
+  key: string;
+  title: string;
+  status: "ok" | "attention";
+  summary: string;
+  anchor: VerdictAnchor | null;
+  // Verdict-specific numeric detail — shapes documented in
+  // backend/run_verdicts.py; the rows only render summary/status, the
+  // chart only reads anchors, so the client stays schema-loose here.
+  data: Record<string, unknown>;
+}
+
+export interface VerdictNotFired {
+  key: string;
+  title: string;
+  reason: string;
+}
+
+export interface VerdictsResponse {
+  activity_id: number;
+  verdicts: RunVerdict[];
+  not_fired: VerdictNotFired[];
+}
+
+// Resp-vs-HR relationship (PR #114): paired smoothed samples colored
+// by effort label + a hinge fit whose knee ≈ ventilatory threshold.
+export interface RespHrPoint {
+  hr: number;
+  resp: number;
+  category: string | null;
+}
+
+export interface RespHrFit {
+  breakpoint_hr: number;
+  slope_low_per_10bpm: number;
+  slope_high_per_10bpm: number;
+  intercept: number;
+  summary: string; // server-formatted caption
+}
+
+export interface RespHrResponse {
+  activity_id: number;
+  points: RespHrPoint[];
+  hr_range: [number, number];
+  fit: RespHrFit | null;
+  no_fit_reason: string | null;
+}
+
 export type LatLng = [number, number]; // [lat, lon]
 
 export interface RouteResponse {

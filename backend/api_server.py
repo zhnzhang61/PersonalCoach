@@ -25,8 +25,10 @@ from backend.seed_models import (
     refit_cadence_baseline,
     refit_cycle_weekly_volume_diff,
     refit_hrv_14d_baseline,
+    refit_rest_recovery_baseline,
     refit_sleep_debt_14d,
 )
+from backend import run_verdicts as run_verdicts_mod
 from backend import treadmill_model
 
 # Registry of stat-derived models. Importable so a future nightly
@@ -41,6 +43,8 @@ REFIT_REGISTRY: dict[str, Any] = {
     # PR P6 batch 2
     "sleep.debt_14d": refit_sleep_debt_14d,
     "cycle.weekly_volume_diff": refit_cycle_weekly_volume_diff,
+    # PR #114
+    "hrr.rest_recovery_baseline": refit_rest_recovery_baseline,
 }
 
 
@@ -1306,6 +1310,33 @@ def suggest_labels(activity_id: int) -> dict[str, Any]:
         "activity_id": activity_id,
         "categories": processor.suggest_lap_categories(activity_id),
     }
+
+
+@app.get("/api/runs/{activity_id}/verdicts")
+def run_verdicts(activity_id: int) -> dict[str, Any]:
+    """Post-run verdict sentences (PR #114): the conditional pool from
+    run_verdicts.py — only the verdicts this run qualifies for, sorted
+    attention-first, plus not_fired reasons. One shape for the UI rows
+    and the agent."""
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, "Run not found")
+    return run_verdicts_mod.compute_run_verdicts(
+        processor, activity_id, memory_engine=memory_engine
+    )
+
+
+@app.get("/api/runs/{activity_id}/resp-hr")
+def resp_hr_relation(activity_id: int) -> dict[str, Any]:
+    """Resp-vs-HR relationship scatter + hinge fit (PR #114). The
+    knee, when it exists, is the run's apparent ventilatory threshold."""
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, "Run not found")
+    relation = processor.compute_resp_hr_relation(activity_id)
+    if relation is None:
+        raise HTTPException(404, "No respiration telemetry for this run")
+    return relation
 
 
 @app.get("/api/runs/{activity_id}/treadmill-estimate")
