@@ -1027,6 +1027,44 @@ def update_planned_workout(
     return {"ok": True, "cal_synced": cal_synced, "planned_workout": plan}
 
 
+# ---------------------------------------------------------------------------
+# Coaching tips — distilled takeaways from coaching conversations.
+# Written by the coach (agent / Claude Code) via POST after a
+# discussion converges; the Training-tab card renders them read-only.
+# Storage: `data/manual_inputs/coaching_tips.json`. No Cal involvement.
+# ---------------------------------------------------------------------------
+
+
+class CoachingTipInput(BaseModel):
+    """Body for POST /api/coaching-tips. `date` defaults to today —
+    it's the conversation date, not a schedule date."""
+    title: str
+    body: str
+    topic: str | None = None
+    date: str | None = None  # YYYY-MM-DD
+
+
+@app.get("/api/coaching-tips")
+def list_coaching_tips() -> dict[str, Any]:
+    return {"tips": processor.list_coaching_tips()}
+
+
+@app.post("/api/coaching-tips")
+def create_coaching_tip(body: CoachingTipInput) -> dict[str, Any]:
+    try:
+        tip = processor.add_coaching_tip(**body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "tip": tip}
+
+
+@app.delete("/api/coaching-tips/{tip_id}")
+def delete_coaching_tip(tip_id: str) -> dict[str, Any]:
+    if not processor.delete_coaching_tip(tip_id):
+        raise HTTPException(404, f"No coaching tip {tip_id}")
+    return {"ok": True}
+
+
 def _parse_updated_at(ts: str | None) -> datetime.datetime:
     """Parse a stored `updated_at` / `created_at` ISO string to a
     tz-aware datetime for sound comparison. Accepts `+00:00` suffix
