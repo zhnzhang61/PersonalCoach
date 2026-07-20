@@ -180,6 +180,7 @@ class DataProcessor:
             'aux': os.path.join(data_dir, 'blocks', 'auxiliary_log.json'),
             'daily_checkins': os.path.join(data_dir, 'manual_inputs', 'daily_checkins.json'),
             'planned_workouts': os.path.join(data_dir, 'manual_inputs', 'planned_workouts.json'),
+            'coaching_tips': os.path.join(data_dir, 'manual_inputs', 'coaching_tips.json'),
             'ledger': os.path.join(data_dir, 'derived', 'daily_health_metrics.csv'),
             'weather': os.path.join(data_dir, 'weather'),
             'user_zones': os.path.join(data_dir, 'manual_inputs', 'user_zones.json'),
@@ -218,6 +219,11 @@ class DataProcessor:
         # connected (storing cal_event_id back on the JSON row).
         if not os.path.exists(self.paths['planned_workouts']):
             with open(self.paths['planned_workouts'], 'w') as f: json.dump([], f)
+
+        # Initialize Coaching Tips (distilled takeaways from coaching
+        # conversations; rendered as a read-only Training-tab card).
+        if not os.path.exists(self.paths['coaching_tips']):
+            with open(self.paths['coaching_tips'], 'w') as f: json.dump([], f)
             
         # Initialize Semantic Memory (User Profile)
         if not os.path.exists(self.paths['semantic_memory']):
@@ -1010,6 +1016,68 @@ class DataProcessor:
         if len(remaining) == len(current):
             return False
         with open(self.paths['planned_workouts'], 'w') as f:
+            json.dump(remaining, f, indent=2, ensure_ascii=False)
+        return True
+
+    # ==========================================
+    # Coaching tips (distilled takeaways from coaching conversations)
+    # ==========================================
+    # Append-mostly store: the coach (agent or Claude Code session)
+    # POSTs a tip after a discussion converges; the Training-tab card
+    # renders them read-only. Same JSON-list-in-manual_inputs pattern
+    # as planned workouts, minus Google Cal.
+
+    def list_coaching_tips(self) -> list[dict]:
+        """All tips, newest first (by date then created_at)."""
+        current = self.load_json_safe(self.paths['coaching_tips']) or []
+        if isinstance(current, dict):
+            current = []
+        return sorted(
+            current,
+            key=lambda t: (t.get("date", ""), t.get("created_at", "")),
+            reverse=True,
+        )
+
+    def add_coaching_tip(
+        self, title: str, body: str,
+        topic: str | None = None, date: str | None = None,
+    ) -> dict:
+        """Append one tip. `date` defaults to today (the conversation
+        date, not a schedule date). Title/body required non-empty."""
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("title must be a non-empty string")
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError("body must be a non-empty string")
+        if date is not None and (
+            not isinstance(date, str) or len(date) != 10
+            or date[4] != "-" or date[7] != "-"
+        ):
+            raise ValueError(f"date must be YYYY-MM-DD, got {date!r}")
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        entry = {
+            "id": f"tip_{uuid.uuid4().hex[:8]}",
+            "date": date or datetime.date.today().isoformat(),
+            "topic": (topic or "").strip()[:60] or None,
+            "title": title.strip()[:200],
+            "body": body.strip()[:4000],
+            "created_at": now,
+        }
+        current = self.load_json_safe(self.paths['coaching_tips']) or []
+        if isinstance(current, dict):
+            current = []
+        current.append(entry)
+        with open(self.paths['coaching_tips'], 'w') as f:
+            json.dump(current, f, indent=2, ensure_ascii=False)
+        return entry
+
+    def delete_coaching_tip(self, tip_id: str) -> bool:
+        current = self.load_json_safe(self.paths['coaching_tips']) or []
+        if isinstance(current, dict):
+            return False
+        remaining = [t for t in current if t.get("id") != tip_id]
+        if len(remaining) == len(current):
+            return False
+        with open(self.paths['coaching_tips'], 'w') as f:
             json.dump(remaining, f, indent=2, ensure_ascii=False)
         return True
 

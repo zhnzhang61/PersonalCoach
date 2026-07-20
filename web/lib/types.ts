@@ -577,6 +577,22 @@ export interface PlannedWorkoutsResponse {
   planned_workouts: PlannedWorkout[];
 }
 
+// Coaching tips — distilled takeaways from coaching conversations,
+// appended by the coach via POST /api/coaching-tips and rendered
+// read-only on the Training tab.
+export interface CoachingTip {
+  id: string;
+  date: string; // YYYY-MM-DD — conversation date, not a schedule date
+  topic?: string | null;
+  title: string;
+  body: string;
+  created_at?: string;
+}
+
+export interface CoachingTipsResponse {
+  tips: CoachingTip[];
+}
+
 // Plan-vs-actual deviation for a single run (PR P4b). Returned by
 // `GET /api/runs/{id}/plan-deviation`. `deltas` follows the
 // "actual - planned" convention; only keys whose plan side was

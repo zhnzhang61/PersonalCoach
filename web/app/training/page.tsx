@@ -2,6 +2,7 @@ import { Target } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { TodayEyebrow } from "@/components/today-eyebrow";
 import { TrainingSelector } from "@/components/training-selector";
+import { CoachingTips } from "@/components/training/coaching-tips";
 import { CycleOverview } from "@/components/training/cycle-overview";
 import { MonthlyChart } from "@/components/training/monthly-chart";
 import { PlaceholderCard } from "@/components/training/placeholder-card";
@@ -18,6 +19,7 @@ export default function TrainingPage() {
         <MonthlyChart />
         <PlanCalendar />
         <UpcomingWorkouts />
+        <CoachingTips />
         <PlaceholderCard
           Icon={Target}
           title="Race time predictor"
