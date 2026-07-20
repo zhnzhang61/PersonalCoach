@@ -3,6 +3,7 @@ import json
 import csv
 import datetime
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -1026,6 +1027,23 @@ class DataProcessor:
     # POSTs a tip after a discussion converges; the Training-tab card
     # renders them read-only. Same JSON-list-in-manual_inputs pattern
     # as planned workouts, minus Google Cal.
+    #
+    # Writes are serialized behind a process-wide lock: FastAPI runs
+    # sync handlers in a threadpool, so two concurrent POSTs could
+    # otherwise interleave load→append→dump and the slower dump would
+    # silently drop the faster one's tip (Codex P2 on #115). Class
+    # level (not instance) because api_server owns one DataProcessor
+    # but tests construct their own; any instance touching the same
+    # file still shares the lock. The dump goes to a tmp file first,
+    # then os.replace — readers never observe a torn file.
+
+    _TIPS_WRITE_LOCK: ClassVar[threading.Lock] = threading.Lock()
+
+    def _write_coaching_tips(self, tips: list) -> None:
+        tmp = self.paths['coaching_tips'] + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(tips, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.paths['coaching_tips'])
 
     def list_coaching_tips(self) -> list[dict]:
         """All tips, newest first (by date then created_at)."""
@@ -1062,23 +1080,23 @@ class DataProcessor:
             "body": body.strip()[:4000],
             "created_at": now,
         }
-        current = self.load_json_safe(self.paths['coaching_tips']) or []
-        if isinstance(current, dict):
-            current = []
-        current.append(entry)
-        with open(self.paths['coaching_tips'], 'w') as f:
-            json.dump(current, f, indent=2, ensure_ascii=False)
+        with self._TIPS_WRITE_LOCK:
+            current = self.load_json_safe(self.paths['coaching_tips']) or []
+            if isinstance(current, dict):
+                current = []
+            current.append(entry)
+            self._write_coaching_tips(current)
         return entry
 
     def delete_coaching_tip(self, tip_id: str) -> bool:
-        current = self.load_json_safe(self.paths['coaching_tips']) or []
-        if isinstance(current, dict):
-            return False
-        remaining = [t for t in current if t.get("id") != tip_id]
-        if len(remaining) == len(current):
-            return False
-        with open(self.paths['coaching_tips'], 'w') as f:
-            json.dump(remaining, f, indent=2, ensure_ascii=False)
+        with self._TIPS_WRITE_LOCK:
+            current = self.load_json_safe(self.paths['coaching_tips']) or []
+            if isinstance(current, dict):
+                return False
+            remaining = [t for t in current if t.get("id") != tip_id]
+            if len(remaining) == len(current):
+                return False
+            self._write_coaching_tips(remaining)
         return True
 
     def get_monthly_activity_stats(self, activity_type: str = "all") -> list[dict]:
