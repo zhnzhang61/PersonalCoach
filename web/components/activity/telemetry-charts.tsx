@@ -22,6 +22,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { effortColor, EFFORT_SHORT, REST_COLOR } from "@/lib/effort-colors";
+import { RespHrCandles } from "@/components/activity/resp-hr-candles";
 import { RespHrScatter } from "@/components/activity/resp-hr-scatter";
 import type {
   MetricSummary,
@@ -561,8 +562,11 @@ export function TelemetryCharts({
   // even if the user previously picked distance.
   const [xMode, setXMode] = useState<XMode>("time");
   // Resp offers a second lens: the curve over time, or the Resp×HR
-  // relationship scatter (knee ≈ ventilatory threshold).
-  const [respRelation, setRespRelation] = useState(false);
+  // relationship scatter (knee ≈ ventilatory threshold) plus the
+  // candles against the athlete's own history. The relationship is the
+  // reason to open Resp at all — respiration over time says little on
+  // its own — so it leads and the raw curve is the opt-in.
+  const [respRelation, setRespRelation] = useState(true);
 
   const onTabClick = (key: TelemetrySummaryKey) => {
     setActive((prev) => {
@@ -623,6 +627,12 @@ export function TelemetryCharts({
     .filter((m): m is MetricSpec => m != null);
   // Defensive fallback if the saved selection no longer maps to a visible metric.
   const renderSpecs = activeSpecs.length > 0 ? activeSpecs : [metrics[0] ?? METRICS_BASE[0]];
+  // The relation lens only actually replaces the time-series when Resp
+  // is one of the selected metrics. Gating on `respRelation` alone
+  // would, now that it defaults on, strip the time/distance toggle
+  // from an HR-only view that is still very much a time-series.
+  const showingRelation =
+    respRelation && renderSpecs.some((s) => s.key === "RespirationRate");
 
   const blocks =
     laps && laps.length > 0 && categories && categories.length > 0
@@ -723,7 +733,7 @@ export function TelemetryCharts({
             ))}
           </div>
         )}
-        {distanceAvailable && !respRelation && (
+        {distanceAvailable && !showingRelation && (
           <div
             role="group"
             aria-label="X-axis"
@@ -751,15 +761,20 @@ export function TelemetryCharts({
           </div>
         )}
       </div>
-      {treadmill && !respRelation &&
+      {treadmill && !showingRelation &&
         renderSpecs.some((s) => s.key === "Pace") && (
           <p className="text-xs text-amber-700 dark:text-amber-300">
             腕表配速 — 跑步机上系统性偏慢约 1 min/mi，形状可信、数值不可信；
             真实配速看上方汇总块的模型估算。
           </p>
         )}
-      {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
-        <RespHrScatter activityId={activityId} />
+      {showingRelation ? (
+        <>
+          <RespHrScatter activityId={activityId} />
+          {/* Within-run relation above; where this run's efforts land
+              against the athlete's own history below. */}
+          <RespHrCandles activityId={activityId} />
+        </>
       ) : (
         <>
           <ChartPane

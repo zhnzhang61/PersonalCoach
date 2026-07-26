@@ -1792,6 +1792,383 @@ class DataProcessor:
                 out.append(hr_label(hr))
         return out
 
+    # ==========================================
+    # Respiration × heart-rate distribution model
+    # ==========================================
+    # Two views of the same lap population, so the run page can show
+    # "where did today's efforts sit against my own history":
+    #   hr_to_resp — respiration spread within each RPE HR zone
+    #   resp_to_hr — HR spread within each respiration band
+    #
+    # Method notes (these are load-bearing — see the validation pass):
+    #  • Lap 1 and the final lap are DROPPED. Respiration responds
+    #    immediately while HR lags ~7 bpm on the warm-up, so warm-up
+    #    laps read as "too much breathing for that HR" and pollute the
+    #    low-HR bins. The cool-down lap has the mirror problem.
+    #  • Respiration comes from the chest strap (RSA-derived). It is
+    #    systematically under-reported at the top — the observed ceiling
+    #    (~43) sits well below the population fRmax (57±11), and the
+    #    distribution skew collapses from -1.25 (HR 165-175) to -3.78
+    #    (HR 175+), so 175+ is where the compression really bites.
+    #  • Below ~HR 149 respiration is decoupled from HR (regression
+    #    slope ≈ 0.02 vs 0.39 above), so the bottom zone is wide and
+    #    reflects HR noise, not effort.
+    # Hence the trustworthy window is HR 149-174. A zone is flagged
+    # reliable when at least half of it falls inside that window —
+    # judging by the zone's lower edge alone would fail Steady Effort
+    # (145-162), which is 72% inside.
+    # Bands with fewer than `min_laps` samples are omitted rather than
+    # drawn thin, so the caller never renders a candle it can't trust.
+
+    # Fallback partition, used when there aren't enough laps to derive
+    # bands from the athlete's own curve (see _derive_resp_bands).
+    # (low, high, label, approx_zone) — approx_zone is None here because
+    # without a fit there is nothing to map these cuts onto.
+    _RESP_BANDS_FIXED = [
+        (0.0, 30.0, "≤30", None), (30.0, 33.0, "30–33", None),
+        (33.0, 36.0, "33–36", None), (36.0, 39.0, "36–39", None),
+        (39.0, 42.0, "39–42", None), (42.0, 99.0, "42+", None),
+    ]
+    _RESP_RELIABLE_HR = (149, 174)
+
+    def _derive_resp_bands(self, rows: list[dict]) -> tuple[list[tuple], str]:
+        """Respiration bands cut at the athlete's own HR-zone edges.
+
+        Rather than hard-coding "33–36", ask: what respiration does this
+        athlete actually breathe at the top of Steady, of Increasing, of
+        Marathon? Those become the band edges, so the two views are one
+        partition seen from either side, and the edges re-derive as
+        fitness moves (respiration at a given HR falls as you get
+        fitter, so the bands slide down on their own).
+
+        Fitted on the reliable HR window only — below it respiration is
+        decoupled from HR, above it the strap's estimate compresses, and
+        either end would tilt the line. Falls back to the fixed
+        partition when the window is too thin (<40 laps) or the fit
+        comes out non-physiological (slope <= 0), which would otherwise
+        produce inverted or collapsed bands.
+        """
+        lo_ok, hi_ok = self._RESP_RELIABLE_HR
+        fit_rows = [r for r in rows if lo_ok <= r["hr"] <= hi_ok]
+        zones = self.get_hr_zones()
+        if len(fit_rows) < 40 or len(zones) < 3:
+            return self._RESP_BANDS_FIXED, "fixed"
+
+        n = len(fit_rows)
+        mx = sum(r["hr"] for r in fit_rows) / n
+        my = sum(r["resp"] for r in fit_rows) / n
+        var = sum((r["hr"] - mx) ** 2 for r in fit_rows)
+        if var <= 0:
+            return self._RESP_BANDS_FIXED, "fixed"
+        slope = sum((r["hr"] - mx) * (r["resp"] - my) for r in fit_rows) / var
+        if slope <= 0:
+            return self._RESP_BANDS_FIXED, "fixed"
+        intercept = my - slope * mx
+
+        # One edge per zone boundary, at the top of each zone except the
+        # last (which is open-ended). Each band then spans the
+        # respiration range of exactly one zone, and carries that zone's
+        # name so "34–39" reads as "≈ Increasing Effort" rather than as
+        # an arbitrary cut.
+        edges: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for z in zones[:-1]:
+            e = round(intercept + slope * z["high"])
+            # Two zones that round to the same breath rate collapse; the
+            # lower one names the merged band.
+            if e in seen:
+                continue
+            seen.add(e)
+            edges.append((e, z["rpe_label"]))
+        edges.sort()
+        if len(edges) < 2:
+            return self._RESP_BANDS_FIXED, "fixed"
+
+        bands: list[tuple] = [
+            (0.0, float(edges[0][0]), f"≤{edges[0][0]}", edges[0][1])
+        ]
+        for (a, _), (b, zone_b) in zip(edges, edges[1:]):
+            bands.append((float(a), float(b), f"{a}–{b}", zone_b))
+        bands.append(
+            (float(edges[-1][0]), 99.0, f"{edges[-1][0]}+", zones[-1]["rpe_label"])
+        )
+        return bands, "derived_from_hr_zones"
+
+    def _running_activity_ids(self) -> set[int]:
+        """Activity IDs whose type is a run.
+
+        The splits directory is populated for every synced activity, not
+        just runs (GarminSync stores per-activity payloads for whatever
+        get_activities() returns), so a swim/hike/stair session with lap
+        HR + respiration would otherwise land in the running baseline
+        and tilt the candles. The type lives only in the get_activities
+        summaries, so consult those. Not cached: `processor` is a
+        long-lived singleton, so a stale set would silently drop a
+        freshly-synced run from every baseline until restart. The scan
+        is ~20ms over ~600 tiny files — the same scan-each-time posture
+        the run-summary lookups already take.
+        """
+        ids: set[int] = set()
+        act_dir = self.paths['activities']
+        if os.path.isdir(act_dir):
+            for entry in os.scandir(act_dir):
+                if not entry.name.endswith('.json'):
+                    continue
+                payload = self.load_json_safe(entry.path)
+                rows = payload if isinstance(payload, list) else [payload]
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if RunActivity.is_run_dict(row):
+                        try:
+                            ids.add(int(row.get("activityId")))
+                        except (TypeError, ValueError):
+                            continue
+        return ids
+
+    def _iter_model_laps(
+        self, since: str | None = None, exclude_activity_id: int | None = None
+    ):
+        """Yield interior laps (lap 1 + last dropped) that carry both HR
+        and respiration, from RUNNING activities only. Reads splits
+        straight off disk — ~600 small files, fast enough to serve per
+        request without a cache layer.
+
+        `exclude_activity_id` drops one activity's laps so a run can be
+        compared against its history rather than against a baseline it
+        is itself in — a rep workout would otherwise move (or, once it
+        crosses min_laps, create) the very candle it's judged against.
+        """
+        if not os.path.isdir(self.paths['splits']):
+            return
+        run_ids = self._running_activity_ids()
+        for entry in os.scandir(self.paths['splits']):
+            if not entry.name.endswith('.json'):
+                continue
+            try:
+                activity_id = int(entry.name[:-5])
+            except ValueError:
+                continue
+            if activity_id == exclude_activity_id:
+                continue
+            if activity_id not in run_ids:
+                continue
+            laps = self.get_run_laps(activity_id)
+            if len(laps) < 3:
+                continue
+            date = (laps[0].get("startTimeGMT") or "")[:10]
+            if since and date and date < since:
+                continue
+            for lap in laps[1:-1]:
+                hr = lap.get("averageHR")
+                resp = lap.get("avgRespirationRate")
+                duration = lap.get("movingDuration") or lap.get("duration") or 0
+                dist_mi = (lap.get("distance") or 0) / 1609.34
+                if not hr or not resp or duration < 60 or dist_mi < 0.2:
+                    continue
+                yield {
+                    "activity_id": activity_id, "date": date,
+                    "hr": float(hr), "resp": float(resp),
+                    "pace_min_mi": (duration / 60 / dist_mi) if dist_mi else None,
+                }
+
+    @staticmethod
+    def _overlap_frac(lo: float, hi: float, win_lo: float, win_hi: float) -> float:
+        """Fraction of [lo, hi] that lies inside [win_lo, win_hi]."""
+        span = hi - lo
+        if span <= 0:
+            return 1.0 if win_lo <= lo <= win_hi else 0.0
+        return max(0.0, min(hi, win_hi) - max(lo, win_lo)) / span
+
+    @staticmethod
+    def _candle(values: list[float]) -> dict:
+        """p10 / p25 / median / p75 / p90 — the five numbers a candle needs."""
+        s = sorted(values)
+        def q(f: float) -> float:
+            if len(s) == 1:
+                return s[0]
+            pos = f * (len(s) - 1)
+            lo = int(pos)
+            hi = min(lo + 1, len(s) - 1)
+            return s[lo] + (s[hi] - s[lo]) * (pos - lo)
+        return {
+            "p10": round(q(0.10), 1), "p25": round(q(0.25), 1),
+            "median": round(q(0.50), 1), "p75": round(q(0.75), 1),
+            "p90": round(q(0.90), 1),
+        }
+
+    def get_resp_hr_distribution(
+        self, since: str | None = None, min_laps: int = 12,
+        exclude_activity_id: int | None = None,
+    ) -> dict:
+        """Both candle views over the lap population.
+
+        `since` is an inclusive YYYY-MM-DD floor — pass a recent date to
+        compare against current fitness rather than all-time, since the
+        whole curve shifts as fitness changes.
+
+        `exclude_activity_id` drops that run from the baseline so a run
+        page compares against prior activities, not against a set it is
+        itself part of.
+
+        Every band carries numeric stats AND a preformatted `summary`
+        string so the same payload serves the chart and the coach's
+        prompt without either side re-deriving units.
+
+        `hr_to_resp` is keyed off the user's annotated zones, so it comes
+        back empty when `user_zones.json` is absent. `resp_to_hr` needs
+        no zone definitions and is always populated when there are laps.
+        """
+        rows = list(self._iter_model_laps(since, exclude_activity_id))
+        zones = self.get_hr_zones()
+        lo_ok, hi_ok = self._RESP_RELIABLE_HR
+
+        hr_to_resp = []
+        for z in zones:
+            vals = [r for r in rows if z["low"] <= r["hr"] <= z["high"]]
+            if len(vals) < min_laps:
+                continue
+            c = self._candle([r["resp"] for r in vals])
+            paces = [r["pace_min_mi"] for r in vals if r["pace_min_mi"]]
+            hr_to_resp.append({
+                "key": z["rpe_label"],
+                "band": f"{z['low']}–{z['high']}" if z["high"] < 220 else f"{z['low']}+",
+                "hr_low": z["low"], "hr_high": z["high"],
+                **c,
+                "n_laps": len(vals),
+                "n_runs": len({r["activity_id"] for r in vals}),
+                "median_pace_min_mi": (
+                    round(sorted(paces)[len(paces) // 2], 2) if paces else None
+                ),
+                "reliable": self._overlap_frac(
+                    z["low"], min(z["high"], 220), lo_ok, hi_ok
+                ) >= 0.5,
+                "unit": "breaths_per_min",
+                "summary": (
+                    f"{z['rpe_label']} (HR {z['low']}–{z['high']}): "
+                    f"respiration median {c['median']}/min, "
+                    f"middle-half {c['p25']}–{c['p75']}"
+                ),
+            })
+
+        resp_bands, band_source = self._derive_resp_bands(rows)
+        resp_to_hr = []
+        for low, high, label, approx_zone in resp_bands:
+            vals = [r for r in rows if low <= r["resp"] < high]
+            if len(vals) < min_laps:
+                continue
+            c = self._candle([r["hr"] for r in vals])
+            paces = [r["pace_min_mi"] for r in vals if r["pace_min_mi"]]
+            resp_to_hr.append({
+                "key": label, "band": label,
+                "resp_low": low, "resp_high": high,
+                **c,
+                "n_laps": len(vals),
+                "n_runs": len({r["activity_id"] for r in vals}),
+                "median_pace_min_mi": (
+                    round(sorted(paces)[len(paces) // 2], 2) if paces else None
+                ),
+                "approx_zone": approx_zone,
+                # Informative only while the band's HR mass sits inside
+                # the trustworthy window [149, 174] — below it
+                # respiration is decoupled from HR (the band reflects HR
+                # noise, not effort), above it the strap's estimate
+                # compresses. Judged on the band's median HR so a
+                # low-effort band (or a fixed-fallback band) centred
+                # under 149 is muted, not just the first interval.
+                "reliable": lo_ok <= c["median"] <= hi_ok,
+                "unit": "bpm",
+                "summary": (
+                    f"Respiration {label}/min"
+                    + (f" (≈{approx_zone})" if approx_zone else "")
+                    + f": HR median {c['median']:.0f}, "
+                    f"middle-half {c['p25']:.0f}–{c['p75']:.0f}"
+                ),
+            })
+
+        return {
+            "since": since,
+            "n_laps": len(rows),
+            "n_runs": len({r["activity_id"] for r in rows}),
+            "reliable_hr_range": {"low": lo_ok, "high": hi_ok},
+            "resp_band_source": band_source,
+            "hr_to_resp": hr_to_resp,
+            "resp_to_hr": resp_to_hr,
+        }
+
+    def get_run_effort_points(self, activity_id: int) -> list[dict]:
+        """This run's own (HR, respiration) centroid per effort label —
+        the points overlaid on the distribution.
+
+        Uses the user's own lap labels when present (`manual_meta
+        .lap_categories`), else falls back to the HR-zone projection so
+        an unlabeled run still plots. Distance-weighted like
+        calculate_category_stats so a 0.2-mile lap can't swing a
+        category the way an equal-weight mean would.
+        """
+        laps = self.get_run_laps(activity_id)
+        if not laps:
+            return []
+        meta_path = os.path.join(
+            self.paths['manual'], f"run_{activity_id}_meta.json"
+        )
+        cats = []
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    cats = (json.load(f) or {}).get("lap_categories") or []
+            except (OSError, json.JSONDecodeError):
+                cats = []
+        source = "user_labels"
+        if len(cats) != len(laps):
+            cats = self.suggest_lap_categories(activity_id)
+            source = "hr_zone_fallback"
+        if len(cats) != len(laps):
+            return []
+
+        groups: dict[str, dict] = {}
+        for lap, cat in zip(laps, cats):
+            hr = lap.get("averageHR")
+            resp = lap.get("avgRespirationRate")
+            dist_mi = (lap.get("distance") or 0) / 1609.34
+            duration = lap.get("movingDuration") or lap.get("duration") or 0
+            if cat == "Rest" or not hr or not resp or dist_mi < 0.2:
+                continue
+            g = groups.setdefault(cat, {"w": 0.0, "hr": 0.0, "resp": 0.0,
+                                        "laps": 0, "sec": 0.0})
+            g["w"] += dist_mi
+            g["hr"] += hr * dist_mi
+            g["resp"] += resp * dist_mi
+            g["sec"] += duration
+            g["laps"] += 1
+
+        out = []
+        for cat, g in groups.items():
+            if g["w"] <= 0:
+                continue
+            hr = g["hr"] / g["w"]
+            resp = g["resp"] / g["w"]
+            out.append({
+                "category": cat,
+                "avg_hr": round(hr, 1),
+                "avg_resp": round(resp, 1),
+                "distance_mi": round(g["w"], 2),
+                "n_laps": g["laps"],
+                "pace_min_mi": (
+                    round(g["sec"] / 60 / g["w"], 2) if g["w"] else None
+                ),
+                "source": source,
+                "summary": (
+                    f"{cat}: {g['w']:.1f} mi at HR {hr:.0f}, "
+                    f"respiration {resp:.1f}/min"
+                ),
+            })
+        order = {c: i for i, c in enumerate(
+            ["Hold Back Easy", "Steady Effort", "Increasing Effort",
+             "Marathon", "LT Effort", "VO2Max", "Sprint"])}
+        out.sort(key=lambda p: order.get(p["category"], 99))
+        return out
+
     def get_run_laps(self, activity_id):
         json_path = os.path.join(self.paths['splits'], f"{activity_id}.json")
         if not os.path.exists(json_path): return []

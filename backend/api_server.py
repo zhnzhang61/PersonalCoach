@@ -1377,6 +1377,41 @@ def resp_hr_relation(activity_id: int) -> dict[str, Any]:
     return relation
 
 
+@app.get("/api/resp-hr-distribution")
+def resp_hr_distribution(
+    since: str | None = Query(default=None),
+    min_laps: int = Query(default=12, ge=3),
+) -> dict[str, Any]:
+    """Population candles: respiration spread per HR zone, and HR spread
+    per respiration band. `since` (YYYY-MM-DD) narrows the baseline to a
+    recent window — the whole curve shifts with fitness, so comparing a
+    run against 2-year-old laps understates today's position."""
+    return processor.get_resp_hr_distribution(since=since, min_laps=min_laps)
+
+
+@app.get("/api/runs/{activity_id}/resp-hr-profile")
+def resp_hr_profile(
+    activity_id: int,
+    since: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """One payload for the run-page chart: the baseline candles plus
+    this run's own per-effort (HR, respiration) centroids to overlay.
+
+    The displayed run is excluded from its own baseline — otherwise a
+    rep-heavy workout would move (or, once it crosses min_laps, create)
+    the candle it is being compared against, making its own points look
+    artificially typical."""
+    if not _find_run_summary(activity_id):
+        raise HTTPException(404, "Run not found")
+    return {
+        "activity_id": activity_id,
+        "baseline": processor.get_resp_hr_distribution(
+            since=since, exclude_activity_id=activity_id
+        ),
+        "run_points": processor.get_run_effort_points(activity_id),
+    }
+
+
 @app.get("/api/runs/{activity_id}/treadmill-estimate")
 def treadmill_estimate(activity_id: int) -> dict[str, Any]:
     """Road-equivalent pace + distance for a treadmill run, computed from

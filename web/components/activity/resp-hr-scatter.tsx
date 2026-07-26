@@ -88,7 +88,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
             tickLine={false}
             axisLine={false}
             tickMargin={6}
-            fontSize={10}
+            fontSize={12}
             tickFormatter={(v: number) => `${Math.round(v)}`}
           />
           <YAxis
@@ -99,7 +99,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
             tickLine={false}
             axisLine={false}
             tickMargin={6}
-            fontSize={10}
+            fontSize={12}
             width={30}
             tickFormatter={(v: number) => `${Math.round(v)}`}
           />
@@ -111,7 +111,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
               label={{
                 value: `拐点 ≈${fit.breakpoint_hr}`,
                 position: "insideTopLeft",
-                fontSize: 11,
+                fontSize: 12,
                 fill: "var(--muted-foreground)",
               }}
             />
@@ -144,7 +144,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
           )}
         </ComposedChart>
       </ChartContainer>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
         {[...byCategory.keys()]
           .filter((c) => c !== "__none__")
           .map((cat) => (
@@ -159,7 +159,7 @@ export function RespHrScatter({ activityId }: { activityId: number }) {
             </span>
           ))}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-sm text-muted-foreground">
         {fit ? fit.summary : data.no_fit_reason}
       </p>
     </div>

@@ -383,6 +383,66 @@ export interface RespHrResponse {
   no_fit_reason: string | null;
 }
 
+// Respiration × HR distribution (candles) + this run's own efforts.
+// `reliable` is the server's call on whether the band's readings can
+// carry weight — false below HR ~149 (respiration decoupled from HR)
+// and above ~174 (strap respiration compresses toward a ceiling).
+// hr_low/hr_high are set on hr_to_resp bands, resp_low/resp_high on
+// resp_to_hr bands; the other pair is absent.
+export interface RespHrCandle {
+  key: string;
+  band: string;
+  hr_low?: number;
+  hr_high?: number;
+  resp_low?: number;
+  resp_high?: number;
+  // resp_to_hr only: the effort zone this respiration band maps onto
+  // when bands were derived from the athlete's own HR zones. Null on
+  // the fixed fallback partition, where the cuts map onto nothing.
+  approx_zone?: string | null;
+  p10: number;
+  p25: number;
+  median: number;
+  p75: number;
+  p90: number;
+  n_laps: number;
+  n_runs: number;
+  median_pace_min_mi: number | null;
+  reliable: boolean;
+  unit: string;
+  summary: string;
+}
+
+export interface RespHrDistribution {
+  since: string | null;
+  n_laps: number;
+  n_runs: number;
+  reliable_hr_range: { low: number; high: number };
+  // "derived_from_hr_zones" when the respiration bands were cut at the
+  // athlete's own zone edges, "fixed" when the sample was too thin to
+  // fit and the static partition was used instead.
+  resp_band_source: "derived_from_hr_zones" | "fixed";
+  hr_to_resp: RespHrCandle[];
+  resp_to_hr: RespHrCandle[];
+}
+
+export interface RespHrEffortPoint {
+  category: string;
+  avg_hr: number;
+  avg_resp: number;
+  distance_mi: number;
+  n_laps: number;
+  pace_min_mi: number | null;
+  source: "user_labels" | "hr_zone_fallback";
+  summary: string;
+}
+
+export interface RespHrProfileResponse {
+  activity_id: number;
+  baseline: RespHrDistribution;
+  run_points: RespHrEffortPoint[];
+}
+
 export type LatLng = [number, number]; // [lat, lon]
 
 export interface RouteResponse {
