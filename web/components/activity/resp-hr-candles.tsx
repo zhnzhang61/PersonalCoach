@@ -37,11 +37,12 @@ import type { RespHrCandle, RespHrProfileResponse } from "@/lib/types";
 type Mode = "hrToResp" | "respToHr";
 
 // Baseline window: the curve shifts with fitness, so comparing today
-// against two-year-old laps understates the current position. 18
-// months keeps enough samples in the thin high-HR bands.
+// against two-year-old laps understates the current position. 12
+// months trades a little sample depth in the thin high-HR bands for a
+// baseline that reflects roughly the current athlete.
 function sinceParam(): string {
   const d = new Date();
-  d.setMonth(d.getMonth() - 18);
+  d.setMonth(d.getMonth() - 12);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
@@ -59,6 +60,7 @@ function toRow(c: RespHrCandle) {
   const centre = (c.p25 + c.p75) / 2;
   return {
     key: c.key,
+    approxZone: c.approx_zone ?? null,
     base: c.p25,
     box: c.p75 - c.p25,
     median: c.median,
@@ -214,19 +216,59 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
         </button>
       </div>
 
-      <ChartContainer config={CHART_CONFIG} className="h-64 w-full">
+      <ChartContainer
+        config={CHART_CONFIG}
+        className={mode === "respToHr" ? "h-72 w-full" : "h-64 w-full"}
+      >
         <ComposedChart
           data={rows}
           margin={{ top: 10, right: 8, bottom: 0, left: -4 }}
         >
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
+          {/* One axis, two lines per tick. A second Recharts XAxis
+              would need its own height budget and kept clipping the
+              lower row; a custom tick keeps both lines inside the one
+              axis band. Line 2 names the effort zone each respiration
+              band was cut from, so "34–39" reads as a zone rather than
+              an arbitrary number. */}
           <XAxis
             dataKey="key"
             tickLine={false}
             axisLine={false}
-            tickFormatter={(k: string) => EFFORT_SHORT[k] ?? k}
-            tick={{ fontSize: 10 }}
             interval={0}
+            height={mode === "respToHr" ? 34 : 20}
+            tick={(props) => {
+              const { x, y, payload } = props as {
+                x: number;
+                y: number;
+                payload?: { value?: string };
+              };
+              const k = payload?.value ?? "";
+              const zone = rows.find((r) => r.key === k)?.approxZone;
+              return (
+                <g transform={`translate(${x},${y})`}>
+                  <text
+                    dy={12}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fill="currentColor"
+                  >
+                    {EFFORT_SHORT[k] ?? k}
+                  </text>
+                  {mode === "respToHr" && zone && (
+                    <text
+                      dy={25}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fill="currentColor"
+                      opacity={0.55}
+                    >
+                      {EFFORT_SHORT[zone] ?? zone}
+                    </text>
+                  )}
+                </g>
+              );
+            }}
           />
           <YAxis
             domain={domain}

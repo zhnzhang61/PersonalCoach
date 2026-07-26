@@ -157,6 +157,40 @@ def test_run_effort_points_empty_for_unknown_run(dp):
     assert dp.get_run_effort_points(999) == []
 
 
+def test_resp_bands_derive_from_hr_zones(dp):
+    # A clean linear resp~HR relation over the reliable window should
+    # produce bands cut at each zone's top edge, each naming its zone.
+    laps = []
+    for hr in range(150, 175):
+        laps += [_lap(hr, 20 + 0.1 * hr)] * 3
+    _write_run(dp, 20, [_lap(150, 30)] + laps + [_lap(150, 30)])
+    d = dp.get_resp_hr_distribution(min_laps=1)
+    assert d["resp_band_source"] == "derived_from_hr_zones"
+    zones = [b["approx_zone"] for b in d["resp_to_hr"]]
+    assert "Steady Effort" in zones and "Increasing Effort" in zones
+    # Bands tile the axis without gaps or overlaps.
+    edges = [(b["resp_low"], b["resp_high"]) for b in d["resp_to_hr"]]
+    for (_, hi), (lo, _) in zip(edges, edges[1:]):
+        assert hi == lo
+
+
+def test_resp_bands_fall_back_when_thin(dp):
+    _write_run(dp, 21, [_lap(150, 30)] * 12)
+    d = dp.get_resp_hr_distribution(min_laps=1)
+    assert d["resp_band_source"] == "fixed"
+    assert all(b["approx_zone"] is None for b in d["resp_to_hr"])
+
+
+def test_resp_bands_fall_back_on_non_physiological_slope(dp):
+    # Respiration falling as HR rises can't produce meaningful cuts.
+    laps = []
+    for hr in range(150, 175):
+        laps += [_lap(hr, 60 - 0.2 * hr)] * 3
+    _write_run(dp, 22, [_lap(150, 30)] + laps + [_lap(150, 30)])
+    d = dp.get_resp_hr_distribution(min_laps=1)
+    assert d["resp_band_source"] == "fixed"
+
+
 def test_no_zones_yields_empty_hr_view_but_keeps_resp_view(tmp_path):
     # A user who hasn't annotated zones still gets the resp→HR view,
     # which needs no zone definitions. The HR→resp view has nothing to

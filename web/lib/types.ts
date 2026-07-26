@@ -396,6 +396,10 @@ export interface RespHrCandle {
   hr_high?: number;
   resp_low?: number;
   resp_high?: number;
+  // resp_to_hr only: the effort zone this respiration band maps onto
+  // when bands were derived from the athlete's own HR zones. Null on
+  // the fixed fallback partition, where the cuts map onto nothing.
+  approx_zone?: string | null;
   p10: number;
   p25: number;
   median: number;
@@ -414,6 +418,10 @@ export interface RespHrDistribution {
   n_laps: number;
   n_runs: number;
   reliable_hr_range: { low: number; high: number };
+  // "derived_from_hr_zones" when the respiration bands were cut at the
+  // athlete's own zone edges, "fixed" when the sample was too thin to
+  // fit and the static partition was used instead.
+  resp_band_source: "derived_from_hr_zones" | "fixed";
   hr_to_resp: RespHrCandle[];
   resp_to_hr: RespHrCandle[];
 }

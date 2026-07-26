@@ -1820,11 +1820,79 @@ class DataProcessor:
     # Bands with fewer than `min_laps` samples are omitted rather than
     # drawn thin, so the caller never renders a candle it can't trust.
 
-    _RESP_BANDS = [
-        (0.0, 30.0, "≤30"), (30.0, 33.0, "30–33"), (33.0, 36.0, "33–36"),
-        (36.0, 39.0, "36–39"), (39.0, 42.0, "39–42"), (42.0, 99.0, "42+"),
+    # Fallback partition, used when there aren't enough laps to derive
+    # bands from the athlete's own curve (see _derive_resp_bands).
+    # (low, high, label, approx_zone) — approx_zone is None here because
+    # without a fit there is nothing to map these cuts onto.
+    _RESP_BANDS_FIXED = [
+        (0.0, 30.0, "≤30", None), (30.0, 33.0, "30–33", None),
+        (33.0, 36.0, "33–36", None), (36.0, 39.0, "36–39", None),
+        (39.0, 42.0, "39–42", None), (42.0, 99.0, "42+", None),
     ]
     _RESP_RELIABLE_HR = (149, 174)
+
+    def _derive_resp_bands(self, rows: list[dict]) -> tuple[list[tuple], str]:
+        """Respiration bands cut at the athlete's own HR-zone edges.
+
+        Rather than hard-coding "33–36", ask: what respiration does this
+        athlete actually breathe at the top of Steady, of Increasing, of
+        Marathon? Those become the band edges, so the two views are one
+        partition seen from either side, and the edges re-derive as
+        fitness moves (respiration at a given HR falls as you get
+        fitter, so the bands slide down on their own).
+
+        Fitted on the reliable HR window only — below it respiration is
+        decoupled from HR, above it the strap's estimate compresses, and
+        either end would tilt the line. Falls back to the fixed
+        partition when the window is too thin (<40 laps) or the fit
+        comes out non-physiological (slope <= 0), which would otherwise
+        produce inverted or collapsed bands.
+        """
+        lo_ok, hi_ok = self._RESP_RELIABLE_HR
+        fit_rows = [r for r in rows if lo_ok <= r["hr"] <= hi_ok]
+        zones = self.get_hr_zones()
+        if len(fit_rows) < 40 or len(zones) < 3:
+            return self._RESP_BANDS_FIXED, "fixed"
+
+        n = len(fit_rows)
+        mx = sum(r["hr"] for r in fit_rows) / n
+        my = sum(r["resp"] for r in fit_rows) / n
+        var = sum((r["hr"] - mx) ** 2 for r in fit_rows)
+        if var <= 0:
+            return self._RESP_BANDS_FIXED, "fixed"
+        slope = sum((r["hr"] - mx) * (r["resp"] - my) for r in fit_rows) / var
+        if slope <= 0:
+            return self._RESP_BANDS_FIXED, "fixed"
+        intercept = my - slope * mx
+
+        # One edge per zone boundary, at the top of each zone except the
+        # last (which is open-ended). Each band then spans the
+        # respiration range of exactly one zone, and carries that zone's
+        # name so "34–39" reads as "≈ Increasing Effort" rather than as
+        # an arbitrary cut.
+        edges: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for z in zones[:-1]:
+            e = round(intercept + slope * z["high"])
+            # Two zones that round to the same breath rate collapse; the
+            # lower one names the merged band.
+            if e in seen:
+                continue
+            seen.add(e)
+            edges.append((e, z["rpe_label"]))
+        edges.sort()
+        if len(edges) < 2:
+            return self._RESP_BANDS_FIXED, "fixed"
+
+        bands: list[tuple] = [
+            (0.0, float(edges[0][0]), f"≤{edges[0][0]}", edges[0][1])
+        ]
+        for (a, _), (b, zone_b) in zip(edges, edges[1:]):
+            bands.append((float(a), float(b), f"{a}–{b}", zone_b))
+        bands.append(
+            (float(edges[-1][0]), 99.0, f"{edges[-1][0]}+", zones[-1]["rpe_label"])
+        )
+        return bands, "derived_from_hr_zones"
 
     def _iter_model_laps(self, since: str | None = None):
         """Yield interior laps (lap 1 + last dropped) that carry both HR
@@ -1932,8 +2000,9 @@ class DataProcessor:
                 ),
             })
 
+        resp_bands, band_source = self._derive_resp_bands(rows)
         resp_to_hr = []
-        for low, high, label in self._RESP_BANDS:
+        for low, high, label, approx_zone in resp_bands:
             vals = [r for r in rows if low <= r["resp"] < high]
             if len(vals) < min_laps:
                 continue
@@ -1948,13 +2017,19 @@ class DataProcessor:
                 "median_pace_min_mi": (
                     round(sorted(paces)[len(paces) // 2], 2) if paces else None
                 ),
-                # Informative only once respiration has coupled to effort
-                # (~33) AND the band's HR mass stays under the
-                # compression ceiling.
-                "reliable": low >= 33.0 and c["median"] <= hi_ok,
+                "approx_zone": approx_zone,
+                # Informative only once respiration has coupled to
+                # effort, and while the band's HR mass stays under the
+                # compression ceiling. The coupling floor tracks the
+                # bands rather than a hard 33 so derived cuts stay
+                # consistent with it: the first band is always below
+                # coupling, the rest are judged on their HR mass.
+                "reliable": low > 0.0 and c["median"] <= hi_ok,
                 "unit": "bpm",
                 "summary": (
-                    f"Respiration {label}/min: HR median {c['median']:.0f}, "
+                    f"Respiration {label}/min"
+                    + (f" (≈{approx_zone})" if approx_zone else "")
+                    + f": HR median {c['median']:.0f}, "
                     f"middle-half {c['p25']:.0f}–{c['p75']:.0f}"
                 ),
             })
@@ -1964,6 +2039,7 @@ class DataProcessor:
             "n_laps": len(rows),
             "n_runs": len({r["activity_id"] for r in rows}),
             "reliable_hr_range": {"low": lo_ok, "high": hi_ok},
+            "resp_band_source": band_source,
             "hr_to_resp": hr_to_resp,
             "resp_to_hr": resp_to_hr,
         }
