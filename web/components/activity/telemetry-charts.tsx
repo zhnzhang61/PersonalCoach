@@ -22,6 +22,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { effortColor, EFFORT_SHORT, REST_COLOR } from "@/lib/effort-colors";
+import { RespHrCandles } from "@/components/activity/resp-hr-candles";
 import { RespHrScatter } from "@/components/activity/resp-hr-scatter";
 import type {
   MetricSummary,
@@ -759,7 +760,12 @@ export function TelemetryCharts({
           </p>
         )}
       {respRelation && renderSpecs.some((s) => s.key === "RespirationRate") ? (
-        <RespHrScatter activityId={activityId} />
+        <>
+          <RespHrScatter activityId={activityId} />
+          {/* Within-run relation above; where this run's efforts land
+              against the athlete's own history below. */}
+          <RespHrCandles activityId={activityId} />
+        </>
       ) : (
         <>
           <ChartPane

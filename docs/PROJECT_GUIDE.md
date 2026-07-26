@@ -119,7 +119,7 @@ fetching. Tailwind. iPhone-first layout.
 | Tab | Route | What's there |
 |---|---|---|
 | Health | `/` | Today's check-in card, context-events card, readiness, recovery/sleep charts |
-| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer + "Ask AI about this run" |
+| Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer (resp-vs-HR scatter + flippable resp×HR candles vs. own history) + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable), coaching tips (read-only, coach-appended via `POST /api/coaching-tips`) |
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
 | Setup | `/setup` | Garmin / Google sign-in, sync controls |
