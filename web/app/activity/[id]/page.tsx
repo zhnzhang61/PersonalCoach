@@ -199,7 +199,10 @@ function TelemetrySection({
   run: RunActivity;
   activityId: number;
 }) {
-  const [open, setOpen] = useState(false);
+  // Open by default. The drawer holds the charts that answer "what
+  // actually happened on this run" — folding it shut cost a tap on
+  // every visit for content the user opens every time anyway.
+  const [open, setOpen] = useState(true);
   const [highlight, setHighlight] = useState<VerdictAnchor | null>(null);
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const verdictsQuery = useRunVerdicts(activityId);
