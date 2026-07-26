@@ -198,7 +198,7 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {mode === "hrToResp" ? "心率区间 → 呼吸" : "呼吸区间 → 心率"}
           <span className="ml-1.5 opacity-70">
             {yLabel} · 基线 {data.baseline.n_laps} 圈
@@ -209,16 +209,16 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
           onClick={() =>
             setMode((m) => (m === "hrToResp" ? "respToHr" : "hrToResp"))
           }
-          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/40"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-background px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/40"
         >
-          <ArrowRightLeft className="size-3" aria-hidden />
+          <ArrowRightLeft className="size-3.5" aria-hidden />
           翻转
         </button>
       </div>
 
       <ChartContainer
         config={CHART_CONFIG}
-        className={mode === "respToHr" ? "h-72 w-full" : "h-64 w-full"}
+        className={mode === "respToHr" ? "h-80 w-full" : "h-72 w-full"}
       >
         <ComposedChart
           data={rows}
@@ -236,7 +236,7 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
             tickLine={false}
             axisLine={false}
             interval={0}
-            height={mode === "respToHr" ? 34 : 20}
+            height={mode === "respToHr" ? 42 : 24}
             tick={(props) => {
               const { x, y, payload } = props as {
                 x: number;
@@ -248,18 +248,18 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
               return (
                 <g transform={`translate(${x},${y})`}>
                   <text
-                    dy={12}
+                    dy={14}
                     textAnchor="middle"
-                    fontSize={10}
+                    fontSize={12}
                     fill="currentColor"
                   >
                     {EFFORT_SHORT[k] ?? k}
                   </text>
                   {mode === "respToHr" && zone && (
                     <text
-                      dy={25}
+                      dy={30}
                       textAnchor="middle"
-                      fontSize={9}
+                      fontSize={11}
                       fill="currentColor"
                       opacity={0.55}
                     >
@@ -275,8 +275,8 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
             allowDataOverflow
             tickLine={false}
             axisLine={false}
-            tick={{ fontSize: 10 }}
-            width={34}
+            tick={{ fontSize: 12 }}
+            width={40}
           />
           <Bar dataKey="base" stackId="c" fill="transparent" isAnimationActive={false} />
           <Bar dataKey="box" stackId="c" barSize={26} radius={2} isAnimationActive={false}>
@@ -305,7 +305,7 @@ export function RespHrCandles({ activityId }: { activityId: number }) {
         </ComposedChart>
       </ChartContainer>
 
-      <p className="text-[10px] leading-relaxed text-muted-foreground">
+      <p className="text-xs leading-relaxed text-muted-foreground">
         柱 = 25–75%，须 = 10–90%，十字 = 中位。淡色柱表示该区间读数不可靠
         （心率低于 149 呼吸与心率脱钩，高于 174 心率带的呼吸估算压缩失真）。
         彩色点 = 本次跑该档的均值。
