@@ -1395,12 +1395,19 @@ def resp_hr_profile(
     since: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """One payload for the run-page chart: the baseline candles plus
-    this run's own per-effort (HR, respiration) centroids to overlay."""
+    this run's own per-effort (HR, respiration) centroids to overlay.
+
+    The displayed run is excluded from its own baseline — otherwise a
+    rep-heavy workout would move (or, once it crosses min_laps, create)
+    the candle it is being compared against, making its own points look
+    artificially typical."""
     if not _find_run_summary(activity_id):
         raise HTTPException(404, "Run not found")
     return {
         "activity_id": activity_id,
-        "baseline": processor.get_resp_hr_distribution(since=since),
+        "baseline": processor.get_resp_hr_distribution(
+            since=since, exclude_activity_id=activity_id
+        ),
         "run_points": processor.get_run_effort_points(activity_id),
     }
 

@@ -1894,18 +1894,64 @@ class DataProcessor:
         )
         return bands, "derived_from_hr_zones"
 
-    def _iter_model_laps(self, since: str | None = None):
+    def _running_activity_ids(self) -> set[int]:
+        """Activity IDs whose type is a run.
+
+        The splits directory is populated for every synced activity, not
+        just runs (GarminSync stores per-activity payloads for whatever
+        get_activities() returns), so a swim/hike/stair session with lap
+        HR + respiration would otherwise land in the running baseline
+        and tilt the candles. The type lives only in the get_activities
+        summaries, so consult those. Not cached: `processor` is a
+        long-lived singleton, so a stale set would silently drop a
+        freshly-synced run from every baseline until restart. The scan
+        is ~20ms over ~600 tiny files — the same scan-each-time posture
+        the run-summary lookups already take.
+        """
+        ids: set[int] = set()
+        act_dir = self.paths['activities']
+        if os.path.isdir(act_dir):
+            for entry in os.scandir(act_dir):
+                if not entry.name.endswith('.json'):
+                    continue
+                payload = self.load_json_safe(entry.path)
+                rows = payload if isinstance(payload, list) else [payload]
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if RunActivity.is_run_dict(row):
+                        try:
+                            ids.add(int(row.get("activityId")))
+                        except (TypeError, ValueError):
+                            continue
+        return ids
+
+    def _iter_model_laps(
+        self, since: str | None = None, exclude_activity_id: int | None = None
+    ):
         """Yield interior laps (lap 1 + last dropped) that carry both HR
-        and respiration. Reads splits straight off disk — ~600 small
-        files, fast enough to serve per request without a cache layer."""
+        and respiration, from RUNNING activities only. Reads splits
+        straight off disk — ~600 small files, fast enough to serve per
+        request without a cache layer.
+
+        `exclude_activity_id` drops one activity's laps so a run can be
+        compared against its history rather than against a baseline it
+        is itself in — a rep workout would otherwise move (or, once it
+        crosses min_laps, create) the very candle it's judged against.
+        """
         if not os.path.isdir(self.paths['splits']):
             return
+        run_ids = self._running_activity_ids()
         for entry in os.scandir(self.paths['splits']):
             if not entry.name.endswith('.json'):
                 continue
             try:
                 activity_id = int(entry.name[:-5])
             except ValueError:
+                continue
+            if activity_id == exclude_activity_id:
+                continue
+            if activity_id not in run_ids:
                 continue
             laps = self.get_run_laps(activity_id)
             if len(laps) < 3:
@@ -1952,13 +1998,18 @@ class DataProcessor:
         }
 
     def get_resp_hr_distribution(
-        self, since: str | None = None, min_laps: int = 12
+        self, since: str | None = None, min_laps: int = 12,
+        exclude_activity_id: int | None = None,
     ) -> dict:
         """Both candle views over the lap population.
 
         `since` is an inclusive YYYY-MM-DD floor — pass a recent date to
         compare against current fitness rather than all-time, since the
         whole curve shifts as fitness changes.
+
+        `exclude_activity_id` drops that run from the baseline so a run
+        page compares against prior activities, not against a set it is
+        itself part of.
 
         Every band carries numeric stats AND a preformatted `summary`
         string so the same payload serves the chart and the coach's
@@ -1968,7 +2019,7 @@ class DataProcessor:
         back empty when `user_zones.json` is absent. `resp_to_hr` needs
         no zone definitions and is always populated when there are laps.
         """
-        rows = list(self._iter_model_laps(since))
+        rows = list(self._iter_model_laps(since, exclude_activity_id))
         zones = self.get_hr_zones()
         lo_ok, hi_ok = self._RESP_RELIABLE_HR
 
@@ -2018,13 +2069,14 @@ class DataProcessor:
                     round(sorted(paces)[len(paces) // 2], 2) if paces else None
                 ),
                 "approx_zone": approx_zone,
-                # Informative only once respiration has coupled to
-                # effort, and while the band's HR mass stays under the
-                # compression ceiling. The coupling floor tracks the
-                # bands rather than a hard 33 so derived cuts stay
-                # consistent with it: the first band is always below
-                # coupling, the rest are judged on their HR mass.
-                "reliable": low > 0.0 and c["median"] <= hi_ok,
+                # Informative only while the band's HR mass sits inside
+                # the trustworthy window [149, 174] — below it
+                # respiration is decoupled from HR (the band reflects HR
+                # noise, not effort), above it the strap's estimate
+                # compresses. Judged on the band's median HR so a
+                # low-effort band (or a fixed-fallback band) centred
+                # under 149 is muted, not just the first interval.
+                "reliable": lo_ok <= c["median"] <= hi_ok,
                 "unit": "bpm",
                 "summary": (
                     f"Respiration {label}/min"

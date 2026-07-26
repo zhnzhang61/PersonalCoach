@@ -26,11 +26,20 @@ def _lap(hr, resp, *, dist_m=1609.34, dur=540):
     }
 
 
-def _write_run(dp, activity_id, laps, categories=None):
+def _write_run(dp, activity_id, laps, categories=None, type_key="running"):
     import os
     os.makedirs(dp.paths["splits"], exist_ok=True)
     with open(f"{dp.paths['splits']}/{activity_id}.json", "w") as f:
         json.dump({"activityId": activity_id, "lapDTOs": laps}, f)
+    # The baseline only counts running activities, and the type lives in
+    # the get_activities summary — write one so the run is visible to the
+    # running-id filter. Pass type_key="lap_swimming" etc. to make a run
+    # the baseline should ignore.
+    os.makedirs(dp.paths["activities"], exist_ok=True)
+    with open(f"{dp.paths['activities']}/{activity_id}_summary.json", "w") as f:
+        json.dump(
+            {"activityId": activity_id, "activityType": {"typeKey": type_key}}, f
+        )
     if categories is not None:
         with open(f"{dp.paths['manual']}/run_{activity_id}_meta.json", "w") as f:
             json.dump({"lap_categories": categories}, f)
@@ -113,6 +122,52 @@ def test_since_filter(dp):
     _write_run(dp, 5, [_lap(150, 30)] * 8)
     assert list(dp._iter_model_laps(since="2027-01-01")) == []
     assert len(list(dp._iter_model_laps(since="2026-01-01"))) == 6
+
+
+def test_non_running_activities_excluded_from_baseline(dp):
+    # A swim with lap HR + respiration must not enter the running
+    # baseline (Codex P1: the splits dir holds every synced modality).
+    _write_run(dp, 40, [_lap(150, 30)] * 8, type_key="running")
+    _write_run(dp, 41, [_lap(150, 30)] * 8, type_key="lap_swimming")
+    _write_run(dp, 42, [_lap(150, 30)] * 8, type_key="hiking")
+    rows = list(dp._iter_model_laps())
+    assert {r["activity_id"] for r in rows} == {40}
+
+
+def test_running_ids_covers_run_flavored_types(dp):
+    _write_run(dp, 43, [_lap(150, 30)] * 4, type_key="trail_running")
+    _write_run(dp, 44, [_lap(150, 30)] * 4, type_key="treadmill_running")
+    assert dp._running_activity_ids() == {43, 44}
+
+
+def test_displayed_run_excluded_from_its_own_baseline(dp):
+    # Codex P1: a rep workout would otherwise move the candle it is
+    # compared against. With only its own laps present and it excluded,
+    # the baseline is empty.
+    _write_run(dp, 50, [_lap(160, 35)] * 10)
+    assert list(dp._iter_model_laps(exclude_activity_id=50)) == []
+    assert len(list(dp._iter_model_laps())) == 8  # interior laps, included
+
+
+def test_exclusion_removes_only_that_run(dp):
+    _write_run(dp, 51, [_lap(155, 32)] * 8)
+    _write_run(dp, 52, [_lap(160, 35)] * 8)
+    rows = list(dp._iter_model_laps(exclude_activity_id=51))
+    assert {r["activity_id"] for r in rows} == {52}
+
+
+def test_low_hr_resp_band_muted_even_when_not_first(dp):
+    # Codex P2: a respiration band whose HR mass sits below 149 must be
+    # muted, not just the first band. Force the fixed-fallback partition
+    # (thin reliable window) and put a mid band's HR mass under 149.
+    # 30-33 breaths at HR 140 → below the coupling floor.
+    laps = [_lap(140, 31)] * 20
+    _write_run(dp, 60, [_lap(140, 20)] + laps + [_lap(140, 20)])
+    d = dp.get_resp_hr_distribution(min_laps=3)
+    assert d["resp_band_source"] == "fixed"
+    band = next(b for b in d["resp_to_hr"] if b["band"] == "30–33")
+    assert band["median"] < 149
+    assert band["reliable"] is False
 
 
 def test_run_effort_points_use_user_labels(dp):
