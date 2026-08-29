@@ -762,6 +762,35 @@ class TestGarminSync:
         assert body["reason"] == "error"
         assert body["returncode"] == 1
 
+    def test_sync_defaults_to_seven_day_window(self, client, monkeypatch):
+        # Interactive syncs are speed-sensitive; the endpoint must pass
+        # an explicit --days-back 7 while the nightly agent (no flag)
+        # keeps the 30-day self-healing default.
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert client.post("/api/sync/garmin").json()["ok"] is True
+        i = seen["cmd"].index("--days-back")
+        assert seen["cmd"][i + 1] == "7"
+
+    def test_sync_days_back_param_passthrough(self, client, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        client.post("/api/sync/garmin?days_back=30")
+        i = seen["cmd"].index("--days-back")
+        assert seen["cmd"][i + 1] == "30"
+        # Bounds enforced at the API layer.
+        assert client.post("/api/sync/garmin?days_back=0").status_code == 422
+
 
 class TestGarminRefreshToken:
     def test_refresh_success(self, client, mock_subprocess_ok):

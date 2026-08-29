@@ -116,7 +116,7 @@ Tailwind。iPhone 优先布局。
 | Activity | `/activity` | 跑步列表 + 单次详情（`/activity/[id]`）：地图（仅户外）→ run 汇总块 → 折叠的遥测抽屉（呼吸-心率散点 + 可翻转的呼吸×心率蜡烛图，对比自身历史）+ "Ask AI about this run" |
 | Training | `/training` | 周期总览、月度图、计划日历、未来计划训练（可编辑）、coaching tips（只读，coach 经 `POST /api/coaching-tips` 追加） |
 | Coach | `/coach` | session 制聊天线程（流式）、action pills、day dividers、agent 工作时实时显示工具调用 chips（答案落地后隐藏） |
-| Setup | `/setup` | Garmin / Google 登录、同步控制 |
+| Setup | `/setup` | Garmin / Google 登录、同步控制;下拉刷新触发 7 天窗口同步(夜间 agent 保留 30 天自愈窗口) |
 
 **Run 详情页（`/activity/[id]`）——三个块（#113）：**
 

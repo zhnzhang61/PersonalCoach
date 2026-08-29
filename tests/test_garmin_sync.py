@@ -333,3 +333,27 @@ class TestRunSyncTodayYesterdayAlwaysFetched:
 
         called_dates = {c.kwargs.get("cdate") for c in syncer.client.get_sleep_data.call_args_list}
         assert today in called_dates
+
+
+class TestParseDaysBack:
+    """CLI window flag for interactive (fast) syncs. The bare default
+    stays 30 so the flagless nightly LaunchAgent keeps its self-healing
+    window — the days_back=5 era made >5-day gaps unrecoverable."""
+
+    def test_defaults_to_thirty_without_flag(self):
+        from backend.garmin_sync import parse_days_back
+        assert parse_days_back(["prog", "--no-fallback"]) == 30
+
+    def test_parses_flag(self):
+        from backend.garmin_sync import parse_days_back
+        assert parse_days_back(["prog", "--days-back", "7"]) == 7
+
+    def test_clamps_to_sane_range(self):
+        from backend.garmin_sync import parse_days_back
+        assert parse_days_back(["prog", "--days-back", "0"]) == 1
+        assert parse_days_back(["prog", "--days-back", "365"]) == 90
+
+    def test_malformed_value_falls_back_to_default(self):
+        from backend.garmin_sync import parse_days_back
+        assert parse_days_back(["prog", "--days-back"]) == 30
+        assert parse_days_back(["prog", "--days-back", "soon"]) == 30

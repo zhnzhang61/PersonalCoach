@@ -276,8 +276,14 @@ def sync_garmin_status() -> dict[str, Any]:
 
 
 @app.post("/api/sync/garmin")
-def sync_garmin() -> dict[str, Any]:
-    cmd = [sys.executable, "-m", "backend.garmin_sync", "--no-fallback"]
+def sync_garmin(days_back: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
+    """Interactive sync (Setup button / pull-to-refresh) defaults to a
+    7-day window for speed. The nightly LaunchAgent runs the module with
+    no flag and keeps the 30-day self-healing window."""
+    cmd = [
+        sys.executable, "-m", "backend.garmin_sync", "--no-fallback",
+        "--days-back", str(days_back),
+    ]
     # /dev/null on stdin so any prompt-based fallback can't hang the request.
     result = subprocess.run(
         cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL

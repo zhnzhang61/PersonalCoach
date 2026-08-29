@@ -122,7 +122,7 @@ fetching. Tailwind. iPhone-first layout.
 | Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer (resp-vs-HR scatter + flippable resp×HR candles vs. own history) + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable), coaching tips (read-only, coach-appended via `POST /api/coaching-tips`) |
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
-| Setup | `/setup` | Garmin / Google sign-in, sync controls |
+| Setup | `/setup` | Garmin / Google sign-in, sync controls; pull-to-refresh runs a 7-day sync (nightly agent keeps the 30-day self-healing window) |
 
 **Run detail page (`/activity/[id]`) — three blocks (#113):**
 
