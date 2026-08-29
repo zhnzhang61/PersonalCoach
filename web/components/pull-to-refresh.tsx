@@ -54,6 +54,16 @@ export function PullToRefresh({
       setPull(eased);
     };
 
+    // touchcancel means the OS took the touch (app switch, system
+    // gesture, notification shade) — the user did not release into a
+    // refresh. Reset the indicator and fire nothing, even when armed.
+    const onCancel = () => {
+      startY.current = null;
+      if (busyRef.current) return;
+      pullRef.current = 0;
+      setPull(0);
+    };
+
     const onEnd = () => {
       const armed = pullRef.current >= THRESHOLD;
       startY.current = null;
@@ -78,12 +88,12 @@ export function PullToRefresh({
     el.addEventListener("touchstart", onStart, { passive: true });
     el.addEventListener("touchmove", onMove, { passive: false });
     el.addEventListener("touchend", onEnd, { passive: true });
-    el.addEventListener("touchcancel", onEnd, { passive: true });
+    el.addEventListener("touchcancel", onCancel, { passive: true });
     return () => {
       el.removeEventListener("touchstart", onStart);
       el.removeEventListener("touchmove", onMove);
       el.removeEventListener("touchend", onEnd);
-      el.removeEventListener("touchcancel", onEnd);
+      el.removeEventListener("touchcancel", onCancel);
     };
   }, [onRefresh]);
 

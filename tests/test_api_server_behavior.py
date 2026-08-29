@@ -791,6 +791,24 @@ class TestGarminSync:
         # Bounds enforced at the API layer.
         assert client.post("/api/sync/garmin?days_back=0").status_code == 422
 
+    def test_sync_rejected_while_another_is_running(
+        self, client, mock_subprocess_ok
+    ):
+        # Two triggers exist on Setup alone (button + pull-to-refresh),
+        # plus other devices and the nightly agent. The endpoint must
+        # refuse to stack a second garmin_sync subprocess.
+        from backend import api_server
+
+        assert api_server._GARMIN_SYNC_LOCK.acquire(blocking=False)
+        try:
+            body = client.post("/api/sync/garmin").json()
+            assert body["ok"] is False
+            assert body["reason"] == "already_running"
+        finally:
+            api_server._GARMIN_SYNC_LOCK.release()
+        # Lock released → next attempt proceeds normally.
+        assert client.post("/api/sync/garmin").json()["ok"] is True
+
 
 class TestGarminRefreshToken:
     def test_refresh_success(self, client, mock_subprocess_ok):
