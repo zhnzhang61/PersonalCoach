@@ -265,6 +265,22 @@ class GarminSync:
                         time.sleep(0.1) 
                     except: pass
 
+def parse_days_back(argv, default=30):
+    """`--days-back N` from a CLI argv, clamped to [1, 90].
+
+    Default stays 30: the nightly LaunchAgent passes no flag and relies
+    on the wide window to self-heal gaps after outages (the days_back=5
+    era made >5-day gaps unrecoverable — see tests). Interactive callers
+    (the API endpoint behind the Setup button / pull-to-refresh) pass an
+    explicit small value for speed.
+    """
+    try:
+        i = list(argv).index("--days-back")
+        return max(1, min(90, int(argv[i + 1])))
+    except (ValueError, IndexError):
+        return default
+
+
 if __name__ == "__main__":
     email = os.getenv("GARMIN_EMAIL")
     password = os.getenv("GARMIN_PASS")
@@ -272,7 +288,7 @@ if __name__ == "__main__":
     # Email / Pass 可以留着做备用变量，虽然新逻辑下用不到了
     syncer = GarminSync(email, password)
     if syncer.connect(no_fallback=no_fallback):
-        syncer.run_sync(days_back=30, activity_limit=5)
+        syncer.run_sync(days_back=parse_days_back(sys.argv), activity_limit=5)
     else:
         # connect() 已经把原因写到 stderr，用 exit code 区分:
         # 2 = token 过期/无效, 1 = 其他失败
