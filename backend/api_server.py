@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
@@ -275,11 +276,30 @@ def sync_garmin_status() -> dict[str, Any]:
     }
 
 
+# One Garmin sync at a time. Two triggers exist on the Setup page alone
+# (button + pull-to-refresh), and nothing else serializes the spawned
+# garmin_sync subprocesses, which all write the same JSON dump + ledger.
+# The frontend coordinates its own two triggers; this lock is the
+# backstop for everything it can't see (second device, cron overlap).
+_GARMIN_SYNC_LOCK = threading.Lock()
+
+
 @app.post("/api/sync/garmin")
 def sync_garmin(days_back: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
     """Interactive sync (Setup button / pull-to-refresh) defaults to a
     7-day window for speed. The nightly LaunchAgent runs the module with
     no flag and keeps the 30-day self-healing window."""
+    if not _GARMIN_SYNC_LOCK.acquire(blocking=False):
+        # A sync is already in flight; its completion updates the status
+        # the UI polls. Don't stack a second subprocess.
+        return {"ok": False, "reason": "already_running"}
+    try:
+        return _run_garmin_sync(days_back)
+    finally:
+        _GARMIN_SYNC_LOCK.release()
+
+
+def _run_garmin_sync(days_back: int) -> dict[str, Any]:
     cmd = [
         sys.executable, "-m", "backend.garmin_sync", "--no-fallback",
         "--days-back", str(days_back),

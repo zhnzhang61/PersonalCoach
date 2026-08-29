@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { PullToRefresh } from "@/components/pull-to-refresh";
 import { apiPost } from "@/lib/api";
+import { GARMIN_SYNC_MUTATION_KEY } from "@/lib/sync";
 import type { SyncResult } from "@/lib/types";
 
 // Setup-page refresh gesture: pull down → run the (7-day) Garmin sync,
@@ -14,13 +15,22 @@ import type { SyncResult } from "@/lib/types";
 // duplicate it.
 export function SetupRefresh({ children }: { children: React.ReactNode }) {
   const qc = useQueryClient();
+  const sync = useMutation({
+    mutationKey: GARMIN_SYNC_MUTATION_KEY,
+    mutationFn: () => apiPost<SyncResult>("/api/sync/garmin"),
+  });
+  const { mutateAsync } = sync;
   const refresh = useCallback(async () => {
-    try {
-      await apiPost<SyncResult>("/api/sync/garmin");
-    } catch {
-      // status card reports it
+    // If a sync is already in flight (the button, or a previous pull),
+    // don't stack another subprocess — just refetch what's on screen.
+    if (qc.isMutating({ mutationKey: [...GARMIN_SYNC_MUTATION_KEY] }) === 0) {
+      try {
+        await mutateAsync();
+      } catch {
+        // status card reports it
+      }
     }
     await qc.invalidateQueries();
-  }, [qc]);
+  }, [qc, mutateAsync]);
   return <PullToRefresh onRefresh={refresh}>{children}</PullToRefresh>;
 }

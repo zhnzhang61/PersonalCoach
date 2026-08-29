@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow, parseISO } from "date-fns";
 import { ClipboardPaste, ExternalLink, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet, apiPost } from "@/lib/api";
 import { GARMIN_SSO_URL, chromeDeepLink } from "@/lib/sso";
+import { GARMIN_SYNC_MUTATION_KEY } from "@/lib/sync";
 import { cn } from "@/lib/utils";
 import type {
   RefreshTokenResult,
@@ -26,9 +27,14 @@ export function SyncSection() {
   });
 
   const sync = useMutation({
+    mutationKey: GARMIN_SYNC_MUTATION_KEY,
     mutationFn: () => apiPost<SyncResult>("/api/sync/garmin"),
     onSettled: () => qc.invalidateQueries({ queryKey: ["sync", "garmin", "status"] }),
   });
+  // Counts every mutation under the shared key — this button's own AND
+  // the pull-to-refresh gesture's — so the two triggers can't stack a
+  // second sync subprocess on top of a running one.
+  const syncInFlight = useIsMutating({ mutationKey: GARMIN_SYNC_MUTATION_KEY }) > 0;
 
   const lastSyncRel = status.data?.last_sync
     ? formatDistanceToNow(parseISO(status.data.last_sync), { addSuffix: true })
@@ -69,14 +75,14 @@ export function SyncSection() {
               type="button"
               size="lg"
               onClick={() => sync.mutate()}
-              disabled={sync.isPending}
+              disabled={syncInFlight}
               className="shrink-0"
             >
               <RefreshCw
-                className={cn("size-4", sync.isPending && "animate-spin")}
+                className={cn("size-4", syncInFlight && "animate-spin")}
                 aria-hidden
               />
-              {sync.isPending ? "Syncing…" : "Sync now"}
+              {syncInFlight ? "Syncing…" : "Sync now"}
             </Button>
           </div>
 
