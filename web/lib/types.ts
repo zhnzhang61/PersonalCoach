@@ -242,6 +242,11 @@ export interface RunsResponse {
   runs: RunActivity[];
 }
 
+export interface SuggestTitleResponse {
+  suggested_title: string | null;
+  week_num: number | null;
+}
+
 export interface RunDetailResponse {
   run: RunActivity;
   laps: unknown[];

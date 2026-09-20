@@ -2169,6 +2169,68 @@ class DataProcessor:
         out.sort(key=lambda p: order.get(p["category"], 99))
         return out
 
+    # The user names runs "NYC W15D1 - 2": W counts Monday-started weeks from
+    # the current era's first training week (rebuild began 2026-06-01, a
+    # Monday — verified against his hand-typed names for the weeks of 9/7 and
+    # 9/14), D is the Nth distinct day WITH runs inside that week, and the
+    # " - k" suffix orders same-day recordings (warmup / main / cooldown).
+    # Non-running activities neither get titles nor consume a D slot.
+    RUN_TITLE_PREFIX = "NYC"
+    RUN_TITLE_WEEK1_MONDAY = datetime.date(2026, 6, 1)
+
+    def suggest_run_title(self, activity_id: int) -> dict[str, Any]:
+        """Prefill title for the run-edit form, derived from the activity's
+        position in the training week. Returns {"suggested_title": None}
+        for non-runs, unknown ids, and pre-era dates — the form then falls
+        back to Garmin's activityName as before."""
+        target = None
+        week_runs: list[tuple[str, int]] = []  # (startTimeLocal, activityId)
+        acts_dir = self.paths['activities']
+        if not os.path.isdir(acts_dir):
+            return {"suggested_title": None, "week_num": None}
+        entries = []
+        for f in os.listdir(acts_dir):
+            if not f.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(acts_dir, f)) as jf:
+                    d = json.load(jf)
+            except Exception:
+                continue
+            for a in (d if isinstance(d, list) else [d]):
+                if not isinstance(a, dict):
+                    continue
+                start = a.get('startTimeLocal') or ''
+                if not start or not RunActivity.is_run_dict(a):
+                    continue
+                entries.append((start, a.get('activityId')))
+                if a.get('activityId') == activity_id:
+                    target = start
+        if target is None:
+            return {"suggested_title": None, "week_num": None}
+
+        t_date = datetime.date.fromisoformat(target[:10])
+        monday = t_date - datetime.timedelta(days=t_date.weekday())
+        week_num = (monday - self.RUN_TITLE_WEEK1_MONDAY).days // 7 + 1
+        if week_num < 1:
+            return {"suggested_title": None, "week_num": None}
+
+        sunday = monday + datetime.timedelta(days=6)
+        week_runs = sorted(
+            (s, aid) for s, aid in entries
+            if monday.isoformat() <= s[:10] <= sunday.isoformat()
+        )
+        day_dates = sorted({s[:10] for s, _ in week_runs})
+        day_num = day_dates.index(target[:10]) + 1
+
+        same_day = [(s, aid) for s, aid in week_runs if s[:10] == target[:10]]
+        title = f"{self.RUN_TITLE_PREFIX} W{week_num}D{day_num}"
+        if len(same_day) > 1:
+            seq = next(i for i, (_, aid) in enumerate(same_day, 1)
+                       if aid == activity_id)
+            title += f" - {seq}"
+        return {"suggested_title": title, "week_num": week_num}
+
     def get_run_laps(self, activity_id):
         json_path = os.path.join(self.paths['splits'], f"{activity_id}.json")
         if not os.path.exists(json_path): return []

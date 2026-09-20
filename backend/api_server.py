@@ -1362,6 +1362,13 @@ def update_laps(activity_id: int, body: LapsUpdate) -> dict[str, Any]:
     return {"ok": True, "activity_id": activity_id, "category_stats": stats}
 
 
+@app.get("/api/runs/{activity_id}/suggest-title")
+def suggest_title(activity_id: int) -> dict[str, Any]:
+    """Prefill name for the run-edit form ("NYC W15D3", "NYC W16D1 - 2").
+    Suggestion only — nothing is written until the user saves."""
+    return processor.suggest_run_title(activity_id)
+
+
 @app.get("/api/runs/{activity_id}/suggest-labels")
 def suggest_labels(activity_id: int) -> dict[str, Any]:
     """First-guess effort labels (HR-zone based + Rest heuristics) for
