@@ -40,7 +40,11 @@ export function EditRunForm({ run, onClose }: Props) {
         `/api/runs/${run.activityId}/suggest-title`,
       ),
     enabled: !hasSavedName,
-    staleTime: Infinity,
+    // The suggestion is derived from every run in the activity's week, so
+    // a later Garmin sync (new same-day recording, earlier run-day) can
+    // change W/D/suffix. staleTime 0 refetches on every editor open
+    // instead of trusting a session-long cache.
+    staleTime: 0,
   });
   const [nameEdit, setNameEdit] = useState<string | null>(
     run.manual_meta?.name || null,
@@ -50,6 +54,15 @@ export function EditRunForm({ run, onClose }: Props) {
     suggestQuery.data?.suggested_title ??
     run.activityName ??
     "Run";
+  // Laps are often already cached when the editor opens, so Save would be
+  // enabled while the suggestion is still in flight — and a quick save
+  // would permanently record the Garmin default name and week 0. Gate on
+  // isFetching, not isLoading: with staleTime 0 a reopened editor serves
+  // cached data while a background refetch runs (isLoading false), and
+  // the gate must also hold while the user is already typing a custom
+  // name, because week_num is still unresolved until the fetch settles.
+  // Errors settle too: the fallback chain then applies knowingly.
+  const suggestionPending = !hasSavedName && suggestQuery.isFetching;
   const [notes, setNotes] = useState(run.manual_meta?.notes ?? "");
   // The server's categories are the baseline; per-lap overrides layer on top
   // until save. This avoids setState-in-effect — no hydration step needed.
@@ -90,7 +103,7 @@ export function EditRunForm({ run, onClose }: Props) {
   };
 
   const onSave = () => {
-    if (laps.length === 0) return;
+    if (laps.length === 0 || suggestionPending) return;
     const finalCategories = laps.map((_, i) => categoryAt(i));
     mutation.mutate({
       week_num:
@@ -159,7 +172,10 @@ export function EditRunForm({ run, onClose }: Props) {
           className="flex-1 gap-1.5"
           onClick={onSave}
           disabled={
-            mutation.isPending || lapsQuery.isLoading || laps.length === 0
+            mutation.isPending ||
+            lapsQuery.isLoading ||
+            laps.length === 0 ||
+            suggestionPending
           }
         >
           <Check className="size-4" />
