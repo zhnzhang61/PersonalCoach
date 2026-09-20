@@ -11,6 +11,7 @@ import type {
   LapsResponse,
   LapsUpdateBody,
   RunActivity,
+  SuggestTitleResponse,
 } from "@/lib/types";
 import { EffortPaintEditor } from "@/components/activity/effort-paint-editor";
 
@@ -27,9 +28,28 @@ export function EditRunForm({ run, onClose }: Props) {
       apiGet<LapsResponse>(`/api/runs/${run.activityId}/laps`),
   });
 
-  const [name, setName] = useState(
-    run.manual_meta?.name || run.activityName || "Run",
+  // Title prefill: an unnamed run gets a suggested "NYC W15D3"-style name
+  // computed from its position in the training week. The suggestion loads
+  // async, so edits live in nameEdit and the displayed value falls back
+  // through suggestion -> Garmin name (no setState-in-effect hydration).
+  const hasSavedName = Boolean(run.manual_meta?.name);
+  const suggestQuery = useQuery({
+    queryKey: ["runs", run.activityId, "suggest-title"],
+    queryFn: () =>
+      apiGet<SuggestTitleResponse>(
+        `/api/runs/${run.activityId}/suggest-title`,
+      ),
+    enabled: !hasSavedName,
+    staleTime: Infinity,
+  });
+  const [nameEdit, setNameEdit] = useState<string | null>(
+    run.manual_meta?.name || null,
   );
+  const name =
+    nameEdit ??
+    suggestQuery.data?.suggested_title ??
+    run.activityName ??
+    "Run";
   const [notes, setNotes] = useState(run.manual_meta?.notes ?? "");
   // The server's categories are the baseline; per-lap overrides layer on top
   // until save. This avoids setState-in-effect — no hydration step needed.
@@ -73,7 +93,10 @@ export function EditRunForm({ run, onClose }: Props) {
     if (laps.length === 0) return;
     const finalCategories = laps.map((_, i) => categoryAt(i));
     mutation.mutate({
-      week_num: run.manual_meta?.week_num ?? 0,
+      week_num:
+        run.manual_meta?.week_num ||
+        suggestQuery.data?.week_num ||
+        0,
       run_name: name,
       categories: finalCategories,
       notes,
@@ -89,7 +112,7 @@ export function EditRunForm({ run, onClose }: Props) {
         <Input
           className="text-base"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => setNameEdit(e.target.value)}
         />
       </label>
 
