@@ -26,6 +26,10 @@ const nextConfig: NextConfig = {
   // hostname the Tailscale account ends up assigning.
   allowedDevOrigins: [
     "zhans-macbook-pro",
+    // Bonjour/mDNS name — the phone bookmark uses this so it survives
+    // DHCP giving the Mac a new IP; without it the .local origin is
+    // blocked and the phone sees skeletons only.
+    "zhans-macbook-pro.local",
     "*.ts.net",
     "100.110.119.107",
     // Local Wi-Fi IP — phone-on-LAN access during dev.
