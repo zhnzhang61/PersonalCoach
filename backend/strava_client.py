@@ -14,7 +14,7 @@ Strava API Policy (effective 2026-06-01) shapes the design:
     nothing read from Strava is written to disk, logged, or handed to the
     coach. Titles are generated from Garmin/app data only.
   - Cached Strava data may be kept 7 days at most, so the Garmin→Strava id
-    pairing is looked up on demand (kept in memory for the process only).
+    pairing is looked up on demand (kept in memory only, for a day at most).
 
 Credentials: STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET in .env (the user's
 own API application). Tokens: data/oauth/strava_token.json.
@@ -46,6 +46,11 @@ ACTIVITY_URL = "https://www.strava.com/activities/{id}"
 # apart, so 5 minutes still cannot confuse warm-up with main set.
 MATCH_TOLERANCE_S = 300
 _REFRESH_MARGIN_S = 300
+# How long a Garmin→Strava id pairing is remembered. Policy §6.2 caps any
+# cache of Strava data at 7 days; a day is plenty to cover "save the name,
+# then tap the link" and stays far inside that even if the server never
+# restarts.
+_ID_CACHE_TTL_S = 24 * 3600
 
 
 class StravaError(Exception):
@@ -64,7 +69,8 @@ class StravaClient:
         self._http = http
         self._now = now
         self._env = env
-        self._ids: dict[int, int] = {}   # garmin activity id → strava activity id
+        # garmin activity id → (strava activity id, time it was looked up)
+        self._ids: dict[int, tuple[int, float]] = {}
 
     # ------------------------------------------------------------ credentials
     def _client(self) -> tuple[str, str]:
@@ -148,8 +154,11 @@ class StravaClient:
     def find_activity_id(self, garmin_id: int, start_utc: datetime.datetime,
                          distance_m: float | None = None) -> int | None:
         """Strava id of the activity that started at `start_utc`, or None."""
-        if garmin_id in self._ids:
-            return self._ids[garmin_id]
+        cached = self._ids.get(garmin_id)
+        if cached is not None:
+            if self._now() - cached[1] < _ID_CACHE_TTL_S:
+                return cached[0]
+            del self._ids[garmin_id]
         if start_utc.tzinfo is None:
             start_utc = start_utc.replace(tzinfo=datetime.timezone.utc)
         t = start_utc.timestamp()
@@ -176,7 +185,7 @@ class StravaClient:
                 best = key
         if best is None:
             return None
-        self._ids[garmin_id] = best[2]
+        self._ids[garmin_id] = (best[2], self._now())
         return best[2]
 
     def activity_url(self, strava_id: int) -> str:

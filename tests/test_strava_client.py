@@ -192,6 +192,24 @@ class TestMatching:
         c.find_activity_id(111, START)
         assert sum(1 for call in http.calls if call[0] == "GET") == 1
 
+    def test_remembered_id_expires_after_a_day(self, tmp_path):
+        # Policy §6.2: no Strava data cached beyond 7 days. A server that
+        # never restarts must still forget.
+        http = FakeHttp()
+        http.activities = [_act(900, START)]
+        clock = {"t": 1_000.0}
+        path = tmp_path / "oauth" / "strava_token.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({**FRESH, "expires_at": 10**12}))
+        c = StravaClient(token_path=path, http=http, now=lambda: clock["t"], env=ENV.get)
+        c.find_activity_id(111, START)
+        clock["t"] += 23 * 3600
+        c.find_activity_id(111, START)
+        assert sum(1 for call in http.calls if call[0] == "GET") == 1
+        clock["t"] += 2 * 3600
+        c.find_activity_id(111, START)
+        assert sum(1 for call in http.calls if call[0] == "GET") == 2
+
     def test_a_miss_is_not_cached(self, tmp_path):
         # Garmin→Strava sync can lag; the next tap must look again.
         http = FakeHttp()
