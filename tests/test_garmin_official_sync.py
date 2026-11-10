@@ -213,6 +213,52 @@ class TestFailures:
         with pytest.raises(gos.KeyRejected):
             _sync(tmp_path, client=client, days_back=1)
 
+    def test_revoked_cached_token_is_refreshed_once_and_the_call_retried(self, tmp_path):
+        # The library reuses a cached bearer token; if Garmin revoked it
+        # early the first data call 401s although the key is fine.
+        class StaleToken(FakeClient):
+            token_ok = False
+
+            def search_activities(self, **kw):
+                self.calls.append("search")
+                if not self.token_ok:
+                    raise HttpError(401)
+                return self.activities[kw.get("start", 0):kw.get("start", 0) + kw.get("limit", 20)]
+        client = StaleToken()
+        refreshed = []
+
+        def refresh():
+            refreshed.append(1)
+            client.token_ok = True
+        s = gos.GarminOfficialSync(client, data_dir=str(tmp_path), today=TODAY,
+                                   sleep=lambda _s: None, refresh_token=refresh)
+        s.run_sync(days_back=1)
+        assert refreshed == [1]
+        assert (tmp_path / "get_activities" / "111_summary.json").exists()
+
+    def test_still_rejected_after_refresh_means_the_key_is_bad(self, tmp_path):
+        client = FakeClient(fail={"search": HttpError(401)})
+        refreshed = []
+        s = gos.GarminOfficialSync(client, data_dir=str(tmp_path), today=TODAY,
+                                   sleep=lambda _s: None, refresh_token=lambda: refreshed.append(1))
+        with pytest.raises(gos.KeyRejected):
+            s.run_sync(days_back=1)
+        assert refreshed == [1]   # tried exactly once, not per call
+
+    def test_failed_activity_search_is_an_error_not_an_empty_window(self, tmp_path):
+        client = FakeClient(fail={"search": HttpError(500)})
+        with pytest.raises(gos.SyncError):
+            _sync(tmp_path, client=client, days_back=1)
+
+    def test_main_reports_failed_search_as_exit_1(self, monkeypatch, capsys, tmp_path):
+        monkeypatch.setenv(gos.ENV_KEY, "k")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gos, "connect",
+                            lambda _k: (FakeClient(fail={"search": HttpError(503)}), lambda: None))
+        monkeypatch.setattr(gos.time, "sleep", lambda _s: None)
+        assert gos.main(["prog"]) == 1
+        assert "SYNC_FAILED" in capsys.readouterr().err
+
     def test_main_without_key_exits_3(self, monkeypatch, capsys):
         monkeypatch.delenv(gos.ENV_KEY, raising=False)
         assert gos.main(["prog"]) == gos.EXIT_NO_KEY

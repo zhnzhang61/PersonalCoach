@@ -28,7 +28,8 @@ sleep-stage timeline, body-battery change during sleep.
 
 Every dict this module writes carries `"_source": "garmin_personal_api"`.
 
-Exit codes: 0 ok · 3 no API key configured · 4 key rejected · 1 other.
+Exit codes: 0 ok · 3 no API key configured · 4 key rejected · 1 other
+(incl. a failed activity search — never reported as an empty window).
 """
 
 from __future__ import annotations
@@ -64,30 +65,51 @@ class KeyRejected(Exception):
     """The API key was refused (expired, deleted, or mistyped)."""
 
 
+class SyncError(Exception):
+    """A call the sync cannot do without failed (not an auth problem)."""
+
+
 def _is_auth_error(exc: Exception) -> bool:
     status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
     return status in (401, 403)
 
 
 def connect(api_key: str):
-    """Exchange the API key for a bearer token and return a ready client."""
+    """Exchange the API key for a bearer token.
+
+    Returns (client, refresh). The official library caches the bearer
+    token on disk and reuses it while it has more than an hour left, so a
+    token Garmin revoked early would keep being served. `refresh()` forces
+    a new exchange and installs the new token on the client; the sync
+    calls it once when a data call comes back 401/403.
+    """
     from garmin_personal_api import GarminPersonalApiClient, PersonalApiAuthenticator
 
-    try:
-        with PersonalApiAuthenticator() as auth:
-            token = auth.obtain_token(api_key)
-    except Exception as exc:  # the library raises its own HTTP error types
-        if _is_auth_error(exc):
-            raise KeyRejected(str(exc)) from exc
-        raise
-    return GarminPersonalApiClient(token.access_token)
+    def exchange(force: bool) -> str:
+        try:
+            with PersonalApiAuthenticator() as auth:
+                return auth.obtain_token(api_key, force_refresh=force).access_token
+        except Exception as exc:  # the library raises its own HTTP error types
+            if _is_auth_error(exc):
+                raise KeyRejected(str(exc)) from exc
+            raise
+
+    client = GarminPersonalApiClient(exchange(False))
+
+    def refresh() -> None:
+        client.update_bearer_token(exchange(True))
+
+    return client, refresh
 
 
 class GarminOfficialSync:
     def __init__(self, client: Any, data_dir: str = "data",
                  today: datetime.date | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 refresh_token: Callable[[], None] | None = None):
         self.client = client
+        self._refresh_token = refresh_token
+        self._token_refreshed = False
         self.data_dir = data_dir
         self.today = today or datetime.date.today()
         self._sleep = sleep
@@ -116,15 +138,39 @@ class GarminOfficialSync:
         except (OSError, ValueError):
             return None
 
-    def _call(self, label: str, fn: Callable[[], Any]) -> Any:
-        """One API call. Auth failures abort the whole sync (every later
-        call would fail the same way); anything else is logged and skipped
-        so one bad endpoint does not cost the rest of the day's data."""
+    def _call(self, label: str, fn: Callable[[], Any], required: bool = False) -> Any:
+        """One API call.
+
+        401/403: the cached bearer token may have been revoked while the
+        key is still fine, so refresh the token once per sync and retry;
+        a second refusal means the key itself is rejected and aborts the
+        sync (every later call would fail the same way).
+        Any other failure: logged and skipped, so one bad endpoint does
+        not cost the rest of the day's data — unless the caller cannot
+        proceed without the result (`required`), then it raises SyncError
+        instead of looking like an empty answer.
+        """
         try:
-            return fn()
+            try:
+                return fn()
+            except Exception as exc:
+                if not _is_auth_error(exc):
+                    raise
+                if self._refresh_token is None or self._token_refreshed:
+                    raise KeyRejected(str(exc)) from exc
+                self._token_refreshed = True
+                self._refresh_token()
+                try:
+                    return fn()
+                except Exception as again:
+                    if _is_auth_error(again):
+                        raise KeyRejected(str(again)) from again
+                    raise
+        except KeyRejected:
+            raise
         except Exception as exc:
-            if _is_auth_error(exc):
-                raise KeyRejected(str(exc)) from exc
+            if required:
+                raise SyncError(f"{label}: {type(exc).__name__}: {str(exc)[:200]}") from exc
             print(f"   ⚠️ {label}: {type(exc).__name__}: {str(exc)[:160]}")
             return None
         finally:
@@ -135,8 +181,10 @@ class GarminOfficialSync:
         ids: list[int] = []
         offset, page = 0, 50
         while True:
+            # Required: a failed search must not read as "no activities".
             batch = self._call("search activities", lambda: self.client.search_activities(
-                start=offset, limit=page, start_date=start.isoformat(), end_date=end.isoformat()))
+                start=offset, limit=page, start_date=start.isoformat(), end_date=end.isoformat()),
+                required=True)
             if isinstance(batch, dict):
                 batch = batch.get("activities") or []
             if not batch:
@@ -301,18 +349,21 @@ def main(argv: list[str]) -> int:
         print(f"NO_API_KEY: set {ENV_KEY} in .env", file=sys.stderr)
         return EXIT_NO_KEY
     try:
-        client = connect(api_key)
+        client, refresh = connect(api_key)
     except KeyRejected as exc:
         print(f"KEY_REJECTED: {exc}", file=sys.stderr)
         return EXIT_KEY_REJECTED
     try:
-        GarminOfficialSync(client).run_sync(
+        GarminOfficialSync(client, refresh_token=refresh).run_sync(
             days_back=_int_flag(argv, "--days-back", 7, 1, 365),
             force_fit="--force-fit" in argv,
         )
     except KeyRejected as exc:
         print(f"KEY_REJECTED: {exc}", file=sys.stderr)
         return EXIT_KEY_REJECTED
+    except SyncError as exc:
+        print(f"SYNC_FAILED: {exc}", file=sys.stderr)
+        return 1
     finally:
         close = getattr(client, "close", None)
         if close:
