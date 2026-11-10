@@ -76,7 +76,7 @@ export default function ActivityDetailPage({
 
   if (detailQuery.isLoading) {
     return (
-      <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8">
+      <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8 lg:max-w-6xl">
         <Skeleton className="mb-6 h-6 w-32" />
         <Skeleton className="mb-3 h-10 w-2/3" />
         <Skeleton className="mb-2 h-4 w-1/2" />
@@ -88,7 +88,7 @@ export default function ActivityDetailPage({
 
   if (detailQuery.isError || !run) {
     return (
-      <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8">
+      <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8 lg:max-w-6xl">
         <Link
           href="/activity"
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -123,7 +123,7 @@ export default function ActivityDetailPage({
   if (w?.humidity_pct != null) weatherSegments.push(`${w.humidity_pct}% humidity`);
 
   return (
-    <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8">
+    <div className="mx-auto w-full max-w-4xl px-5 pt-8 pb-12 sm:px-8 lg:max-w-6xl">
       <div className="mb-4 flex items-center justify-between">
         <Link
           href="/activity"
@@ -206,8 +206,17 @@ export default function ActivityDetailPage({
             verdict rows (always visible — they're the headline
             judgments) with the telemetry charts folded beneath as
             their receipts. */}
-        {!isTreadmillRun(run) && <RunMap activityId={activityId} />}
-        <RunSummaryBlock run={run} activityId={activityId} />
+        {/* Desktop: map and summary share a row (the map grows to the
+            summary's height); charts and tables below use the full
+            width. Phone: everything stacks in this order. */}
+        {isTreadmillRun(run) ? (
+          <RunSummaryBlock run={run} activityId={activityId} />
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+            <RunMap activityId={activityId} fill />
+            <RunSummaryBlock run={run} activityId={activityId} />
+          </div>
+        )}
         <TelemetrySection run={run} activityId={activityId} />
         {/* Block 4: the full record — lap table with every column, all
             summary numbers, time in zones, best efforts. What used to

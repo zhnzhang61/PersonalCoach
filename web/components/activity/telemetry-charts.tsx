@@ -468,7 +468,7 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   };
 
   return (
-    <ChartContainer config={config} className="h-56 w-full">
+    <ChartContainer config={config} className="h-56 w-full lg:h-80">
       <ComposedChart data={rows}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis

@@ -7,7 +7,7 @@ import { AddActivityForm } from "@/components/activity/add-activity-form";
 
 export default function ActivityPage() {
   return (
-    <div className="mx-auto w-full max-w-4xl">
+    <div className="mx-auto w-full max-w-4xl lg:max-w-6xl">
       <PageHeader eyebrow={<TodayEyebrow />} title="Activity" />
       <div className="space-y-4 px-5 pb-8 sm:px-8">
         <TrainingSelector />

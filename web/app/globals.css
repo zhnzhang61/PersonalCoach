@@ -99,6 +99,18 @@
    * the Coach input are sibling subtrees under <body> and a var on
    * either one wouldn't inherit across to the other. */
   --bottom-nav-h: 54px;
+  /* Width of the desktop left rail (side-nav.tsx); the layout pads its
+   * content by the same amount. */
+  --side-nav-w: 14rem;
+}
+
+/* From lg up the bottom bar is gone (the left rail replaces it), so
+ * everything that offsets itself by the bar's height — the Coach input —
+ * must sit on the true bottom edge. */
+@media (min-width: 1024px) {
+  :root {
+    --bottom-nav-h: 0px;
+  }
 }
 
 .dark {

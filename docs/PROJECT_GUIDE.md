@@ -114,6 +114,20 @@ changes from older versions; read `node_modules/next/dist/docs/`
 before touching routing/server conventions). React Query for data
 fetching. Tailwind. iPhone-first layout.
 
+**Two shells, one set of pages.** Below `lg` (1024 px) the app is the
+phone layout: fixed `BottomNav`, one column. From `lg` up `SideNav` (a
+fixed left rail, width `--side-nav-w`) replaces the bottom bar, the
+content is padded by the rail's width, and `--bottom-nav-h` drops to 0 so
+anything that offsets itself by the bar (the Coach input) sits on the real
+bottom edge. Both navs render `NAV_ITEMS` (`components/nav-items.ts`).
+Pages widen to `max-w-6xl` and go two-column with plain grid classes —
+DOM order is the phone order, so no page has a separate desktop tree:
+Health pairs what you enter with what the watch says, then the two 30-day
+charts; Activity shows two run cards per row; Training pairs volume chart
+with calendar and upcoming workouts with coaching tips; the run page puts
+the map beside the lap summary (the map grows to the summary's height),
+with charts (taller) and tables full-width below.
+
 **Five tabs:**
 
 | Tab | Route | What's there |

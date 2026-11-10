@@ -108,6 +108,17 @@ graph TB
 改路由/server 约定前先读 `node_modules/next/dist/docs/`）。React Query 取数。
 Tailwind。iPhone 优先布局。
 
+**两套外壳，一套页面。** 宽度小于 `lg`（1024 px）时是手机布局：固定的
+`BottomNav`，单列。从 `lg` 起，`SideNav`（固定在左侧的导航栏，宽度
+`--side-nav-w`）取代底部栏，内容区向右让出导航栏的宽度，`--bottom-nav-h`
+变成 0，所以按底部栏高度定位的东西（Coach 的输入框）会贴到真正的底边。两个
+导航都渲染 `NAV_ITEMS`（`components/nav-items.ts`）。页面放宽到
+`max-w-6xl`，用普通的 grid class 变成双列——DOM 顺序就是手机上的顺序，所以
+没有哪个页面有单独的桌面版结构：Health 把你填的和手表测的并排，下面是两张
+30 天图表；Activity 每 row 两张 run 卡片；Training 把跑量图和日历并排、待跑
+课表和 coaching tips 并排；run 页面把地图放在每圈摘要旁边（地图长到和摘要
+一样高），曲线（更高）和表格在下面占满宽度。
+
 **五个 tab：**
 
 | Tab | 路由 | 内容 |
