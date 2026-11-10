@@ -92,6 +92,75 @@ export interface SyncResult {
   stderr?: string;
 }
 
+// ---- GET /api/runs/{id}/stats — everything Garmin's activity page shows.
+// Each value carries raw number + unit + display string; the UI renders
+// `display` and never does unit math.
+export interface RunStatItem {
+  key: string;
+  label: string;
+  value: number | string;
+  unit: string;
+  display: string;
+  note?: string; // caveat, e.g. indoor pace is a watch estimate
+}
+
+export interface RunStatGroup {
+  key: string;
+  title: string;
+  items: RunStatItem[];
+}
+
+export interface RunLapStatRow {
+  lap: number;
+  category: string | null; // the user's effort label
+  intensity: string | null; // Garmin's ACTIVE / REST / WARMUP …
+  distance_mi: number;
+  time_s: number;
+  time: string | null;
+  pace: string | null;
+  gap: string | null;
+  avg_hr: number | null;
+  max_hr: number | null;
+  cadence_spm: number | null;
+  stride_m: number | null;
+  gct_ms: number | null;
+  gct_balance_left: number | null;
+  vertical_osc_cm: number | null;
+  vertical_ratio: number | null;
+  avg_power_w: number | null;
+  elev_gain_ft: number | null;
+  elev_loss_ft: number | null;
+  resp_brpm: number | null;
+}
+
+export interface RunZoneRow {
+  zone: number;
+  low: number | null; // lower boundary, in `unit`
+  unit: string;
+  seconds: number;
+  pct: number;
+  display: string;
+}
+
+export interface RunBestEffort {
+  key: string;
+  label: string;
+  seconds: number;
+  display: string;
+  pace: string | null;
+}
+
+export interface RunFullStats {
+  activity_id: number;
+  activity_type: string;
+  treadmill: boolean;
+  groups: RunStatGroup[];
+  laps: RunLapStatRow[];
+  hr_zones: RunZoneRow[];
+  power_zones: RunZoneRow[];
+  best_efforts: RunBestEffort[];
+}
+
 export interface StravaStatus {
   configured: boolean; // client id/secret present in .env
   connected: boolean; // the user has authorized

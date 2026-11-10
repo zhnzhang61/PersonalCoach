@@ -1532,6 +1532,16 @@ def update_laps(activity_id: int, body: LapsUpdate) -> dict[str, Any]:
     }
 
 
+@app.get("/api/runs/{activity_id}/stats")
+def run_full_stats(activity_id: int) -> dict[str, Any]:
+    """Everything Garmin's own activity page shows: grouped summary
+    stats, the full lap table, time in HR / power zones, best efforts."""
+    stats = processor.get_run_full_stats(activity_id)
+    if stats is None:
+        raise HTTPException(404, "Run not found")
+    return stats
+
+
 @app.get("/api/runs/{activity_id}/suggest-title")
 def suggest_title(activity_id: int) -> dict[str, Any]:
     """Prefill name for the run-edit form ("NYC W15D3", "NYC W16D1 - 2").

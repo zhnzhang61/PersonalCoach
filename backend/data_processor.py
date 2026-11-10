@@ -2231,6 +2231,269 @@ class DataProcessor:
             title += f" - {seq}"
         return {"suggested_title": title, "week_num": week_num}
 
+    # ==========================================
+    # 📋 FULL RUN STATS (everything Garmin's own activity page shows)
+    # ==========================================
+    _M_PER_MI = 1609.34
+    _FT_PER_M = 3.28084
+
+    @staticmethod
+    def _fmt_clock(seconds) -> str | None:
+        """Seconds → "1:23:45" / "23:45"."""
+        if seconds is None:
+            return None
+        s = int(round(seconds))
+        h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    @classmethod
+    def _pace_min_per_mi(cls, speed_mps) -> float | None:
+        if not speed_mps or speed_mps <= 0:
+            return None
+        return cls._M_PER_MI / speed_mps / 60.0
+
+    @staticmethod
+    def _fmt_pace(pace_min) -> str | None:
+        """Minutes per mile → "8:05" (seconds rounded; 7:60 never shown)."""
+        if pace_min is None:
+            return None
+        total = int(round(pace_min * 60))
+        return f"{total // 60}:{total % 60:02d}"
+
+    @staticmethod
+    def _humanize_garmin_code(code) -> str | None:
+        """"OVERREACHING_17" → "Overreaching"; "VO2MAX" → "VO2 Max"."""
+        if not code:
+            return None
+        special = {"VO2MAX": "VO2 Max", "LACTATE_THRESHOLD": "Lactate threshold",
+                   "AEROBIC_BASE": "Aerobic base", "ANAEROBIC_CAPACITY": "Anaerobic capacity"}
+        parts = str(code).split("_")
+        if parts and parts[-1].isdigit():
+            parts = parts[:-1]
+        key = "_".join(parts)
+        if key in special:
+            return special[key]
+        words = " ".join(parts).lower()
+        return words[:1].upper() + words[1:].replace("vo2max", "VO2 max")
+
+    def get_run_full_stats(self, activity_id: int) -> dict | None:
+        """Every number Garmin Connect shows for one activity, grouped.
+
+        Feeds the run page's "all stats" section, the full lap table, the
+        time-in-zone bars and the best-efforts list. Each value comes with
+        the raw number, its unit and a display string, so the UI renders
+        without doing arithmetic and an AI reader gets self-describing
+        fields. Items with no data are omitted; groups left empty are
+        dropped. Returns None when the activity is unknown.
+        """
+        detail = self.load_json_safe(os.path.join(self.data_dir, 'get_activity'), f"{activity_id}.json")
+        listing = self.load_json_safe(self.paths['activities'], f"{activity_id}_summary.json")
+        if isinstance(listing, list):
+            listing = listing[0] if listing else {}
+        s = (detail or {}).get('summaryDTO') or {}
+        listing = listing or {}
+        if not s and not listing:
+            return None
+        type_key = ((listing.get('activityType') or {}).get('typeKey')
+                    or ((detail or {}).get('activityTypeDTO') or {}).get('typeKey') or '')
+        treadmill = 'treadmill' in type_key or 'indoor' in type_key
+
+        def item(key, label, value, unit, display, note=None):
+            if value is None or display is None:
+                return None
+            out = {"key": key, "label": label, "value": value, "unit": unit, "display": display}
+            if note:
+                out["note"] = note
+            return out
+
+        def num(key, label, value, unit, digits=0, note=None):
+            if value is None:
+                return None
+            v = round(float(value), digits)
+            shown = f"{v:.{digits}f}" if digits else f"{int(round(v))}"
+            return item(key, label, v, unit, f"{shown} {unit}".strip(), note)
+
+        def pace(key, label, speed, note=None):
+            p = self._pace_min_per_mi(speed)
+            return item(key, label, round(p, 3) if p else None, "min/mi",
+                        f"{self._fmt_pace(p)} /mi" if p else None, note)
+
+        def clock(key, label, seconds):
+            return item(key, label, seconds, "s", self._fmt_clock(seconds))
+
+        dist_mi = s.get('distance') / self._M_PER_MI if s.get('distance') else None
+        pace_note = "watch estimate indoors — treat as rough" if treadmill else None
+        bal = s.get('groundContactBalanceLeft')
+        te_msg = self._humanize_garmin_code(s.get('aerobicTrainingEffectMessage'))
+        an_msg = self._humanize_garmin_code(s.get('anaerobicTrainingEffectMessage'))
+        b_stam, e_stam = s.get('beginPotentialStamina'), s.get('endPotentialStamina')
+
+        groups = [
+            ("distance_time", "Distance & time", [
+                num("distance", "Distance", dist_mi, "mi", 2, pace_note),
+                clock("duration", "Time", s.get('duration')),
+                clock("moving_duration", "Moving time", s.get('movingDuration')),
+                clock("elapsed_duration", "Elapsed time", s.get('elapsedDuration')),
+                pace("avg_pace", "Avg pace", s.get('averageSpeed'), pace_note),
+                pace("avg_moving_pace", "Avg moving pace", s.get('averageMovingSpeed'), pace_note),
+                pace("gap", "Grade-adjusted pace", s.get('avgGradeAdjustedSpeed')),
+                pace("best_pace", "Best pace", s.get('maxSpeed'), pace_note),
+            ]),
+            ("heart_rate", "Heart rate", [
+                num("avg_hr", "Avg HR", s.get('averageHR'), "bpm"),
+                num("max_hr", "Max HR", s.get('maxHR'), "bpm"),
+                num("min_hr", "Min HR", s.get('minHR'), "bpm"),
+            ]),
+            ("training_effect", "Training effect", [
+                item("aerobic_te", "Aerobic", s.get('trainingEffect'), "0-5",
+                     (f"{s['trainingEffect']:.1f}" + (f" · {te_msg}" if te_msg else ""))
+                     if s.get('trainingEffect') is not None else None),
+                item("anaerobic_te", "Anaerobic", s.get('anaerobicTrainingEffect'), "0-5",
+                     (f"{s['anaerobicTrainingEffect']:.1f}" + (f" · {an_msg}" if an_msg else ""))
+                     if s.get('anaerobicTrainingEffect') is not None else None),
+                item("primary_benefit", "Primary benefit", s.get('trainingEffectLabel'), "",
+                     self._humanize_garmin_code(s.get('trainingEffectLabel'))),
+                num("training_load", "Exercise load", s.get('activityTrainingLoad'), ""),
+                num("vigorous_min", "Vigorous minutes", s.get('vigorousIntensityMinutes'), "min"),
+                num("moderate_min", "Moderate minutes", s.get('moderateIntensityMinutes'), "min"),
+            ]),
+            ("running_dynamics", "Running dynamics", [
+                num("avg_cadence", "Avg cadence", s.get('averageRunCadence'), "spm"),
+                num("max_cadence", "Max cadence", s.get('maxRunCadence'), "spm"),
+                num("stride_length", "Stride length", (s.get('strideLength') or 0) / 100 or None, "m", 2),
+                num("ground_contact_time", "Ground contact time", s.get('groundContactTime'), "ms"),
+                item("gct_balance", "GCT balance (L / R)", bal, "%",
+                     f"{bal:.1f} / {100 - bal:.1f} %" if bal is not None else None),
+                num("vertical_oscillation", "Vertical oscillation", s.get('verticalOscillation'), "cm", 1),
+                num("vertical_ratio", "Vertical ratio", s.get('verticalRatio'), "%", 1),
+                num("steps", "Steps", s.get('steps'), ""),
+            ]),
+            ("power", "Power", [
+                num("avg_power", "Avg power", s.get('averagePower'), "W"),
+                num("max_power", "Max power", s.get('maxPower'), "W"),
+                num("normalized_power", "Normalized power", s.get('normalizedPower'), "W"),
+            ]),
+            ("elevation", "Elevation", [
+                num("elev_gain", "Gain", (s.get('elevationGain') or 0) * self._FT_PER_M
+                    if s.get('elevationGain') is not None else None, "ft"),
+                num("elev_loss", "Loss", (s.get('elevationLoss') or 0) * self._FT_PER_M
+                    if s.get('elevationLoss') is not None else None, "ft"),
+                num("elev_min", "Lowest", s.get('minElevation') * self._FT_PER_M
+                    if s.get('minElevation') is not None else None, "ft"),
+                num("elev_max", "Highest", s.get('maxElevation') * self._FT_PER_M
+                    if s.get('maxElevation') is not None else None, "ft"),
+            ]),
+            ("respiration", "Respiration", [
+                num("avg_resp", "Avg", s.get('avgRespirationRate'), "brpm", 1),
+                num("max_resp", "Max", s.get('maxRespirationRate'), "brpm", 1),
+                num("min_resp", "Min", s.get('minRespirationRate'), "brpm", 1),
+            ]),
+            ("body", "Body", [
+                item("stamina", "Stamina (start → end)", e_stam, "%",
+                     f"{b_stam:.0f} → {e_stam:.0f} %" if b_stam is not None and e_stam is not None else None),
+                num("min_stamina", "Lowest available stamina", s.get('minAvailableStamina'), "%"),
+                item("body_battery", "Body Battery change", s.get('differenceBodyBattery'), "",
+                     f"{s['differenceBodyBattery']:+d}" if isinstance(s.get('differenceBodyBattery'), int) else None),
+                num("calories", "Calories", s.get('calories'), "kcal"),
+                num("sweat_loss", "Est. sweat loss", s.get('waterEstimated'), "ml"),
+                num("watch_temp", "Avg watch temperature",
+                    s['averageTemperature'] * 9 / 5 + 32 if s.get('averageTemperature') is not None else None,
+                    "°F", 0, "sensor on the wrist — reads warmer than the air"),
+            ]),
+            ("self_report", "How it felt", [
+                num("feel", "Feel", s.get('directWorkoutFeel'), "/ 100"),
+                num("rpe", "Perceived effort", (s.get('directWorkoutRpe') or 0) / 10 or None, "/ 10"),
+            ]),
+        ]
+        out_groups = []
+        for key, title, items in groups:
+            items = [i for i in items if i]
+            if items:
+                out_groups.append({"key": key, "title": title, "items": items})
+
+        # ---- laps: the full table --------------------------------------
+        meta = self.load_json_safe(self.paths['manual'], f"run_{activity_id}_meta.json") or {}
+        cats = meta.get('lap_categories') or []
+        lap_rows = []
+        for i, lap in enumerate(self.get_run_laps(activity_id)):
+            d_m = lap.get('distance') or 0
+            dur = lap.get('duration') or 0
+            p = self._pace_min_per_mi(d_m / dur) if d_m and dur else None
+            g = self._pace_min_per_mi(lap.get('avgGradeAdjustedSpeed'))
+            lbal = lap.get('groundContactBalanceLeft')
+            gain, loss = lap.get('elevationGain'), lap.get('elevationLoss')
+            lap_rows.append({
+                "lap": i + 1,
+                "category": cats[i] if i < len(cats) else None,
+                "intensity": lap.get('intensityType'),
+                "distance_mi": round(d_m / self._M_PER_MI, 2),
+                "time_s": round(dur, 1),
+                "time": self._fmt_clock(dur),
+                "pace_min_mi": round(p, 3) if p else None,
+                "pace": self._fmt_pace(p),
+                "gap_min_mi": round(g, 3) if g else None,
+                "gap": self._fmt_pace(g),
+                "avg_hr": lap.get('averageHR'),
+                "max_hr": lap.get('maxHR'),
+                "cadence_spm": round(lap['averageRunCadence']) if lap.get('averageRunCadence') else None,
+                "stride_m": round(lap['strideLength'] / 100, 2) if lap.get('strideLength') else None,
+                "gct_ms": round(lap['groundContactTime']) if lap.get('groundContactTime') else None,
+                "gct_balance_left": round(lbal, 1) if lbal is not None else None,
+                "vertical_osc_cm": round(lap['verticalOscillation'], 1) if lap.get('verticalOscillation') else None,
+                "vertical_ratio": round(lap['verticalRatio'], 1) if lap.get('verticalRatio') else None,
+                "avg_power_w": round(lap['averagePower']) if lap.get('averagePower') else None,
+                "elev_gain_ft": round(gain * self._FT_PER_M) if gain is not None else None,
+                "elev_loss_ft": round(loss * self._FT_PER_M) if loss is not None else None,
+                "resp_brpm": round(lap['avgRespirationRate'], 1) if lap.get('avgRespirationRate') else None,
+            })
+
+        # ---- time in zones ---------------------------------------------
+        def zones(prefix, file_folder, unit):
+            rows = self.load_json_safe(os.path.join(self.data_dir, file_folder), f"{activity_id}.json")
+            secs, lows = {}, {}
+            if isinstance(rows, list):
+                for z in rows:
+                    n = z.get('zoneNumber')
+                    if n:
+                        secs[n] = z.get('secsInZone') or 0
+                        lows[n] = z.get('zoneLowBoundary')
+            for n in range(1, 6):   # listing carries the seconds too
+                if n not in secs and listing.get(f'{prefix}_{n}') is not None:
+                    secs[n] = listing[f'{prefix}_{n}']
+            total = sum(secs.values())
+            if total <= 0:
+                return []
+            return [{
+                "zone": n, "low": lows.get(n), "unit": unit, "seconds": round(secs[n], 1),
+                "pct": round(100 * secs[n] / total, 1), "display": self._fmt_clock(secs[n]),
+            } for n in sorted(secs)]
+
+        # ---- best efforts inside this activity -------------------------
+        # Indoors they would be built on the watch's distance guess, so
+        # they are left out rather than shown as if they were records.
+        best = []
+        for field, label, metres in () if treadmill else (("fastestSplit_1000", "1 km", 1000), ("fastestSplit_1609", "1 mile", 1609.34),
+                                     ("fastestSplit_5000", "5 km", 5000), ("fastestSplit_10000", "10 km", 10000),
+                                     ("fastestSplit_21098", "Half marathon", 21097.5),
+                                     ("fastestSplit_42195", "Marathon", 42195)):
+            secs = listing.get(field)
+            if secs:
+                p = self._pace_min_per_mi(metres / secs)
+                best.append({"key": field, "label": label, "seconds": round(secs, 1),
+                             "display": self._fmt_clock(secs), "pace": self._fmt_pace(p),
+                             "pace_min_mi": round(p, 3) if p else None})
+
+        return {
+            "activity_id": activity_id,
+            "activity_type": type_key,
+            "treadmill": treadmill,
+            "groups": out_groups,
+            "laps": lap_rows,
+            "hr_zones": zones("hrTimeInZone", "get_activity_hr_in_timezones", "bpm"),
+            "power_zones": zones("powerTimeInZone", "get_activity_power_in_timezones", "W"),
+            "best_efforts": best,
+        }
+
     def get_run_laps(self, activity_id):
         json_path = os.path.join(self.paths['splits'], f"{activity_id}.json")
         if not os.path.exists(json_path): return []
