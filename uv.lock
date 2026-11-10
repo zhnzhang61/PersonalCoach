@@ -336,6 +336,27 @@ wheels = [
 ]
 
 [[package]]
+name = "fitdecode"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/19/1bde056f443d8ce890dbc0f0bd8a216cc9ebfda4221619767f80cf1835e2/fitdecode-0.11.0.tar.gz", hash = "sha256:52d920e50eaa76eb065b20bfd4e42f72195e894a079098dacc1cafa908cd4b83", size = 107149, upload-time = "2025-08-06T08:08:42.105Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/7b/75829f9b77b2546f955ec265de10de993939bf3218b5d957ca79803a2d28/fitdecode-0.11.0-py3-none-any.whl", hash = "sha256:a1bdb9b4d1e9ebac0001fc58c22fe07a3f9967ca4e13258c6ef99cdb8d697a78", size = 109961, upload-time = "2025-08-06T08:08:39.033Z" },
+]
+
+[[package]]
+name = "garmin-connect-personal-api-python"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f7/7e/5b5cdad5af4304a4562c826606e17ae1278dda80dc7668fdcc11bed671cd/garmin_connect_personal_api_python-1.0.0.tar.gz", hash = "sha256:75a3b64083b2f176ca4d68cfb5bf731fcb1aaa82c63fe9239dbd5ec7215a08aa", size = 42311, upload-time = "2026-10-21T15:02:28.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/de/42c161fc44d2ae3fd6f22ce152ebcf25d448e786843561844b62c55f5b17/garmin_connect_personal_api_python-1.0.0-py3-none-any.whl", hash = "sha256:a709a7836651f173f7b82a22074cb96def9caf7c17ee41fdfaa6d40657c5711b", size = 35577, upload-time = "2026-10-21T15:02:27.025Z" },
+]
+
+[[package]]
 name = "garminconnect"
 version = "0.2.40"
 source = { registry = "https://pypi.org/simple" }
@@ -1278,6 +1299,8 @@ dependencies = [
     { name = "distro" },
     { name = "fastapi" },
     { name = "filetype" },
+    { name = "fitdecode" },
+    { name = "garmin-connect-personal-api-python" },
     { name = "garminconnect" },
     { name = "garth" },
     { name = "gitdb" },
@@ -1375,6 +1398,8 @@ requires-dist = [
     { name = "distro", specifier = "==1.9.0" },
     { name = "fastapi", specifier = "==0.121.0" },
     { name = "filetype", specifier = "==1.2.0" },
+    { name = "fitdecode", specifier = ">=0.11.0" },
+    { name = "garmin-connect-personal-api-python", specifier = ">=1.0.0" },
     { name = "garminconnect", specifier = "==0.2.40" },
     { name = "garth", specifier = "==0.6.3" },
     { name = "gitdb", specifier = "==4.0.12" },

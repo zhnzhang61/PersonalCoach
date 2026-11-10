@@ -285,10 +285,19 @@ bpm（以下每 10 bpm +1.9 br/min，以上 +8.5）；跑步机拐点 ≈ 146。
 两个外部 auth 流程；**app 永远不碰密码**——用户自己登录，app 只存拿到的
 token。
 
-- **Garmin** — `backend/garmin_ticket_login.py` 把手动拿到的 Service
-  Ticket 兑换成长效 garth OAuth2 token（"429 绕过流程"，见下面的设置）。
-  `backend/garmin_sync.py` 再用它拉活动 + 每日健康，通过
-  `python -m backend.garmin_sync` 由 `POST /api/sync/garmin` 触发。
+- **Garmin（官方，配置了 key 就默认用它）** — Garmin 的 Personal API。
+  一个长期有效的 key（`.env` 里的 `GARMIN_PERSONAL_API_KEY`，在
+  connect.garmin.com → Settings → Personal API Key 创建，最长一年）每次运行
+  时换成 24 小时的 bearer token；没有需要手动刷新的东西，所以可以无人值守。
+  `backend/garmin_official_sync.py` 负责拉数据，由 `POST /api/sync/garmin`
+  通过 `python -m backend.garmin_official_sync` 触发
+  （`source=auto|official|legacy`；"auto" = 有 key 就用官方）。见下面的
+  *官方同步*。
+- **Garmin（旧，保留用于对比）** — `backend/garmin_ticket_login.py` 把手动
+  拿到的 Service Ticket 兑换成长效 garth OAuth2 token（"429 绕过流程"，见
+  下面的设置）。`backend/garmin_sync.py` 再用它拉活动 + 每日健康，通过
+  `python -m backend.garmin_sync`。Setup 页的 "Run legacy sync instead"
+  可以手动触发；training status / readiness、比赛预测、装备仍然只有它能拿到。
 - **Google Calendar** — `google_calendar.py`。OAuth 在
   `/oauth/google/start` → `/callback`。Scope 是 `calendar.events`
   （读+写；我们把 AI 排的训练写进用户日历）。增量授权用
@@ -970,6 +979,37 @@ consolidate_memory_background 的轨迹"（CME 提案管道现在记 `topic_deci
 
 ---
 
+#### 官方同步 — 写哪些文件
+
+Personal API 的接口比 Connect 网站少，所以 `garmin_official_sync.py` 把数据
+重建成**旧同步写的同一批文件**；`data_processor.py` 和 web 都不用改。它写的
+每个 dict 都带 `"_source": "garmin_personal_api"`。
+
+| 旧文件 | 官方来源 |
+|---|---|
+| `get_activities/{id}_summary.json`、`get_activity/{id}.json` | 活动搜索 / 活动接口，原样保存（字段完全一致） |
+| `get_activity_splits`、`get_activity_details`、`get_activity_hr_in_timezones` | 活动的 **FIT 文件**（`data/fit/{id}.fit`，只下载一次），由 `backend/fit_convert.py` 转换 |
+| `get_stats_and_body/{date}.json` | `usersummary/daily`，原样保存 |
+| `get_rhr_day`、`get_stress_data`、`get_respiration_data`、`get_intensity_minutes_data` | 从上面的每日汇总派生（只有每日数值，没有全天曲线） |
+| `get_sleep_data/{date}.json` | 每日睡眠，包成 `dailySleepDTO` + 夜间 HRV + 静息心率 |
+| `get_hrv_data`、`get_fitnessage_data` | 原样保存 |
+
+只有 `fit_convert.py` 懂 FIT。每圈和每秒的数值都在真实跑步上和旧文件逐值
+对过（工具和报告在 `data/ai-tool/garmin-official-parity/`）。有几个 Garmin
+字段在公开的 FIT 规范里没有名字，按字段编号读：坡度调整速度（record #140、
+lap #161）、stamina（#137 potential、#138 available）、performance
+condition（#90）、body battery（#143）。details 和旧接口一样降采样到不超过
+2000 row（run 页面会把它整个发给手机）；完整的 1 Hz 数据留在 `data/fit/`。
+
+官方拿不到的：training status / readiness、比赛预测、装备、睡眠分期时间线、
+睡眠期间的 body battery 变化、全天的压力和呼吸曲线。活动天气本来就不依赖
+Garmin——`get_run_weather` 按起点和小时去查 Open-Meteo。
+
+刷新规则：窗口内的活动摘要每次重写；FIT 只拉一次（它不会变）；某一天如果离
+今天不超过 2 天，或者它的睡眠 / HRV / 汇总缺失或是空壳，就重拉。
+
+---
+
 ## 5. 附录
 
 ### 存储一览
@@ -982,6 +1022,9 @@ data/
 │                         #      pending_clarifications
 ├── get_activities/       # Garmin 原始 JSON dump
 ├── get_activity_details/ # 单次活动详情（遥测来源）
+├── fit/                  # 原始 FIT 文件（官方同步），每个活动一个
+├── ai-conversation/ ai-tool/ ai-chart/ ai-report/
+│                         # Claude 的工作存档（见 data/README.md）
 ├── derived/              # 处理后的 CSV，含 daily_health_metrics.csv
 ├── manual_inputs/        # daily_checkins.json · planned_workouts.json ·
 │                         # user_zones.json · run_*_meta.json

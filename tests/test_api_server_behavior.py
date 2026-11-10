@@ -736,6 +736,19 @@ class TestGarminSync:
     classifies the result into ok / token_expired / error. The mocked
     subprocess.run lets us drive each branch."""
 
+    @pytest.fixture(autouse=True)
+    def _legacy_by_default(self, monkeypatch):
+        # "auto" picks the official sync when a Personal API key is in
+        # the environment/.env. These tests are about the legacy branch,
+        # so pin "auto" to legacy regardless of the machine's .env.
+        import backend.api_server as api_server
+
+        real = api_server._resolve_sync_source
+        monkeypatch.setattr(
+            api_server, "_resolve_sync_source",
+            lambda requested: "legacy" if requested == "auto" else real(requested),
+        )
+
     def test_sync_success_returns_ok(self, client, mock_subprocess_ok):
         resp = client.post("/api/sync/garmin")
         assert resp.status_code == 200
@@ -808,6 +821,69 @@ class TestGarminSync:
             api_server._GARMIN_SYNC_LOCK.release()
         # Lock released → next attempt proceeds normally.
         assert client.post("/api/sync/garmin").json()["ok"] is True
+
+
+class TestGarminSyncSource:
+    """`source` picks the Garmin backend: the official Personal API
+    (key-based) or the legacy web-SSO sync. "auto" follows the key."""
+
+    @pytest.fixture
+    def seen(self, monkeypatch):
+        box = {"returncode": 0, "stderr": ""}
+
+        def fake_run(cmd, **kwargs):
+            box["cmd"] = cmd
+            return CompletedProcess(args=cmd, returncode=box["returncode"],
+                                    stdout="ok", stderr=box["stderr"])
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        # Keep the machine's real .env out of the resolver.
+        monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
+        return box
+
+    def test_auto_uses_official_when_key_is_configured(self, client, seen, monkeypatch):
+        monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "k")
+        body = client.post("/api/sync/garmin").json()
+        assert body["ok"] is True and body["source"] == "official"
+        assert "backend.garmin_official_sync" in seen["cmd"]
+        assert seen["cmd"][seen["cmd"].index("--days-back") + 1] == "7"
+
+    def test_auto_falls_back_to_legacy_without_key(self, client, seen, monkeypatch):
+        monkeypatch.delenv("GARMIN_PERSONAL_API_KEY", raising=False)
+        body = client.post("/api/sync/garmin").json()
+        assert body["source"] == "legacy"
+        assert "backend.garmin_sync" in seen["cmd"] and "--no-fallback" in seen["cmd"]
+
+    def test_legacy_can_be_forced_while_key_is_configured(self, client, seen, monkeypatch):
+        monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "k")
+        body = client.post("/api/sync/garmin?source=legacy").json()
+        assert body["source"] == "legacy" and "backend.garmin_sync" in seen["cmd"]
+
+    def test_unknown_source_is_rejected(self, client, seen):
+        assert client.post("/api/sync/garmin?source=strava").status_code == 422
+
+    @pytest.mark.parametrize("returncode,reason", [(3, "no_api_key"), (4, "api_key_rejected")])
+    def test_official_key_problems_get_their_own_reason(
+        self, client, seen, monkeypatch, returncode, reason
+    ):
+        seen["returncode"] = returncode
+        seen["stderr"] = "KEY_REJECTED: HTTP 401"
+        body = client.post("/api/sync/garmin?source=official").json()
+        assert body["ok"] is False and body["reason"] == reason
+        # Not the legacy token flow — the Setup page must not offer the
+        # SSO ticket paste for an API-key problem.
+        assert body["reason"] != "token_expired"
+
+    def test_official_exit_2_is_a_plain_error_not_token_expired(self, client, seen):
+        seen["returncode"] = 2
+        body = client.post("/api/sync/garmin?source=official").json()
+        assert body["reason"] == "error"
+
+    def test_status_reports_last_and_default_source(self, client, seen, monkeypatch):
+        monkeypatch.setenv("GARMIN_PERSONAL_API_KEY", "k")
+        client.post("/api/sync/garmin?source=legacy")
+        status = client.get("/api/sync/garmin/status").json()
+        assert status["source"] == "legacy" and status["default_source"] == "official"
 
 
 class TestGarminRefreshToken:
