@@ -998,8 +998,8 @@ Personal API 的接口比 Connect 网站少，所以 `garmin_official_sync.py` �
 对过（工具和报告在 `data/ai-tool/garmin-official-parity/`）。有几个 Garmin
 字段在公开的 FIT 规范里没有名字，按字段编号读：坡度调整速度（record #140、
 lap #161）、stamina（#137 potential、#138 available）、performance
-condition（#90）、body battery（#143）。details 按 1 Hz 全分辨率写（旧接口
-降采样到约 2000 row）。
+condition（#90）、body battery（#143）。details 和旧接口一样降采样到不超过
+2000 row（run 页面会把它整个发给手机）；完整的 1 Hz 数据留在 `data/fit/`。
 
 官方拿不到的：training status / readiness、比赛预测、装备、睡眠分期时间线、
 睡眠期间的 body battery 变化、全天的压力和呼吸曲线。活动天气本来就不依赖

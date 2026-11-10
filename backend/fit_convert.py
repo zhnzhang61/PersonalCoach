@@ -70,6 +70,10 @@ DETAIL_KEYS = (
 )
 
 _MAX_POLYLINE_POINTS = 1500
+# Garmin Connect's details endpoint thinned long activities to roughly
+# this many rows; the run page ships them to the phone as-is, so match it.
+# The untouched 1 Hz stream stays in the FIT file.
+DEFAULT_MAX_DETAIL_ROWS = 2000
 
 
 def read_fit(data: bytes) -> dict[str, list[dict[str, Any]]]:
@@ -239,7 +243,19 @@ def _pauses(fit: dict[str, list[dict[str, Any]]]) -> list[tuple[float, float]]:
     return out
 
 
-def records_to_details(activity_id: int, fit: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def _thin(items: list, limit: int | None) -> list:
+    """Every k-th item so at most ~limit remain, always keeping the last."""
+    if not limit or len(items) <= limit:
+        return items
+    step = -(-len(items) // limit)
+    out = items[::step]
+    if out[-1] is not items[-1]:
+        out.append(items[-1])
+    return out
+
+
+def records_to_details(activity_id: int, fit: dict[str, list[dict[str, Any]]],
+                       max_rows: int | None = DEFAULT_MAX_DETAIL_ROWS) -> dict[str, Any]:
     records = [r for r in (fit.get("record") or []) if _epoch(r.get("timestamp")) is not None]
     session = (fit.get("session") or [{}])[0]
     t_start = _epoch(session.get("start_time"))
@@ -305,10 +321,7 @@ def records_to_details(activity_id: int, fit: dict[str, list[dict[str, Any]]]) -
 
     geo: dict[str, Any] = {"startPoint": None, "endPoint": None, "polyline": []}
     if poly:
-        step = max(1, -(-len(poly) // _MAX_POLYLINE_POINTS))
-        thinned = poly[::step]
-        if thinned[-1] is not poly[-1]:
-            thinned.append(poly[-1])
+        thinned = _thin(poly, _MAX_POLYLINE_POINTS)
         geo = {
             "startPoint": poly[0],
             "endPoint": poly[-1],
@@ -318,11 +331,15 @@ def records_to_details(activity_id: int, fit: dict[str, list[dict[str, Any]]]) -
             "maxLon": max(p["lon"] for p in poly),
             "polyline": thinned,
         }
+    total = len(rows)
+    # Cumulative columns were computed on every record above, so thinning
+    # rows afterwards keeps them exact.
+    rows = _thin(rows, max_rows)
     return {
         "activityId": activity_id,
         "measurementCount": len(DETAIL_KEYS),
         "metricsCount": len(rows),
-        "totalMetricsCount": len(rows),
+        "totalMetricsCount": total,
         "metricDescriptors": [{"metricsIndex": i, "key": k} for i, k in enumerate(DETAIL_KEYS)],
         "activityDetailMetrics": rows,
         "geoPolylineDTO": geo,

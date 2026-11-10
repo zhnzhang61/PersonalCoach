@@ -1169,8 +1169,9 @@ values were matched against legacy files value-for-value on real runs
 Garmin fields have no name in the public FIT profile and are read by
 field number: grade-adjusted speed (record #140, lap #161), stamina
 (#137 potential, #138 available), performance condition (#90), body
-battery (#143). Details are written at full 1 Hz resolution (the legacy
-endpoint down-sampled to ~2000 rows).
+battery (#143). Details are thinned to ≤2000 rows, as the legacy endpoint
+did (the run page ships them to the phone); the full 1 Hz stream stays in
+`data/fit/`.
 
 Not available officially: training status / readiness, race predictions,
 gear, the sleep-stage timeline, body-battery change during sleep, intraday

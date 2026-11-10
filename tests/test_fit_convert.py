@@ -161,6 +161,20 @@ class TestDetails:
         assert len(geo["polyline"]) <= 1501
         assert geo["polyline"][-1]["time"] == geo["endPoint"]["time"]
 
+    def test_long_activity_is_thinned_like_the_legacy_endpoint(self):
+        recs = [_rec(s, distance=float(s), enhanced_speed=3.0) for s in range(13000)]
+        fit = {"record": recs, "session": [{"start_time": T0}]}
+        d = fc.records_to_details(1, fit)
+        assert d["totalMetricsCount"] == 13000
+        assert d["metricsCount"] == len(d["activityDetailMetrics"]) <= 2001
+        idx = {m["key"]: m["metricsIndex"] for m in d["metricDescriptors"]}
+        last = d["activityDetailMetrics"][-1]["metrics"]
+        # The final sample survives, and cumulative columns are still the
+        # true totals (computed before thinning).
+        assert last[idx["sumDistance"]] == 12999.0
+        assert last[idx["sumMovingDuration"]] == 12999.0
+        assert fc.records_to_details(1, fit, max_rows=None)["metricsCount"] == 13000
+
     def test_indoor_run_has_empty_polyline(self):
         fit = {"record": [_rec(1, distance=3.0, enhanced_speed=3.0)], "session": [{"start_time": T0}]}
         geo = fc.records_to_details(1, fit)["geoPolylineDTO"]
@@ -196,7 +210,7 @@ class TestReadFit:
         assert laps[0]["distance"] == pytest.approx(1609.34)
         assert laps[0]["avgGradeAdjustedSpeed"] and 2.0 < laps[0]["avgGradeAdjustedSpeed"] < 6.0
         assert laps[0]["intensityType"] in {"ACTIVE", "INTERVAL", "WARMUP", "REST", "COOLDOWN", "RECOVERY"}
-        details = fc.records_to_details(21757314766, fit)
+        details = fc.records_to_details(21757314766, fit, max_rows=None)
         assert details["metricsCount"] == len(fit["record"])
         assert details["geoPolylineDTO"]["startPoint"]["lat"] == pytest.approx(40.77, abs=0.05)
         assert sum(z["secsInZone"] for z in fc.hr_time_in_zones(fit)) > 0
