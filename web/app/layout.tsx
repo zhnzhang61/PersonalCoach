@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Lora } from "next/font/google";
 import { BottomNav } from "@/components/bottom-nav";
+import { SideNav } from "@/components/side-nav";
 import { SyncBanner } from "@/components/sync-banner";
 import { Providers } from "./providers";
 import "./globals.css";
@@ -44,10 +45,16 @@ export default function RootLayout({
     >
       <body className="bg-background text-foreground min-h-full flex flex-col">
         <Providers>
-          <div className="pt-[env(safe-area-inset-top)]">
-            <SyncBanner />
+          {/* Desktop (≥ lg): fixed left rail, content shifted right by its
+              width, no bottom bar. Phone: bottom bar, content padded so
+              the last card clears it. */}
+          <SideNav />
+          <div className="flex flex-1 flex-col lg:pl-[var(--side-nav-w)]">
+            <div className="pt-[env(safe-area-inset-top)]">
+              <SyncBanner />
+            </div>
+            <main className="flex-1 pb-20 lg:pb-0">{children}</main>
           </div>
-          <main className="flex-1 pb-20">{children}</main>
           <BottomNav />
         </Providers>
       </body>

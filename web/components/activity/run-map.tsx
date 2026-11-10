@@ -66,7 +66,13 @@ class MapErrorBoundary extends Component<
   }
 }
 
-export function RunMap(props: { activityId: number; interactive?: boolean }) {
+export function RunMap(props: {
+  activityId: number;
+  interactive?: boolean;
+  // Grow to the height of the grid row on wide screens (the run page puts
+  // the map beside the lap summary) instead of the fixed phone height.
+  fill?: boolean;
+}) {
   return (
     <MapErrorBoundary>
       <RunMapInner {...props} />
@@ -77,8 +83,10 @@ export function RunMap(props: { activityId: number; interactive?: boolean }) {
 function RunMapInner({
   activityId,
   interactive = true,
+  fill = false,
 }: {
   activityId: number;
+  fill?: boolean;
   interactive?: boolean;
 }) {
   const [styleId, setStyleId] = useState<StyleId>("outdoors-v12");
@@ -183,8 +191,9 @@ function RunMapInner({
 
   const wrapperClass = fullscreen
     ? "fixed inset-0 z-50 bg-background"
-    : "relative overflow-hidden rounded-md border border-border";
-  const wrapperStyle = fullscreen ? undefined : { height: "16rem" };
+    : "relative overflow-hidden rounded-md border border-border" +
+      (fill ? " h-64 xl:h-full xl:min-h-[24rem]" : "");
+  const wrapperStyle = fullscreen || fill ? undefined : { height: "16rem" };
 
   return (
     <div className={wrapperClass} style={wrapperStyle}>

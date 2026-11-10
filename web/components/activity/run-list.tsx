@@ -71,7 +71,9 @@ export function RunList() {
   }
 
   return (
-    <div className="space-y-3">
+    // Two cards per row on a wide screen; `items-start` so a card with a
+    // map preview doesn't stretch its shorter neighbour.
+    <div className="grid gap-3 xl:grid-cols-2 xl:items-start">
       {items.map((item) =>
         item.kind === "run" ? (
           <RunCard key={item.payload.activityId} run={item.payload} />

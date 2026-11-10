@@ -2,36 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BarChart3, Heart, MessageCircle, Settings } from "lucide-react";
+import { NAV_ITEMS } from "@/components/nav-items";
 import { cn } from "@/lib/utils";
-
-const items = [
-  { href: "/", label: "Health", icon: Heart, match: (p: string) => p === "/" },
-  {
-    href: "/activity",
-    label: "Activity",
-    icon: Activity,
-    match: (p: string) => p.startsWith("/activity"),
-  },
-  {
-    href: "/training",
-    label: "Training",
-    icon: BarChart3,
-    match: (p: string) => p.startsWith("/training"),
-  },
-  {
-    href: "/coach",
-    label: "Coach",
-    icon: MessageCircle,
-    match: (p: string) => p.startsWith("/coach"),
-  },
-  {
-    href: "/setup",
-    label: "Setup",
-    icon: Settings,
-    match: (p: string) => p.startsWith("/setup"),
-  },
-];
 
 export function BottomNav() {
   const pathname = usePathname();
@@ -47,7 +19,8 @@ export function BottomNav() {
       // this height includes the 1px top border + the safe-area padding,
       // leaving the <ul> its intrinsic content area. If you need the bar
       // taller, change --bottom-nav-h (one place, both sides follow).
-      className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-background/95 backdrop-blur-md"
+      // Phone and tablet only — from lg up the SideNav replaces it.
+      className="fixed bottom-0 inset-x-0 z-40 border-t border-border bg-background/95 backdrop-blur-md lg:hidden"
       style={{
         height:
           "calc(var(--bottom-nav-h) + max(env(safe-area-inset-bottom), 4px))",
@@ -56,7 +29,7 @@ export function BottomNav() {
       aria-label="Primary"
     >
       <ul className="mx-auto flex max-w-2xl items-stretch justify-around">
-        {items.map((item) => {
+        {NAV_ITEMS.map((item) => {
           const active = item.match(pathname);
           const Icon = item.icon;
           return (
