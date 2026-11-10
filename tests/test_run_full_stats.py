@@ -171,6 +171,12 @@ class TestTreadmill:
         assert "rough" in g["avg_pace"]["note"] and "rough" in g["distance"]["note"]
         assert "note" not in g["duration"]
 
+    def test_lap_table_carries_the_same_caveat(self, dp):
+        assert dp.get_run_full_stats(AID)["lap_caveat"] is None       # outdoors
+        _write(dp, "get_activities", f"{AID}_summary.json", {**LISTING, "activityType": {"typeKey": "treadmill_running"}})
+        caveat = dp.get_run_full_stats(AID)["lap_caveat"]
+        assert "estimates" in caveat and "distance and pace" in caveat
+
 
 class TestEndpoint:
     def test_passes_the_payload_through(self, client):

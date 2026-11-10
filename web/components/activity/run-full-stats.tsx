@@ -51,7 +51,12 @@ export function RunFullStats({ activityId }: { activityId: number }) {
     <div className="space-y-4">
       {d.laps.length > 0 && (
         <Section title="Laps" count={`${d.laps.length}`}>
-          <LapTable laps={d.laps} />
+          {d.lap_caveat && (
+            <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              {d.lap_caveat}
+            </p>
+          )}
+          <LapTable laps={d.laps} estimated={d.lap_caveat != null} />
         </Section>
       )}
       {d.groups.length > 0 && (
@@ -179,7 +184,16 @@ function isRest(lap: RunLapStatRow): boolean {
   return lap.category === "Rest" || (!lap.category && lap.intensity === "REST");
 }
 
-function LapTable({ laps }: { laps: RunLapStatRow[] }) {
+// Columns that are the watch's guess on an indoor run.
+const ESTIMATED_INDOORS = new Set<keyof RunLapStatRow>(["distance_mi", "pace"]);
+
+function LapTable({
+  laps,
+  estimated = false,
+}: {
+  laps: RunLapStatRow[];
+  estimated?: boolean;
+}) {
   // A column nobody has a value for (GAP and elevation indoors, running
   // dynamics on a swim) is dropped instead of shown as a wall of dashes.
   const cols = COLS.filter((c) => laps.some((l) => l[c.key] != null));
@@ -196,10 +210,14 @@ function LapTable({ laps }: { laps: RunLapStatRow[] }) {
             {cols.map((c) => (
               <th
                 key={c.key}
-                title={c.title}
+                title={
+                  estimated && ESTIMATED_INDOORS.has(c.key)
+                    ? `${c.title} — watch estimate indoors`
+                    : c.title
+                }
                 className="whitespace-nowrap py-1.5 pl-3 text-right font-normal"
               >
-                {c.label}
+                {estimated && ESTIMATED_INDOORS.has(c.key) ? `≈ ${c.label}` : c.label}
               </th>
             ))}
           </tr>
