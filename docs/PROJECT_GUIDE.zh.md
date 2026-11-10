@@ -132,7 +132,10 @@ Tailwind。iPhone 优先布局。
 **Run 详情页（`/activity/[id]`）——三个块（#113）：**
 
 1. **地图** — 只有户外 run 才有。跑步机 run 没有 GPS，就干脆不渲染这个块
-   （而不是留一个空占位）。
+   （而不是留一个空占位）。路线按配速上色（蓝=慢 → 黄 → 红=快），带一个小图例；
+   `get_run_route` 在 polyline 之外还返回 `progress` / `pace_min_mi` /
+   `pace_scale`，色阶取这次跑步自己的 p10–p90 配速，这样一个红灯或一次冲刺
+   不会把色阶拉长。轨迹没有时间戳时退回单色线。
 2. **`RunSummaryBlock`** — 两种 run 类型共用的那一个模块：顶部
    **距离 / 平均配速 / 时间** → 各强度 **chips** → 逐圈 **强度条**
    （条色 = 标注的强度，右侧 HR，Rest 圈画成细灰条）。条宽 ∝ 速度，但在
@@ -155,7 +158,10 @@ Tailwind。iPhone 优先布局。
    attention 锚点的琥珀收据带、以及常驻的灰色**海拔剪影**压在图底约
    1/4 高度（地形即归因上下文——骑在坡上的 HR 鼓包自己解释自己）。
    Elevation 不再有 tab；剪影就是它的渲染。tab 顺序：HR / Pace /
-   Cadence / L/R / Resp / Stride。跑步机 run 的 Pace tab 挂常驻警示
+   Cadence / L/R / Resp / Stride / GAP / Power / GCT / V.osc / V.ratio /
+   Stamina / Perf.——这次跑步有这个指标才显示对应的 tab（室内没有 GAP，没戴
+   胸带就没有跑步动态）；任意两个可以叠在左右两条轴上。触地时间和两个垂直指标
+   的轴按 p2–p98 取范围，这样停下来时的一个 0 值不会把整条线压扁。跑步机 run 的 Pace tab 挂常驻警示
    （腕表配速偏慢 ~1 min/mi；形状可信、数值不可信）。
 
    两个专属视图：**L/R** 以 50% 为轴、49–51 舒适带、轴域按 p99 偏差

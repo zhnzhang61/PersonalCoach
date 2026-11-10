@@ -38,6 +38,8 @@ interface MetricSpec {
   color: string;
   invertY?: boolean;            // pace: lower = faster, so invert
   yDomain?: [number, number];   // hard Y bounds (e.g., pace [4,14] to clip stoplight spikes visually)
+  decimals?: number;            // axis-tick decimals for metrics that live in a ~2-unit range
+  robust?: boolean;             // size the axis to the p2–p98 band: one zero sample at a stop must not flatten the line
   formatSubtitle: (s: MetricSummary) => string;
 }
 
@@ -91,6 +93,60 @@ const METRICS_BASE: MetricSpec[] = [
     label: "Stride",
     color: "var(--chart-3)",
     formatSubtitle: (s) => `avg ${Math.round(s.avg)} cm`,
+  },
+  // The rest of what Garmin Connect charts. Each tab only appears when
+  // the run has the metric (no GAP indoors, no dynamics without a strap).
+  // Colours: a metric commonly overlaid on HR (chart-1) or Pace (chart-2)
+  // must not reuse that colour — Power sits on HR, GAP on Pace.
+  {
+    key: "GapPace",
+    label: "GAP",
+    color: "var(--chart-3)",
+    invertY: true,
+    formatSubtitle: (s) => `avg ${fmtPace(s.avg)} /mi grade-adjusted`,
+  },
+  {
+    key: "Power",
+    label: "Power",
+    color: "var(--chart-4)",
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} W · max ${Math.round(s.max)}`,
+  },
+  {
+    key: "GroundContactTime",
+    label: "GCT",
+    color: "var(--chart-5)",
+    robust: true,
+    formatSubtitle: (s) => `avg ${Math.round(s.avg)} ms ground contact`,
+  },
+  {
+    key: "VerticalOscillation",
+    label: "V.osc",
+    color: "var(--chart-3)",
+    robust: true,
+    decimals: 1,
+    formatSubtitle: (s) => `avg ${s.avg.toFixed(1)} cm vertical oscillation`,
+  },
+  {
+    key: "VerticalRatio",
+    label: "V.ratio",
+    color: "var(--chart-2)",
+    robust: true,
+    decimals: 1,
+    formatSubtitle: (s) => `avg ${s.avg.toFixed(1)}% vertical ratio`,
+  },
+  {
+    key: "AvailableStamina",
+    label: "Stamina",
+    color: "var(--chart-3)",
+    yDomain: [0, 100],
+    formatSubtitle: (s) => `${Math.round(s.max)}% → ${Math.round(s.min)}% available`,
+  },
+  {
+    key: "PerformanceCondition",
+    label: "Perf.",
+    color: "var(--chart-5)",
+    formatSubtitle: (s) =>
+      `performance condition avg ${s.avg >= 0 ? "+" : ""}${s.avg.toFixed(1)} · ${Math.round(s.min)} to ${s.max >= 0 ? "+" : ""}${Math.round(s.max)}`,
   },
 ];
 
@@ -345,7 +401,9 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
   const yTickFormatter = (s: MetricSpec) => (v: number) =>
     s.key === "GroundContactBalanceLeft"
       ? `${Number.isInteger(v) ? v : v.toFixed(1)}%`
-      : `${Math.round(v)}`;
+      : s.decimals
+        ? v.toFixed(s.decimals)
+        : `${Math.round(v)}`;
 
   // L/R renders centered on 50% with a symmetric domain sized to the
   // run's p99 deviation — the 49–51 comfort band and the distance the
@@ -364,12 +422,24 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
     : 0;
   const lrSpan = Math.max(1.5, lrP99 + 0.3);
   const lrDomain: [number, number] = [50 - lrSpan, 50 + lrSpan];
+  const robustDomain = (key: TelemetrySummaryKey): [number, number] | null => {
+    const vals = rows
+      .map((r) => r[key as keyof TelemetryRow])
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (vals.length < 20) return null;
+    const lo = vals[Math.floor(vals.length * 0.02)];
+    const hi = vals[Math.floor(vals.length * 0.98)];
+    const pad = Math.max((hi - lo) * 0.15, 0.2);
+    return [Math.max(0, lo - pad), hi + pad];
+  };
+
   const domainFor = (
     s: MetricSpec,
   ): [number | string, number | string] =>
     s.key === "GroundContactBalanceLeft"
       ? lrDomain
-      : (s.yDomain ?? ["auto", "auto"]);
+      : (s.yDomain ?? (s.robust ? robustDomain(s.key) : null) ?? ["auto", "auto"]);
 
   const renderAxis = (s: MetricSpec, side: "left" | "right") => {
     const domain = domainFor(s);
@@ -388,7 +458,7 @@ function ChartPane({ rows, specs, xMode, decorations = null }: ChartPaneProps) {
         // Band edges + center only — auto ticks on a fractional
         // domain produce noise like "46.1%".
         ticks={isLR ? [49, 50, 51] : undefined}
-        allowDataOverflow={!!s.yDomain || isLR}
+        allowDataOverflow={!!s.yDomain || isLR || !!s.robust}
         reversed={!!s.invertY}
         tickFormatter={yTickFormatter(s)}
         // Tick text in the metric's color so users can read which axis is which.
@@ -598,7 +668,7 @@ export function TelemetryCharts({
   // numbers used to compute the avg, so chart and subtitle agree.
   const paceClip = data.pace_clip;
   const metrics: MetricSpec[] = visibleMetrics.map((m) =>
-    m.key === "Pace" ? { ...m, yDomain: paceClip } : m,
+    m.key === "Pace" || m.key === "GapPace" ? { ...m, yDomain: paceClip } : m,
   );
 
   const rawRows = data.raw ?? [];
