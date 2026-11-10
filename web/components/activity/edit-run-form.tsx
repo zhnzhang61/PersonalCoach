@@ -11,6 +11,7 @@ import type {
   LapsResponse,
   LapsUpdateBody,
   RunActivity,
+  StravaRenameResult,
   SuggestTitleResponse,
 } from "@/lib/types";
 import { EffortPaintEditor } from "@/components/activity/effort-paint-editor";
@@ -18,6 +19,21 @@ import { EffortPaintEditor } from "@/components/activity/effort-paint-editor";
 interface Props {
   run: RunActivity;
   onClose: () => void;
+}
+
+// A message when the Strava rename was attempted (or should have been
+// possible) and did not happen; null when there is nothing to report.
+function stravaProblem(result: StravaRenameResult | undefined): string | null {
+  switch (result) {
+    case "not_found":
+      return "no Strava activity starts at this run's start time yet (Garmin → Strava sync may be lagging). Save again later.";
+    case "read_only":
+      return "Strava was connected without permission to edit activities. Reconnect in Setup.";
+    case "error":
+      return "Strava did not accept the request. Try saving again.";
+    default:
+      return null; // renamed · not_connected · skipped · older server
+  }
 }
 
 export function EditRunForm({ run, onClose }: Props) {
@@ -70,17 +86,19 @@ export function EditRunForm({ run, onClose }: Props) {
 
   const mutation = useMutation({
     mutationFn: (body: LapsUpdateBody) =>
-      apiPut<{ ok: boolean; activity_id: number }>(
+      apiPut<{ ok: boolean; activity_id: number; strava?: StravaRenameResult }>(
         `/api/runs/${run.activityId}/laps`,
         body as unknown as Record<string, unknown>,
       ),
-    onSuccess: () => {
+    onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ["runs"] });
       qc.invalidateQueries({
         queryKey: ["runs", run.activityId, "laps"],
       });
       qc.invalidateQueries({ queryKey: ["training", "cycle-stats"] });
-      onClose();
+      // The save itself worked. Stay open only when the Strava title
+      // could not be updated, so that is never a silent miss.
+      if (!stravaProblem(data.strava)) onClose();
     },
   });
 
@@ -164,6 +182,11 @@ export function EditRunForm({ run, onClose }: Props) {
       {mutation.isError && (
         <p className="text-sm text-rose-700 dark:text-rose-300">
           Save failed: {(mutation.error as Error).message}
+        </p>
+      )}
+      {mutation.isSuccess && stravaProblem(mutation.data.strava) && (
+        <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          Saved here. Strava title not updated: {stravaProblem(mutation.data.strava)}
         </p>
       )}
 

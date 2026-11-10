@@ -20,6 +20,7 @@ from backend.agentic_coach import AgenticCoach
 from backend.cognitive_memory_engine import MemoryOS
 from backend.data_processor import DataProcessor
 from backend.google_calendar import GoogleCalendar
+from backend.strava_client import NotConnected, StravaClient, StravaError, garmin_start_utc
 from backend.langsmith_setup import langsmith_status, startup_log_line
 from backend.seed_models import (
     refit_aerobic_decoupling_baseline,
@@ -78,6 +79,7 @@ app.add_middleware(
 
 processor = DataProcessor()
 gcal = GoogleCalendar()
+strava = StravaClient()
 memory_engine = MemoryOS(
     db_path="data/cognition.db",
     semantic_profile_path=processor.paths["semantic_memory"],
@@ -542,6 +544,124 @@ def training_monthly_stats(
 ) -> dict[str, Any]:
     months = processor.get_monthly_activity_stats(activity_type=activity_type)
     return {"activity_type": activity_type, "months": months}
+
+
+# ==========================================
+# Strava: title sync + deep link
+# ==========================================
+# The user's runs reach Strava through Garmin's auto-sync. Two things are
+# done on his behalf: naming a run here renames the Strava copy, and the
+# run page links straight to it. Nothing read from Strava is stored or
+# shown to the coach (Strava API Policy §5.3) — see strava_client.py.
+
+STRAVA_REDIRECT_URI = os.environ.get(
+    "STRAVA_OAUTH_REDIRECT_URI", "http://localhost:8765/oauth/strava/callback"
+)
+
+
+def _strava_activity_id(activity_id: int) -> int | None:
+    summary = _find_run_summary(activity_id)
+    if not summary:
+        raise HTTPException(404, "Run not found")
+    start = garmin_start_utc(summary)
+    if start is None:
+        return None
+    return strava.find_activity_id(activity_id, start, summary.get("distance"))
+
+
+def _strava_rename(activity_id: int, name: str) -> str:
+    """Rename the Strava twin. Returns a status word, never raises:
+    renamed · not_connected · read_only · not_found · skipped · error."""
+    name = (name or "").strip()
+    if not name:
+        return "skipped"
+    try:
+        if not strava.connected():
+            return "not_connected"
+        if not strava.can_write():
+            return "read_only"
+        sid = _strava_activity_id(activity_id)
+        if sid is None:
+            return "not_found"
+        strava.rename(sid, name)
+        return "renamed"
+    except NotConnected:
+        return "not_connected"
+    except HTTPException:
+        return "not_found"
+    except Exception as exc:  # network, Strava 5xx, rate limit…
+        print(f"⚠️ Strava rename failed for {activity_id}: {type(exc).__name__}: {exc}")
+        return "error"
+
+
+@app.get("/api/strava/status")
+def strava_status() -> dict[str, Any]:
+    return {
+        "configured": strava.configured(),
+        "connected": strava.connected(),
+        "can_write": strava.can_write(),
+    }
+
+
+@app.get("/oauth/strava/start")
+def oauth_strava_start():
+    from fastapi.responses import RedirectResponse
+
+    try:
+        return RedirectResponse(strava.authorize_url(STRAVA_REDIRECT_URI))
+    except NotConnected as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/oauth/strava/callback")
+def oauth_strava_callback(
+    code: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+):
+    from fastapi.responses import RedirectResponse
+
+    if error or not code:
+        return RedirectResponse(f"http://localhost:3000/setup?strava_error={error or 'no_code'}")
+    try:
+        strava.exchange_code(code, granted_scope=scope)
+    except Exception as exc:
+        return RedirectResponse(f"http://localhost:3000/setup?strava_error={type(exc).__name__}")
+    return RedirectResponse("http://localhost:3000/setup?strava_connected=1")
+
+
+@app.post("/api/strava/disconnect")
+def strava_disconnect() -> dict[str, bool]:
+    strava.disconnect()
+    return {"ok": True}
+
+
+@app.get("/api/runs/{activity_id}/strava/open")
+def run_open_in_strava(activity_id: int):
+    """302 to the run's Strava page. A plain link target (not a JSON
+    endpoint) so a tap is a real navigation — that is what lets iOS hand
+    the URL to the Strava app."""
+    from fastapi.responses import RedirectResponse
+
+    try:
+        sid = _strava_activity_id(activity_id)
+    except NotConnected as exc:
+        raise HTTPException(409, f"Strava not connected: {exc}")
+    except StravaError as exc:
+        raise HTTPException(502, f"Strava lookup failed: {exc}")
+    if sid is None:
+        raise HTTPException(404, "No Strava activity starts at this run's start time")
+    return RedirectResponse(strava.activity_url(sid))
+
+
+@app.post("/api/runs/{activity_id}/strava/rename")
+def run_rename_in_strava(activity_id: int) -> dict[str, Any]:
+    """Push the run's saved name to Strava again (for runs named before
+    Strava was connected)."""
+    meta_path = Path(processor.paths["manual"]) / f"run_{activity_id}_meta.json"
+    name = (json.loads(meta_path.read_text()).get("name") if meta_path.exists() else None) or ""
+    result = _strava_rename(activity_id, name)
+    return {"ok": result == "renamed", "strava": result}
 
 
 # ==========================================
@@ -1402,7 +1522,14 @@ def update_laps(activity_id: int, body: LapsUpdate) -> dict[str, Any]:
         notes=body.notes,
         lap_categories=body.categories,
     )
-    return {"ok": True, "activity_id": activity_id, "category_stats": stats}
+    return {
+        "ok": True,
+        "activity_id": activity_id,
+        "category_stats": stats,
+        # Naming a run here also titles its Strava twin. Best-effort: the
+        # save above already succeeded and must not be undone by Strava.
+        "strava": _strava_rename(activity_id, body.run_name),
+    }
 
 
 @app.get("/api/runs/{activity_id}/suggest-title")

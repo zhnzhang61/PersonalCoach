@@ -92,6 +92,21 @@ export interface SyncResult {
   stderr?: string;
 }
 
+export interface StravaStatus {
+  configured: boolean; // client id/secret present in .env
+  connected: boolean; // the user has authorized
+  can_write: boolean; // "edit activities" was granted on the consent page
+}
+
+// What happened to the Strava title when a run was saved.
+export type StravaRenameResult =
+  | "renamed"
+  | "not_connected"
+  | "read_only"
+  | "not_found"
+  | "skipped"
+  | "error";
+
 export interface RefreshTokenResult {
   ok: boolean;
   returncode: number;

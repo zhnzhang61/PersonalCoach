@@ -303,6 +303,20 @@ def _build_memory_engine_mock() -> MagicMock:
     return m
 
 
+def _build_strava_mock() -> MagicMock:
+    """StravaClient mock, disconnected by default so saving a run never
+    reaches Strava. (The real client would use the developer machine's
+    token and rename real activities.)"""
+    m = MagicMock(name="StravaClient")
+    m.configured.return_value = False
+    m.connected.return_value = False
+    m.can_write.return_value = False
+    m.authorize_url.return_value = "https://www.strava.com/oauth/authorize?mock=1"
+    m.find_activity_id.return_value = None
+    m.activity_url.side_effect = lambda sid: f"https://www.strava.com/activities/{sid}"
+    return m
+
+
 def _build_gcal_mock() -> MagicMock:
     """GoogleCalendar mock. Method names match real class:
     authorization_url returns a (url, state) tuple, is_connected /
@@ -399,6 +413,7 @@ def mock_app_deps(monkeypatch):
     monkeypatch.setattr(api_server, "agent", _build_agent_mock())
     monkeypatch.setattr(api_server, "memory_engine", _build_memory_engine_mock())
     monkeypatch.setattr(api_server, "gcal", _build_gcal_mock())
+    monkeypatch.setattr(api_server, "strava", _build_strava_mock())
 
     # Redirect the sync-state sidecar to /tmp so the smoke for
     # POST /api/sync/garmin (which writes the file on success) doesn't
