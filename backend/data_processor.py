@@ -2687,6 +2687,7 @@ class DataProcessor:
             gct_balance_left = get_val(metrics, 'directGroundContactBalanceLeft')
             power = get_val(metrics, 'directPower')
             air_temp = get_val(metrics, 'directAirTemperature')
+            gap_mps = get_val(metrics, 'directGradeAdjustedSpeed')
 
             parsed_data.append({
                 "Lap": get_lap(current_sec), "Second": current_sec,
@@ -2703,10 +2704,19 @@ class DataProcessor:
                 "GroundContactBalanceLeft": gct_balance_left,
                 "Power": power,
                 "AirTemperature": air_temp,
+                "GapSpeed_mps": gap_mps,
+                "VerticalRatio": get_val(metrics, 'directVerticalRatio'),
+                "AvailableStamina": get_val(metrics, 'directAvailableStamina'),
+                "PotentialStamina": get_val(metrics, 'directPotentialStamina'),
+                "PerformanceCondition": get_val(metrics, 'directPerformanceCondition'),
             })
 
         df_raw = pd.DataFrame(parsed_data).ffill()
         df_raw['Pace'] = np.where((df_raw['Speed_mps'] > 0.5), 26.8224 / df_raw['Speed_mps'], np.nan)
+        # Garmin's own grade-adjusted speed → pace, same units as Pace so
+        # the two can share an axis. Absent indoors (no grade to adjust).
+        gap = pd.to_numeric(df_raw['GapSpeed_mps'], errors='coerce')
+        df_raw['GapPace'] = np.where(gap > 0.5, 26.8224 / gap, np.nan)
 
         df_raw['IntervalBlock'] = df_raw['Second'] // downsample_sec
         df_ai = df_raw.groupby('IntervalBlock').agg({
@@ -2760,9 +2770,22 @@ class DataProcessor:
             (df_raw['Pace'] >= pace_lo) & (df_raw['Pace'] <= pace_hi)
         )
 
+        def col(name):
+            return pd.to_numeric(df_raw.get(name, pd.Series(dtype=float)), errors='coerce')
+
+        gap_pace = col('GapPace')
+        gap_filtered = gap_pace.where((gap_pace >= pace_lo) & (gap_pace <= pace_hi))
+
         out: dict[str, dict | None] = {
             "HeartRate": stats(df_raw.get('HeartRate', pd.Series(dtype=float))),
             "Pace": stats(pace_filtered),
+            "GapPace": stats(gap_filtered),
+            "Power": stats(col('Power')),
+            "GroundContactTime": stats(col('GroundContactTime')),
+            "VerticalOscillation": stats(col('VerticalOscillation')),
+            "VerticalRatio": stats(col('VerticalRatio')),
+            "AvailableStamina": stats(col('AvailableStamina')),
+            "PerformanceCondition": stats(col('PerformanceCondition')),
             "StrideLength": stats(df_raw.get('StrideLength', pd.Series(dtype=float))),
             "Cadence": stats(df_raw.get('Cadence', pd.Series(dtype=float))),
             "RespirationRate": stats(df_raw.get('RespirationRate', pd.Series(dtype=float))),
@@ -2915,25 +2938,29 @@ class DataProcessor:
             return None
 
         pts: list[list[float]] = []
+        times: list[float | None] = []
         for p in polyline:
             lat = p.get('lat')
             lon = p.get('lon')
             if lat is None or lon is None:
                 continue
             pts.append([float(lat), float(lon)])
+            times.append(p.get('time'))
         if len(pts) < 2:
             return None
 
         if len(pts) > max_points:
             stride = len(pts) / max_points
-            sampled = [pts[int(i * stride)] for i in range(max_points)]
+            idx = [int(i * stride) for i in range(max_points)]
             # Pin the literal end point so the rendered path doesn't stop short.
-            sampled[-1] = pts[-1]
-            pts = sampled
+            idx[-1] = len(pts) - 1
+            pts = [pts[i] for i in idx]
+            times = [times[i] for i in idx]
 
         return {
             "activity_id": activity_id,
             "polyline": pts,
+            **self._route_pace(pts, times),
             "start": pts[0],
             "end": pts[-1],
             "bounds": {
@@ -2943,6 +2970,59 @@ class DataProcessor:
                 "max_lon": geo.get('maxLon'),
             },
         }
+
+    @staticmethod
+    def _route_pace(pts: list[list[float]], times: list) -> dict:
+        """Pace along the route, for colouring the map line.
+
+        `progress[i]` is the fraction of the route's length at point i
+        (0 → 1; what a map's line-gradient is keyed on). `pace_min_mi[i]`
+        is the smoothed pace of the stretch ending at point i, None where
+        it cannot be known (missing timestamps, standing still).
+        `pace_scale` is the 10th–90th percentile range: the colour scale
+        spans the bulk of the run instead of being stretched by one
+        stoplight or one sprint.
+        """
+        import math
+
+        n = len(pts)
+        seg_m = [0.0]
+        for (la1, lo1), (la2, lo2) in zip(pts, pts[1:]):
+            p1, p2 = math.radians(la1), math.radians(la2)
+            a = (math.sin((p2 - p1) / 2) ** 2
+                 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lo2 - lo1) / 2) ** 2)
+            seg_m.append(2 * 6371000.0 * math.asin(math.sqrt(a)))
+        total = sum(seg_m)
+        if total <= 0:
+            return {"progress": None, "pace_min_mi": None, "pace_scale": None}
+        cum, progress = 0.0, []
+        for d in seg_m:
+            cum += d
+            progress.append(round(cum / total, 5))
+
+        speed: list[float | None] = [None] * n
+        for i in range(1, n):
+            t0, t1 = times[i - 1], times[i]
+            if t0 is None or t1 is None or t1 <= t0:
+                continue
+            speed[i] = seg_m[i] / ((t1 - t0) / 1000.0)
+        speed[0] = speed[1] if n > 1 else None
+
+        # Median of 5 neighbours: GPS jitter makes single segments jumpy.
+        smooth: list[float | None] = []
+        for i in range(n):
+            win = sorted(v for v in speed[max(0, i - 2): i + 3] if v is not None)
+            smooth.append(win[len(win) // 2] if win else None)
+        pace = [round(1609.34 / v / 60.0, 2) if v and v > 0.5 else None for v in smooth]
+
+        known = sorted(p for p in pace if p is not None)
+        scale = None
+        if len(known) >= 10:
+            scale = {"fast_min_mi": known[int(len(known) * 0.10)],
+                     "slow_min_mi": known[int(len(known) * 0.90)]}
+        return {"progress": progress,
+                "pace_min_mi": pace if scale else None,
+                "pace_scale": scale}
 
     def get_run_weather(self, activity_id) -> dict | None:
         """

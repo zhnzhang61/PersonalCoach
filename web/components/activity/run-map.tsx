@@ -35,6 +35,53 @@ type StyleId = (typeof STYLES)[number]["id"];
 // satellite). Hex rather than CSS var — mapbox-gl paint expressions are
 // canvas-side, they don't read CSS custom properties.
 const ROUTE_COLOR = "#fc4c02";
+// Pace colouring: slow → fast. Blue/yellow/red is the convention runners
+// already read on Garmin and Strava maps, and all three stay visible on
+// the outdoor, street and satellite base styles.
+const PACE_SLOW = "#2563eb";
+const PACE_MID = "#facc15";
+const PACE_FAST = "#dc2626";
+
+function fmtPaceLabel(minPerMi: number): string {
+  const total = Math.round(minPerMi * 60);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function mix(a: string, b: string, t: number): string {
+  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+  const c = pa.map((v, i) => Math.round(v + (pb[i] - v) * t));
+  return `#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+// 0 = slowest end of the scale, 1 = fastest.
+function paceColor(t: number): string {
+  const x = Math.min(1, Math.max(0, t));
+  return x < 0.5 ? mix(PACE_SLOW, PACE_MID, x * 2) : mix(PACE_MID, PACE_FAST, (x - 0.5) * 2);
+}
+
+// A mapbox `line-gradient` expression: colour stops keyed on distance
+// along the line. Returns null when the route carries no pace.
+function paceGradient(data: RouteResponse): unknown[] | null {
+  const { progress, pace_min_mi: pace, pace_scale: scale } = data;
+  if (!progress || !pace || !scale) return null;
+  const span = scale.slow_min_mi - scale.fast_min_mi;
+  if (!(span > 0)) return null;
+  const stops: (number | string)[] = [];
+  let last = -1;
+  let lastColor = paceColor(0.5);
+  for (let i = 0; i < progress.length; i++) {
+    const p = progress[i];
+    // Stops must strictly increase; standing still repeats a progress.
+    if (!(p > last)) continue;
+    const v = pace[i];
+    if (v != null) lastColor = paceColor((scale.slow_min_mi - v) / span);
+    stops.push(p, lastColor);
+    last = p;
+  }
+  if (stops.length < 4) return null;
+  return ["interpolate", ["linear"], ["line-progress"], ...stops];
+}
 const START_COLOR = "#16a34a";
 const END_COLOR = "#dc2626";
 
@@ -134,6 +181,8 @@ function RunMapInner({
     };
   }, [data]);
 
+  const gradient = useMemo(() => (data ? paceGradient(data) : null), [data]);
+
   const initialViewState = useMemo(() => {
     if (!data) return undefined;
     const b = data.bounds;
@@ -206,7 +255,9 @@ function RunMapInner({
           tileSize={512}
           maxzoom={14}
         />
-        <Source id="route" type="geojson" data={routeGeoJson}>
+        {/* lineMetrics is what makes line-progress (and so the pace
+            gradient) available to the layer. */}
+        <Source id="route" type="geojson" data={routeGeoJson} lineMetrics>
           <Layer
             id="route-casing"
             type="line"
@@ -220,11 +271,20 @@ function RunMapInner({
           <Layer
             id="route-line"
             type="line"
-            paint={{
-              "line-color": ROUTE_COLOR,
-              "line-width": 3.5,
-              "line-opacity": 0.95,
-            }}
+            paint={
+              gradient
+                ? {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    "line-gradient": gradient as any,
+                    "line-width": 4,
+                    "line-opacity": 0.95,
+                  }
+                : {
+                    "line-color": ROUTE_COLOR,
+                    "line-width": 3.5,
+                    "line-opacity": 0.95,
+                  }
+            }
             layout={{ "line-cap": "round", "line-join": "round" }}
           />
         </Source>
@@ -289,6 +349,31 @@ function RunMapInner({
           </button>
         ))}
       </div>
+      )}
+
+      {gradient && data.pace_scale && (
+        <div
+          // Bottom-right: the bottom-left corner belongs to the Mapbox logo.
+          className="pointer-events-none absolute flex items-center gap-1.5 rounded-md bg-background/90 px-2 py-1 text-[11px] tabular-nums text-muted-foreground shadow-sm backdrop-blur"
+          style={{
+            bottom: fullscreen
+              ? "calc(env(safe-area-inset-bottom) + 0.5rem)"
+              : "0.5rem",
+            right: fullscreen
+              ? "calc(env(safe-area-inset-right) + 0.5rem)"
+              : "0.5rem",
+          }}
+        >
+          <span>{fmtPaceLabel(data.pace_scale.slow_min_mi)}</span>
+          <span
+            aria-hidden
+            className="h-1.5 w-16 rounded-full"
+            style={{
+              background: `linear-gradient(to right, ${PACE_SLOW}, ${PACE_MID}, ${PACE_FAST})`,
+            }}
+          />
+          <span>{fmtPaceLabel(data.pace_scale.fast_min_mi)} /mi</span>
+        </div>
       )}
 
       {interactive && (
