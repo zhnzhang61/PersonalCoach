@@ -122,7 +122,7 @@ fetching. Tailwind. iPhone-first layout.
 | Activity | `/activity` | Run list + per-run detail (`/activity/[id]`): map (outdoor only) → run summary block → folded telemetry drawer (resp-vs-HR scatter + flippable resp×HR candles vs. own history) + "Ask AI about this run" |
 | Training | `/training` | Cycle overview, monthly chart, plan calendar, upcoming planned workouts (editable), coaching tips (read-only, coach-appended via `POST /api/coaching-tips`) |
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
-| Setup | `/setup` | Garmin / Google sign-in, sync controls; pull-to-refresh runs a 7-day sync (nightly agent keeps the 30-day self-healing window) |
+| Setup | `/setup` | Garmin sync (source shown; official API by default), Strava connect, training blocks; pull-to-refresh runs a 7-day sync (the twice-daily LaunchAgent runs the official sync with a 30-day window) |
 
 **Run detail page (`/activity/[id]`) — three blocks (#113):**
 
@@ -349,6 +349,23 @@ signs in directly, the app stores the resulting tokens.
   health via `python -m backend.garmin_sync`. Reachable from Setup as
   "Run legacy sync instead"; still the only source for training
   status / readiness, race predictions and gear.
+- **Strava** — `backend/strava_client.py`, the user's own API
+  application (`STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` in `.env`).
+  OAuth at `/oauth/strava/start` → `/oauth/strava/callback`, scopes
+  `activity:read_all,activity:write`, token in
+  `data/oauth/strava_token.json` (refresh tokens rotate — the new one is
+  persisted on every refresh). Authorize on the Mac: the callback domain
+  is `localhost`. Two uses only: saving a run's name (`PUT
+  /api/runs/{id}/laps`) renames its Strava twin, best-effort, result in
+  the response's `strava` field; `GET /api/runs/{id}/strava/open` 302s to
+  the Strava activity (a plain link so iOS can hand it to the Strava
+  app). The twin is found by start time (±5 min, nearest wins) because
+  Garmin→Strava sync shares no id.
+  - **Policy constraint (Strava API Policy, 2026-06-01):** Strava data
+    may not enter any AI application, and may be cached 7 days at most.
+    So nothing read from Strava is stored, logged, or given to the coach;
+    the id pairing lives in process memory only; titles come from our own
+    data. Keep it that way when extending this.
 - **Google Calendar** — `google_calendar.py`. OAuth flow at
   `/oauth/google/start` → `/callback`. Scope is `calendar.events`
   (read+write; we write AI-planned workouts to the user's calendar).

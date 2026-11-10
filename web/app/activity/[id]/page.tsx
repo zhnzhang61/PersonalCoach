@@ -4,7 +4,7 @@ import { use, useRef, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Pencil, X } from "lucide-react";
+import { ArrowLeft, ExternalLink, Pencil, X } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate } from "@/lib/format";
@@ -12,6 +12,7 @@ import type {
   RunActivity,
   RunDetailResponse,
   RunVerdict,
+  StravaStatus,
   VerdictAnchor,
   WeatherSnapshot,
 } from "@/lib/types";
@@ -60,6 +61,14 @@ export default function ActivityDetailPage({
     staleTime: Infinity,
     retry: false,
     enabled: Number.isFinite(activityId),
+  });
+
+  // Strava link shows only once the account is connected (Setup).
+  const stravaQuery = useQuery({
+    queryKey: ["strava", "status"],
+    queryFn: () => apiGet<StravaStatus>("/api/strava/status"),
+    staleTime: 5 * 60_000,
+    retry: false,
   });
 
   const [editing, setEditing] = useState(false);
@@ -122,6 +131,20 @@ export default function ActivityDetailPage({
           <ArrowLeft className="size-4" />
           Back to activities
         </Link>
+        <div className="flex items-center gap-2">
+        {stravaQuery.data?.connected && (
+          // A plain link to a redirecting endpoint, not a fetch: the tap
+          // has to be a real navigation for iOS to open the Strava app.
+          <a
+            href={`/api/runs/${activityId}/strava/open`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+          >
+            <ExternalLink className="size-4" />
+            Strava
+          </a>
+        )}
         <button
           type="button"
           onClick={() => setEditing((v) => !v)}
@@ -140,6 +163,7 @@ export default function ActivityDetailPage({
             </>
           )}
         </button>
+        </div>
       </div>
 
       <div className="space-y-1">

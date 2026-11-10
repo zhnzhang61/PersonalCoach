@@ -116,7 +116,7 @@ Tailwind。iPhone 优先布局。
 | Activity | `/activity` | 跑步列表 + 单次详情（`/activity/[id]`）：地图（仅户外）→ run 汇总块 → 折叠的遥测抽屉（呼吸-心率散点 + 可翻转的呼吸×心率蜡烛图，对比自身历史）+ "Ask AI about this run" |
 | Training | `/training` | 周期总览、月度图、计划日历、未来计划训练（可编辑）、coaching tips（只读，coach 经 `POST /api/coaching-tips` 追加） |
 | Coach | `/coach` | session 制聊天线程（流式）、action pills、day dividers、agent 工作时实时显示工具调用 chips（答案落地后隐藏） |
-| Setup | `/setup` | Garmin / Google 登录、同步控制;下拉刷新触发 7 天窗口同步(夜间 agent 保留 30 天自愈窗口) |
+| Setup | `/setup` | Garmin 同步（显示数据源，默认官方 API）、Strava 连接、训练周期；下拉刷新触发 7 天窗口同步（每天两次的 LaunchAgent 跑官方同步，30 天窗口） |
 
 **Run 详情页（`/activity/[id]`）——三个块（#113）：**
 
@@ -298,6 +298,20 @@ token。
   下面的设置）。`backend/garmin_sync.py` 再用它拉活动 + 每日健康，通过
   `python -m backend.garmin_sync`。Setup 页的 "Run legacy sync instead"
   可以手动触发；training status / readiness、比赛预测、装备仍然只有它能拿到。
+- **Strava** — `backend/strava_client.py`，用户自己建的 API 应用（`.env` 里的
+  `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET`）。OAuth 在
+  `/oauth/strava/start` → `/oauth/strava/callback`，scope 是
+  `activity:read_all,activity:write`，token 在
+  `data/oauth/strava_token.json`（refresh token 会轮换，每次刷新都把新的存下来）。
+  授权要在 Mac 上做：回调域名是 `localhost`。只做两件事：保存 run 的名字
+  （`PUT /api/runs/{id}/laps`）时顺手把 Strava 上对应的活动改名，尽力而为，
+  结果在响应的 `strava` 字段里；`GET /api/runs/{id}/strava/open` 302 跳到
+  Strava 的活动页（是普通链接，这样 iOS 才会交给 Strava app 打开）。对应的活动
+  按开始时间找（±5 分钟，取最近的），因为 Garmin→Strava 的同步没有共同的 id。
+  - **政策约束（Strava API Policy，2026-06-01 生效）：** Strava 的数据不能进入
+    任何 AI 应用，缓存最多 7 天。所以从 Strava 读到的东西不落盘、不写日志、不给
+    教练；id 对应关系只放在进程内存里；标题用我们自己的数据生成。以后扩展时保持
+    这一条。
 - **Google Calendar** — `google_calendar.py`。OAuth 在
   `/oauth/google/start` → `/callback`。Scope 是 `calendar.events`
   （读+写；我们把 AI 排的训练写进用户日历）。增量授权用
