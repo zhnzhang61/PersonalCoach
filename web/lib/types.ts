@@ -403,6 +403,11 @@ export interface TelemetryRow {
   GroundContactBalanceLeft?: number | null; // % left foot, e.g. 49.3 → 49.3 / 50.7
   Power?: number | null; // watts
   AirTemperature?: number | null; // celsius — Garmin's wrist sensor (unreliable)
+  GapPace?: number | null; // min/mi, Garmin's grade-adjusted pace (outdoor only)
+  VerticalRatio?: number | null; // %
+  AvailableStamina?: number | null; // %
+  PotentialStamina?: number | null; // %
+  PerformanceCondition?: number | null; // Garmin's −20…+20 score
 }
 
 export interface MetricSummary {
@@ -420,7 +425,14 @@ export type TelemetrySummaryKey =
   | "Cadence"
   | "RespirationRate"
   | "GroundContactBalanceLeft"
-  | "Elevation";
+  | "Elevation"
+  | "GapPace"
+  | "Power"
+  | "GroundContactTime"
+  | "VerticalOscillation"
+  | "VerticalRatio"
+  | "AvailableStamina"
+  | "PerformanceCondition";
 
 export interface TelemetryResponse {
   raw: TelemetryRow[];
@@ -558,6 +570,12 @@ export interface RouteResponse {
     min_lon: number | null;
     max_lon: number | null;
   };
+  // Pace along the route, aligned with `polyline`. `progress` is the
+  // fraction of route length at each point (0 → 1). All three are null
+  // when the track has no usable timestamps.
+  progress?: number[] | null;
+  pace_min_mi?: (number | null)[] | null;
+  pace_scale?: { fast_min_mi: number; slow_min_mi: number } | null;
 }
 
 export interface TreadmillSplit {

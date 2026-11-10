@@ -127,7 +127,12 @@ fetching. Tailwind. iPhone-first layout.
 **Run detail page (`/activity/[id]`) — four blocks (#113, #125):**
 
 1. **Map** — outdoor only. Treadmill runs have no GPS, so there is no
-   block at all (rather than an empty placeholder).
+   block at all (rather than an empty placeholder). The route line is
+   coloured by pace (blue slow → yellow → red fast) with a small legend;
+   `get_run_route` returns `progress` / `pace_min_mi` / `pace_scale`
+   alongside the polyline, the scale being the run's own p10–p90 pace so
+   one stoplight or sprint does not stretch it. Tracks without timestamps
+   fall back to the single-colour line.
 2. **`RunSummaryBlock`** — the one shared module for both run types:
    headline **Distance / Avg pace / Time** → per-effort **chips** →
    per-lap **effort bars** (bar color = the labeled effort, HR on the
@@ -158,7 +163,11 @@ fetching. Tailwind. iPhone-first layout.
    squashed into the bottom quarter (terrain as attribution context —
    a HR bump sitting on a hill explains itself). Elevation has no tab
    anymore; the silhouette is its render. Tabs: HR / Pace / Cadence /
-   L/R / Resp / Stride. On treadmill runs the Pace tab carries a
+   L/R / Resp / Stride / GAP / Power / GCT / V.osc / V.ratio / Stamina /
+   Perf. — a tab only shows when the run has that metric (no GAP indoors,
+   no dynamics without a strap); any two can be overlaid on left/right
+   axes. Ground contact time and the two vertical metrics size their axis
+   to the p2–p98 band so a zero sample at a stop cannot flatten the line. On treadmill runs the Pace tab carries a
    standing caveat (watch pace ≈1 min/mi slow; shape informative,
    numbers not).
 
