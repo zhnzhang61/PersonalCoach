@@ -18,6 +18,7 @@ import type {
 } from "@/lib/types";
 import { AskAiButton } from "@/components/activity/ask-ai-button";
 import { EditRunForm } from "@/components/activity/edit-run-form";
+import { RunFullStats } from "@/components/activity/run-full-stats";
 import { TelemetryCharts } from "@/components/activity/telemetry-charts";
 import {
   RunVerdicts,
@@ -208,6 +209,10 @@ export default function ActivityDetailPage({
         {!isTreadmillRun(run) && <RunMap activityId={activityId} />}
         <RunSummaryBlock run={run} activityId={activityId} />
         <TelemetrySection run={run} activityId={activityId} />
+        {/* Block 4: the full record — lap table with every column, all
+            summary numbers, time in zones, best efforts. What used to
+            need a trip to Garmin Connect. */}
+        <RunFullStats activityId={activityId} />
       </div>
     </div>
   );

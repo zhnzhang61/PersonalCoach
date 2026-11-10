@@ -124,7 +124,7 @@ fetching. Tailwind. iPhone-first layout.
 | Coach | `/coach` | Session-based chat thread (streaming), action pills, day dividers, live tool-call chips while the agent works (hidden once the answer lands) |
 | Setup | `/setup` | Garmin sync (source shown; official API by default), Strava connect, training blocks; pull-to-refresh runs a 7-day sync (the twice-daily LaunchAgent runs the official sync with a 30-day window) |
 
-**Run detail page (`/activity/[id]`) — three blocks (#113):**
+**Run detail page (`/activity/[id]`) — four blocks (#113, #125):**
 
 1. **Map** — outdoor only. Treadmill runs have no GPS, so there is no
    block at all (rather than an empty placeholder).
@@ -168,6 +168,20 @@ fetching. Tailwind. iPhone-first layout.
    as subtitle. **Resp** offers a "曲线 | 关系" toggle; 关系 is the
    Resp×HR scatter (dot color = effort label) with the server's hinge
    fit and a dashed knee marker ≈ ventilatory threshold.
+
+4. **`RunFullStats`** — the full record, so details no longer need a
+   trip to Garmin Connect. One endpoint, `GET /api/runs/{id}/stats`
+   (`DataProcessor.get_run_full_stats`), returns four things, each in its
+   own foldable section: the **lap table** with every column (distance,
+   time, pace, GAP, HR avg/max, respiration, cadence, stride, ground
+   contact time and L/R balance, vertical oscillation/ratio, power,
+   elevation ±; columns with no data for the run are dropped, the table
+   scrolls sideways on a phone); **all stats** in groups (distance & time,
+   heart rate, training effect, running dynamics, power, elevation,
+   respiration, body, how it felt); **time in HR and power zones**; **best
+   efforts** inside the run. Every value arrives as number + unit +
+   display string — the component does no unit math. Treadmill runs flag
+   pace/distance as watch estimates and withhold best efforts.
 
 Effort labels have **one shared visual vocabulary** in
 `lib/effort-colors.ts` (warm scale, light→dark with intensity, matching
