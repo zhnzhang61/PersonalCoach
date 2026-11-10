@@ -2489,6 +2489,11 @@ class DataProcessor:
             "treadmill": treadmill,
             "groups": out_groups,
             "laps": lap_rows,
+            # Indoors the per-lap distance and pace are the watch's guess
+            # too, same as the summary; say so wherever the table is shown.
+            "lap_caveat": ("Indoor run: lap distance and pace are watch estimates, "
+                           "not measurements. Time, heart rate and cadence are real."
+                           if treadmill else None),
             "hr_zones": zones("hrTimeInZone", "get_activity_hr_in_timezones", "bpm"),
             "power_zones": zones("powerTimeInZone", "get_activity_power_in_timezones", "W"),
             "best_efforts": best,

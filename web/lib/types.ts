@@ -156,6 +156,7 @@ export interface RunFullStats {
   treadmill: boolean;
   groups: RunStatGroup[];
   laps: RunLapStatRow[];
+  lap_caveat: string | null; // set indoors: lap distance/pace are estimates
   hr_zones: RunZoneRow[];
   power_zones: RunZoneRow[];
   best_efforts: RunBestEffort[];
