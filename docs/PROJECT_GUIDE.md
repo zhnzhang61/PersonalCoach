@@ -334,11 +334,21 @@ First real result: user's outdoor VT ≈ 154 bpm (+1.9 br/min per
 Two external auth flows; **the app never handles passwords** — the user
 signs in directly, the app stores the resulting tokens.
 
-- **Garmin** — `backend/garmin_ticket_login.py` exchanges a manually-
-  obtained Service Ticket for a long-lived garth OAuth2 token (the
-  "429 workaround", see setup below). `backend/garmin_sync.py` then
-  uses it to pull activities + daily health, spawned via
-  `python -m backend.garmin_sync` from `POST /api/sync/garmin`.
+- **Garmin (official, default when configured)** — Garmin's Personal
+  API. A long-lived key (`GARMIN_PERSONAL_API_KEY` in `.env`, created at
+  connect.garmin.com → Settings → Personal API Key, valid up to a year)
+  is exchanged for a 24-hour bearer token on each run; nothing to refresh
+  by hand, so it can run unattended. `backend/garmin_official_sync.py`
+  pulls it, spawned via `python -m backend.garmin_official_sync` from
+  `POST /api/sync/garmin` (`source=auto|official|legacy`; "auto" =
+  official when the key is set). See *Official sync* below.
+- **Garmin (legacy, kept for comparison)** — `backend/garmin_ticket_login.py`
+  exchanges a manually-obtained Service Ticket for a long-lived garth
+  OAuth2 token (the "429 workaround", see setup below).
+  `backend/garmin_sync.py` then uses it to pull activities + daily
+  health via `python -m backend.garmin_sync`. Reachable from Setup as
+  "Run legacy sync instead"; still the only source for training
+  status / readiness, race predictions and gear.
 - **Google Calendar** — `google_calendar.py`. OAuth flow at
   `/oauth/google/start` → `/callback`. Scope is `calendar.events`
   (read+write; we write AI-planned workouts to the user's calendar).
@@ -1137,6 +1147,42 @@ Backend is now a `backend/` package (was a flat top-level dump);
 
 ---
 
+#### Official sync — what it writes
+
+The Personal API exposes fewer endpoints than the Connect website, so
+`garmin_official_sync.py` rebuilds the **same files the legacy sync
+wrote**; `data_processor.py` and the web app are unchanged. Every dict
+it writes carries `"_source": "garmin_personal_api"`.
+
+| Legacy file | Official source |
+|---|---|
+| `get_activities/{id}_summary.json`, `get_activity/{id}.json` | activity search / activity endpoint, stored as returned (field-identical) |
+| `get_activity_splits`, `get_activity_details`, `get_activity_hr_in_timezones` | the activity's **FIT file** (`data/fit/{id}.fit`, downloaded once) converted by `backend/fit_convert.py` |
+| `get_stats_and_body/{date}.json` | `usersummary/daily`, as returned |
+| `get_rhr_day`, `get_stress_data`, `get_respiration_data`, `get_intensity_minutes_data` | derived from that daily summary (daily values only — no intraday curves) |
+| `get_sleep_data/{date}.json` | daily sleep, wrapped as `dailySleepDTO` + overnight HRV + resting HR |
+| `get_hrv_data`, `get_fitnessage_data` | as returned |
+
+`fit_convert.py` is the only place that knows FIT. Per-lap and per-second
+values were matched against legacy files value-for-value on real runs
+(tools + report under `data/ai-tool/garmin-official-parity/`). Several
+Garmin fields have no name in the public FIT profile and are read by
+field number: grade-adjusted speed (record #140, lap #161), stamina
+(#137 potential, #138 available), performance condition (#90), body
+battery (#143). Details are written at full 1 Hz resolution (the legacy
+endpoint down-sampled to ~2000 rows).
+
+Not available officially: training status / readiness, race predictions,
+gear, the sleep-stage timeline, body-battery change during sleep, intraday
+stress and respiration curves. Activity weather was never Garmin-only —
+`get_run_weather` fetches Open-Meteo by start point and hour.
+
+Refresh policy: activity summaries in the window are always rewritten;
+a FIT is fetched once (it never changes); a day is re-fetched if it is
+within 2 days of today or its sleep / HRV / summary is missing or a stub.
+
+---
+
 ## 5. Appendix
 
 ### Storage tour
@@ -1149,6 +1195,9 @@ data/
 │                         #      pending_clarifications
 ├── get_activities/       # Garmin raw JSON dumps
 ├── get_activity_details/ # per-activity detail (telemetry source)
+├── fit/                  # original FIT files (official sync), one per activity
+├── ai-conversation/ ai-tool/ ai-chart/ ai-report/
+│                         # Claude's working archive (see data/README.md)
 ├── derived/              # processed CSVs incl. daily_health_metrics.csv
 ├── manual_inputs/        # daily_checkins.json · planned_workouts.json ·
 │                         # user_zones.json · run_*_meta.json

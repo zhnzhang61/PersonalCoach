@@ -26,11 +26,18 @@ export function SyncSection() {
     refetchInterval: 30_000,
   });
 
+  // "auto" lets the server pick: the official Personal API when its key
+  // is configured, else the legacy web-SSO sync. The legacy sync stays
+  // reachable from a secondary button while the two are being compared.
   const sync = useMutation({
     mutationKey: GARMIN_SYNC_MUTATION_KEY,
-    mutationFn: () => apiPost<SyncResult>("/api/sync/garmin"),
+    mutationFn: (source: "auto" | "legacy" = "auto") =>
+      apiPost<SyncResult>(
+        source === "legacy" ? "/api/sync/garmin?source=legacy" : "/api/sync/garmin",
+      ),
     onSettled: () => qc.invalidateQueries({ queryKey: ["sync", "garmin", "status"] }),
   });
+  const officialIsDefault = status.data?.default_source === "official";
   // Counts every mutation under the shared key — this button's own AND
   // the pull-to-refresh gesture's — so the two triggers can't stack a
   // second sync subprocess on top of a running one.
@@ -74,7 +81,7 @@ export function SyncSection() {
             <Button
               type="button"
               size="lg"
-              onClick={() => sync.mutate()}
+              onClick={() => sync.mutate("auto")}
               disabled={syncInFlight}
               className="shrink-0"
             >
@@ -86,9 +93,43 @@ export function SyncSection() {
             </Button>
           </div>
 
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              Source:{" "}
+              {officialIsDefault
+                ? "Garmin official API (key)"
+                : "Garmin Connect login (legacy)"}
+              {status.data?.source && status.data.source !== status.data.default_source
+                ? ` · last run used ${status.data.source}`
+                : ""}
+            </span>
+            {officialIsDefault && (
+              <button
+                type="button"
+                className="underline underline-offset-2 disabled:opacity-50"
+                onClick={() => sync.mutate("legacy")}
+                disabled={syncInFlight}
+              >
+                Run legacy sync instead
+              </button>
+            )}
+          </div>
+
           {sync.data?.ok && (
             <p className="text-sm text-emerald-700 dark:text-emerald-400">
-              Sync complete.
+              Sync complete{sync.data.source ? ` (${sync.data.source})` : ""}.
+            </p>
+          )}
+          {sync.data?.reason === "no_api_key" && (
+            <p className="text-sm text-rose-700 dark:text-rose-400">
+              No Garmin API key: add GARMIN_PERSONAL_API_KEY to .env.
+            </p>
+          )}
+          {sync.data?.reason === "api_key_rejected" && (
+            <p className="text-sm text-rose-700 dark:text-rose-400">
+              Garmin rejected the API key (expired or deleted). Create a new
+              one at connect.garmin.com → Settings → Personal API Key and
+              update .env.
             </p>
           )}
           {sync.data?.reason === "error" && (

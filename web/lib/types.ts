@@ -67,15 +67,27 @@ export interface HealthSnapshot {
   };
 }
 
+export type GarminSyncSource = "official" | "legacy";
+
 export interface SyncStatus {
   last_sync: string | null;
   last_attempt: string | null;
   outcome: "ok" | "token_expired" | "error" | null;
+  // Which Garmin backend ran last, and which one "Sync now" uses next.
+  source?: GarminSyncSource | null;
+  default_source?: GarminSyncSource;
 }
 
 export interface SyncResult {
   ok: boolean;
-  reason: "token_expired" | "error" | null;
+  reason:
+    | "token_expired"
+    | "error"
+    | "already_running"
+    | "no_api_key"
+    | "api_key_rejected"
+    | null;
+  source?: GarminSyncSource;
   returncode?: number;
   stderr?: string;
 }

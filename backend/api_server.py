@@ -246,7 +246,7 @@ def _read_sync_state() -> dict[str, Any]:
         return {}
 
 
-def _write_sync_state(outcome: str, detail: str = "") -> None:
+def _write_sync_state(outcome: str, detail: str = "", source: str | None = None) -> None:
     SYNC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     SYNC_STATE_PATH.write_text(
         json.dumps(
@@ -256,9 +256,22 @@ def _write_sync_state(outcome: str, detail: str = "") -> None:
                 ).isoformat(),
                 "outcome": outcome,
                 "detail": detail[:500],
+                "source": source,
             }
         )
     )
+
+
+def _resolve_sync_source(requested: str) -> str:
+    """"auto" means the official Personal API when its key is configured,
+    else the legacy web-SSO sync. .env is re-read so a key added after the
+    server started is picked up without a restart."""
+    if requested in ("official", "legacy"):
+        return requested
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    return "official" if os.getenv("GARMIN_PERSONAL_API_KEY") else "legacy"
 
 
 @app.get("/api/sync/garmin/status")
@@ -273,6 +286,10 @@ def sync_garmin_status() -> dict[str, Any]:
         ),
         "last_attempt": state.get("last_attempt"),
         "outcome": state.get("outcome"),
+        # Which sync produced the last attempt, and which one "Sync now"
+        # will use next.
+        "source": state.get("source"),
+        "default_source": _resolve_sync_source("auto"),
     }
 
 
@@ -285,34 +302,58 @@ _GARMIN_SYNC_LOCK = threading.Lock()
 
 
 @app.post("/api/sync/garmin")
-def sync_garmin(days_back: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
+def sync_garmin(
+    days_back: int = Query(default=7, ge=1, le=90),
+    source: str = Query(default="auto", pattern="^(auto|official|legacy)$"),
+) -> dict[str, Any]:
     """Interactive sync (Setup button / pull-to-refresh) defaults to a
-    7-day window for speed. The nightly LaunchAgent runs the module with
-    no flag and keeps the 30-day self-healing window."""
+    7-day window for speed. `source` picks the Garmin backend: "official"
+    (Personal API, key-based), "legacy" (web SSO token), or "auto"."""
     if not _GARMIN_SYNC_LOCK.acquire(blocking=False):
         # A sync is already in flight; its completion updates the status
         # the UI polls. Don't stack a second subprocess.
         return {"ok": False, "reason": "already_running"}
     try:
-        return _run_garmin_sync(days_back)
+        return _run_garmin_sync(days_back, _resolve_sync_source(source))
     finally:
         _GARMIN_SYNC_LOCK.release()
 
 
-def _run_garmin_sync(days_back: int) -> dict[str, Any]:
-    cmd = [
-        sys.executable, "-m", "backend.garmin_sync", "--no-fallback",
-        "--days-back", str(days_back),
-    ]
+def _run_garmin_sync(days_back: int, source: str = "legacy") -> dict[str, Any]:
+    if source == "official":
+        cmd = [
+            sys.executable, "-m", "backend.garmin_official_sync",
+            "--days-back", str(days_back),
+        ]
+    else:
+        cmd = [
+            sys.executable, "-m", "backend.garmin_sync", "--no-fallback",
+            "--days-back", str(days_back),
+        ]
     # /dev/null on stdin so any prompt-based fallback can't hang the request.
     result = subprocess.run(
         cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
     )
-    if result.returncode == 2 or "TOKEN_EXPIRED" in (result.stderr or ""):
-        _write_sync_state("token_expired", result.stderr or "")
+    if source == "official" and result.returncode in (3, 4):
+        # 3 = no key in .env, 4 = Garmin refused the key (expired/deleted).
+        # Both need the user to create a key; neither is the legacy
+        # token-refresh flow, so they get their own reason.
+        reason = "no_api_key" if result.returncode == 3 else "api_key_rejected"
+        _write_sync_state("error", result.stderr or reason, source)
+        return {
+            "ok": False,
+            "reason": reason,
+            "source": source,
+            "stderr": result.stderr[-2000:],
+        }
+    if source == "legacy" and (
+        result.returncode == 2 or "TOKEN_EXPIRED" in (result.stderr or "")
+    ):
+        _write_sync_state("token_expired", result.stderr or "", source)
         return {
             "ok": False,
             "reason": "token_expired",
+            "source": source,
             "stdout": result.stdout[-2000:],
             "stderr": result.stderr[-2000:],
         }
@@ -326,19 +367,21 @@ def _run_garmin_sync(days_back: int) -> dict[str, Any]:
             processor.compile_health_ledger(days_back=120)
         except Exception as exc:
             detail = f"Garmin pull OK, but ledger rebuild failed: {exc}"
-            _write_sync_state("error", detail)
+            _write_sync_state("error", detail, source)
             return {
                 "ok": False,
                 "reason": "error",
+                "source": source,
                 "stdout": result.stdout[-2000:],
                 "stderr": detail,
             }
-        _write_sync_state("ok")
-        return {"ok": True, "reason": None, "stdout": result.stdout[-4000:]}
-    _write_sync_state("error", (result.stderr or result.stdout)[-500:])
+        _write_sync_state("ok", source=source)
+        return {"ok": True, "reason": None, "source": source, "stdout": result.stdout[-4000:]}
+    _write_sync_state("error", (result.stderr or result.stdout)[-500:], source)
     return {
         "ok": False,
         "reason": "error",
+        "source": source,
         "returncode": result.returncode,
         "stdout": result.stdout[-4000:],
         "stderr": result.stderr[-4000:],
